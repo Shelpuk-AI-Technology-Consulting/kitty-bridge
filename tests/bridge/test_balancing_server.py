@@ -1055,9 +1055,37 @@ class TestBalancingAllCustomTransport:
     # cross_class_exhaustion terminal event instead of looping.
 
     async def _fake_hello_stream(self, req, write):
-        """Emit a Responses-API SSE carrying the text ``hello`` — the content oracle."""
+        """Emit a Responses-API SSE carrying the text ``hello`` — the content oracle.
+
+        The Responses and Gemini custom-transport branches pipe provider
+        bytes through their own wire translators, which read Responses-SSE
+        — the shape this stub emits. The Chat Completions branch instead
+        parse-and-synthesises (``parse_stream_to_cc_response`` dispatch,
+        KBR-287) and needs :meth:`_fake_hello_cc_stream`.
+        """
         await write(b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n')
         await write(b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n')
+        await write(b"data: [DONE]\n\n")
+
+    async def _fake_hello_cc_stream(self, req, write):
+        """Emit a CC-SSE stream carrying the text ``hello`` — the content oracle.
+
+        Shaped as what ``BedrockAdapter.stream_request`` actually writes via
+        ``_translate_stream_event``/``_make_sse_chunk``: Chat Completions
+        SSE chunks, which ``BedrockAdapter.parse_stream_to_cc_response``
+        (KBR-287 review round 1) parses into the response the branch's
+        judge-first hold judges.
+        """
+        chunk = {
+            "id": "resp_test",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "",
+            "choices": [],
+        }
+        for delta, finish in (({"role": "assistant"}, None), ({"content": "hello"}, None), ({}, "stop")):
+            chunk["choices"] = [{"index": 0, "delta": delta, "finish_reason": finish}]
+            await write(f"data: {json.dumps(chunk)}\n\n".encode())
         await write(b"data: [DONE]\n\n")
 
     def _sibling_pool(self, stream_side_effect):
@@ -1188,7 +1216,7 @@ class TestBalancingAllCustomTransport:
     @pytest.mark.asyncio
     async def test_chat_completions_stream_cross_class_dispatch(self):
         """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/chat/completions)."""
-        backends, server, stream_provider = self._sibling_pool(self._fake_hello_stream)
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_cc_stream)
         draw = iter(chain([0], repeat(1)))
 
         def _deterministic_draw(self=server, *, require_streaming: bool = False):
