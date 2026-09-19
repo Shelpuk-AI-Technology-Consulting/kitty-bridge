@@ -398,16 +398,18 @@ def test_every_only_mutate_entry_has_a_registry_row() -> None:
             )
 
 
-# ── server.py pragma scheme (KBR-266) ───────────────────────────────────
+# ── server.py pragma scheme (KBR-266; generalised by KBR-285) ────────────
 #
 # ``server.py`` is in ``only_mutate`` only because every def/class in it
-# except the seven §6.1 ``compaction_and_pairing`` methods carries
-# ``# pragma: no mutate block`` (mutmut generates per *file*; unscoped
-# generation of this ~9k-line file hit 354 MB and did not finish in 25
-# minutes — see MUTATION_BASELINE.md's deferred-groups history). The
-# scheme has two silent failure modes this guard pins:
+# except the registry-named targets carries ``# pragma: no mutate block``
+# (mutmut generates per *file*; unscoped generation of this ~9k-line file
+# hit 354 MB and did not finish in 25 minutes — see MUTATION_BASELINE.md's
+# deferred-groups history). The registry-named set is the seven §6.1
+# ``compaction_and_pairing`` methods plus KBR-285's two content predicates
+# (``_cc_chunk_carries_content`` and ``BridgeServer._is_empty_cc_response``).
+# The scheme has two silent failure modes this guard pins:
 #
-# * a pragma landing on one of the seven shrinks the I1 core's measured
+# * a pragma landing on a registry-named target shrinks the measured
 #   surface without any test noticing (the run just reports fewer
 #   mutants), and
 # * a pragma missing from a new def/class re-opens whole-file generation
@@ -515,45 +517,49 @@ def _block_level_defs(source: str) -> set[str]:
     return names
 
 
-def test_server_py_pragma_scheme_marks_everything_but_the_seven() -> None:
-    """The seven §6.1 methods are the only unmarked defs/classes in server.py.
+def test_server_py_pragma_scheme_marks_everything_but_the_registered() -> None:
+    """The registry-named targets are the only unmarked defs/classes in server.py.
 
     Every other def/class must carry ``# pragma: no mutate block`` (the
-    whole-file generation blow-up), and none of the seven may carry one
-    (each suppressed method silently drops out of the measured I1 core).
-    BridgeServer's methods are checked individually — the class itself is
-    never marked, since a class-level pragma would suppress the seven.
+    whole-file generation blow-up), and none of the registry-named targets
+    may carry one (each suppressed target silently drops out of the measured
+    surface). The expected set is derived from every registry row naming
+    ``kitty.bridge.server`` with a concrete function/method — today the seven
+    ``compaction_and_pairing`` methods plus KBR-285's two content
+    predicates — so adding a scoped row here is what un-marks its def, not a
+    guard edit. BridgeServer's methods are checked individually — the class
+    itself is never marked, since a class-level pragma would suppress every
+    child.
     """
     source = _server_source()
     marked = _pragma_marked_defs(source)
     block_level = _block_level_defs(source)
-    compaction = {
-        name
-        for t in TARGET_GROUPS["compaction_and_pairing"]
-        for name in [t.function_or_method]
-        if name is not None
+    registered = {
+        t.function_or_method
+        for _group, t in all_targets()
+        if t.module == "kitty.bridge.server" and t.function_or_method is not None
     }
     # BridgeServer itself is the carrier — a class-level pragma would
-    # suppress every child including the seven (a block pragma on the
-    # class body's header marks the whole class body). Pin the
+    # suppress every child including the registered targets (a block pragma
+    # on the class body's header marks the whole class body). Pin the
     # docstring's claim: the carrier must be present and never marked.
     assert "BridgeServer" in block_level, (
         "BridgeServer class missing from server.py — the registry's "
-        "compaction_and_pairing rows point at it; the file has changed "
+        "server.py rows point at it; the file has changed "
         "shape and the registry must be re-derived"
     )
     assert "BridgeServer" not in marked, (
         "BridgeServer carries a class-level `# pragma: no mutate block` "
         "— the pragma suppresses the whole class body including the "
-        "seven compaction_and_pairing methods, which then generate zero "
+        "registered methods, which then generate zero "
         "mutants and the measured I1 core silently vanishes"
     )
     unmarked = (block_level - marked) - {"BridgeServer"}
-    assert unmarked == compaction, (
+    assert unmarked == registered, (
         f"server.py's unmarked block-level defs/classes {sorted(unmarked)} "
-        f"must equal the compaction_and_pairing registry rows "
-        f"{sorted(compaction)} — a stray pragma shrinks the measured I1 "
-        f"core, a missing pragma re-opens whole-file mutant generation"
+        f"must equal the registry rows naming kitty.bridge.server "
+        f"{sorted(registered)} — a stray pragma shrinks the measured "
+        f"surface, a missing pragma re-opens whole-file mutant generation"
     )
 
 

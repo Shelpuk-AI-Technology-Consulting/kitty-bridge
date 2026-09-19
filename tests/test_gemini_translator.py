@@ -774,6 +774,175 @@ class TestReset:
         assert data["candidates"][0]["content"]["parts"][0]["text"] == "New"
 
 
+class TestKBR285WidenedShapes:
+    """KBR-285 — refusal / list ``content`` / legacy ``function_call`` on /v1beta."""
+
+    # ── translate_response ──────────────────────────────────────────────
+
+    def test_refusal_only_response_becomes_the_refusal_text(self):
+        """Refusal-only CC reply renders the refusal text as a text part."""
+        t = GeminiTranslator()
+        result = t.translate_response(
+            {
+                "id": "chatcmpl-refusal",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"content": None, "refusal": "I can't help with that."},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        parts = result["candidates"][0]["content"]["parts"]
+        assert any(p.get("text") == "I can't help with that." for p in parts)
+
+    def test_list_content_response_joins_text_parts(self):
+        """List ``content`` joins to one text part — no raw list on the wire."""
+        t = GeminiTranslator()
+        result = t.translate_response(
+            {
+                "id": "chatcmpl-mm",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "here is the chart"},
+                                {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                            ]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        parts = result["candidates"][0]["content"]["parts"]
+        texts = [p["text"] for p in parts if "text" in p and "thought" not in p]
+        assert texts == ["here is the chart"]
+        assert all(isinstance(text, str) for text in texts)
+
+    def test_legacy_function_call_response_becomes_one_function_call_part(self):
+        """Legacy dict ``function_call`` becomes one functionCall part."""
+        t = GeminiTranslator()
+        result = t.translate_response(
+            {
+                "id": "chatcmpl-legacy",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": None,
+                            "function_call": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "London"}',
+                            },
+                        },
+                        "finish_reason": "function_call",
+                    }
+                ],
+            }
+        )
+        parts = result["candidates"][0]["content"]["parts"]
+        fc_parts = [p["functionCall"] for p in parts if "functionCall" in p]
+        assert len(fc_parts) == 1
+        assert fc_parts[0]["name"] == "get_weather"
+        assert fc_parts[0]["args"] == {"city": "London"}
+
+    # ── translate_stream_chunk ──────────────────────────────────────────
+
+    def test_refusal_delta_emits_the_refusal_text(self):
+        """Refusal-only delta streams the refusal text on the wire."""
+        t = GeminiTranslator()
+        chunk = {
+            "choices": [
+                {
+                    "delta": {"content": None, "refusal": "I can't help with that."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events = t.translate_stream_chunk(chunk)
+        assert len(events) == 1
+        data = json.loads(events[0].removeprefix("data: ").removesuffix("\n\n"))
+        assert data["candidates"][0]["content"]["parts"][0]["text"] == "I can't help with that."
+
+    def test_list_content_delta_emits_joined_text(self):
+        """List ``content`` joins to a single text part on the wire."""
+        t = GeminiTranslator()
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": [
+                            {"type": "text", "text": "here is the chart"},
+                            {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events = t.translate_stream_chunk(chunk)
+        assert len(events) == 1
+        data = json.loads(events[0].removeprefix("data: ").removesuffix("\n\n"))
+        part_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        assert part_text == "here is the chart"
+        assert isinstance(part_text, str)
+
+    def test_legacy_function_call_stream_accumulates_one_call(self):
+        """Legacy dict ``function_call`` deltas buffer one functionCall part, args accumulate."""
+        t = GeminiTranslator()
+        open_chunk = {
+            "choices": [
+                {
+                    "delta": {"function_call": {"name": "get_weather", "arguments": '{"city": '}},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        arg_chunk = {
+            "choices": [
+                {
+                    "delta": {"function_call": {"arguments": '"London"}'}},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        finish_chunk = {
+            "choices": [{"delta": {}, "finish_reason": "function_call"}],
+        }
+        assert t.translate_stream_chunk(open_chunk) == []
+        assert t.translate_stream_chunk(arg_chunk) == []
+        events = t.translate_stream_chunk(finish_chunk)
+        # First event is the functionCall part (buffered, emitted at finish).
+        data = json.loads(events[0].removeprefix("data: ").removesuffix("\n\n"))
+        fc = data["candidates"][0]["content"]["parts"][0]["functionCall"]
+        assert fc["name"] == "get_weather"
+        assert fc["args"] == {"city": "London"}
+
+    def test_refusal_only_stream_judges_non_empty(self):
+        """Refusal-only stream reaches the finish with ``response_was_empty`` False."""
+        t = GeminiTranslator()
+        refusal = {
+            "choices": [
+                {
+                    "delta": {"content": None, "refusal": "I can't help with that."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        finish = {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+        }
+        t.translate_stream_chunk(refusal)
+        t.translate_stream_chunk(finish)
+        assert t.response_was_empty is False
+
+
 class TestGeminiToolChoice:
     """KBR-221: ``toolConfig.functionCallingConfig`` survives the Gemini -> CC hop.
 

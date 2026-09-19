@@ -335,7 +335,11 @@ forbidden_modules = [
 # `scripts/aggregate_mutation_baseline.py` by filesystem path at module
 # level (added in KBR-88 review round 7, after the recorded b680edd run;
 # every mutmut run on main needs this copy or test collection fails
-# before the clean run starts). The whole directory is copied, not the
+# before the clean run starts). `openapi` is the third: the L2 schemathesis
+# conformance test (KBR-82) loads `openapi/kitty-bridge.yaml` at module
+# import, which happens at collection even under `-m l1`, so every mutmut
+# run needs the copy since that file landed (after the KBR-266 run). The
+# whole directory is copied, not the
 # single file, because mutmut 3.8.0's file branch (`shutil.copy2`) does
 # not create the destination's parent directory and dies on a fresh
 # `mutants/` tree; the directory branch (`copytree(dirs_exist_ok=True)`)
@@ -356,12 +360,15 @@ only_mutate = [
     "src/kitty/bridge/gemini/*",
     "src/kitty/bridge/engine.py",
     "src/kitty/bridge/tool_audit.py",
-    # ``server.py`` carries the seven section-6.1 ``compaction_and_pairing``
-    # methods; every other def/class in it is suppressed by
-    # ``# pragma: no mutate block`` (mutmut's block pragma) so generation
-    # stays fast and the scope narrows to those seven methods. The guard
-    # ``tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven``
-    # pins the marker scheme against drift.
+    # ``server.py`` carries the section-6.1 registry-named targets — the
+    # seven ``compaction_and_pairing`` methods plus KBR-285's two content
+    # predicates (``_cc_chunk_carries_content`` and
+    # ``BridgeServer._is_empty_cc_response``); every other def/class in it
+    # is suppressed by ``# pragma: no mutate block`` (mutmut's block pragma)
+    # so generation stays fast and the scope narrows to the registered
+    # targets. The guard
+    # ``tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_registered``
+    # (KBR-266, generalised by KBR-285) pins the marker scheme against drift.
     "src/kitty/bridge/server.py",
     # Every adapter file carrying one of the three provider hooks
     # (translate_to_upstream / normalize_request / build_upstream_headers)
@@ -397,4 +404,4 @@ only_mutate = [
     "src/kitty/profiles/*",
     "src/kitty/validation.py",
 ]
-also_copy = ["README.md", "scripts"]
+also_copy = ["README.md", "scripts", "openapi"]

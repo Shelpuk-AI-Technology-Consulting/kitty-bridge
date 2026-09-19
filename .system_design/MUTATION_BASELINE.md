@@ -94,7 +94,10 @@ natural home for that.
 out of `DEFERRED_GROUPS` by landing `# pragma: no mutate block` markers
 on every def/class in `server.py` except the seven `BridgeServer`
 methods the group names (pinned by
-`tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven`).
+`tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_registered`,
+generalised by [KBR-285](https://shelpuk.atlassian.net/browse/KBR-285)
+to derive the expected set from every registry row naming
+`kitty.bridge.server`).
 `server.py` rejoined `only_mutate`, and mutmut generates mutants for
 those methods: **648 mutants in scope, generated in 63 seconds**
 (previously the whole file mutated to 354 MB / 5.7 M lines and the
@@ -180,7 +183,7 @@ reference after that point is the outcome to avoid.
   `# pragma: no mutate block` markers on `server.py` (KBR-266) are the
   only suppression mechanism in scope. Either mechanism silently
   shrinks a group's measured surface: the marker scheme is pinned by
-  `tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven`,
+  `tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_registered`,
   but `do_not_mutate_patterns` changes have no guard — the per-group
   TOTAL against the previous run is the only thing that would notice.
 - `mutate_only_covered_lines` is **not** enabled — known crash class on

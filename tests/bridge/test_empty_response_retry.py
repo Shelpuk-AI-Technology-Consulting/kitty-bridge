@@ -380,6 +380,160 @@ class TestEmptyResponseDetection:
             is True
         )
 
+    # KBR-285: the Chat Completions arm reads `refusal`, `function_call` and
+    # list-typed `content` the same way the streaming predicate does — the
+    # two paths must agree on what a refusal-only / function-call-only /
+    # multimodal-list reply is.
+
+    def test_refusal_only_is_not_empty(self):
+        """KBR-285 — a reply whose only content is ``refusal`` is not empty."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [
+                        {"message": {"content": None, "refusal": "I can't help with that."}}
+                    ],
+                }
+            )
+            is False
+        )
+
+    def test_empty_refusal_string_is_empty(self):
+        """An empty ``refusal`` string is not content (mirrors streaming ``!= ""``)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "refusal": ""}}],
+                }
+            )
+            is True
+        )
+
+    def test_non_string_refusal_is_empty(self):
+        """A non-string ``refusal`` value carries no content (mirrors streaming ``isinstance(..., str)``)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "refusal": 42}}],
+                }
+            )
+            is True
+        )
+
+    def test_function_call_only_is_not_empty(self):
+        """KBR-285 — a reply whose only content is a legacy dict ``function_call`` is not empty."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "function_call": {"name": "read_file", "arguments": '{"path": "a"}'},
+                            }
+                        }
+                    ],
+                }
+            )
+            is False
+        )
+
+    def test_empty_function_call_dict_is_empty(self):
+        """An empty ``function_call`` dict carries no name/arguments (truthy-dict convention)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "function_call": {}}}],
+                }
+            )
+            is True
+        )
+
+    def test_non_dict_function_call_is_empty(self):
+        """A non-dict ``function_call`` value carries no content."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None, "function_call": "read_file"}}],
+                }
+            )
+            is True
+        )
+
+    def test_multimodal_list_content_only_is_not_empty(self):
+        """KBR-285 — a reply whose only content is a list of content parts is not empty."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "here is the chart"},
+                                    {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                                ]
+                            }
+                        }
+                    ],
+                }
+            )
+            is False
+        )
+
+    def test_empty_multimodal_list_content_is_empty(self):
+        """An empty ``content`` list carries no parts (truthy-list convention)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": []}}],
+                }
+            )
+            is True
+        )
+
+    def test_missing_new_shape_keys_is_empty(self):
+        """A reply with no refusal / function_call / list content keys stays empty (no regression)."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "choices": [{"message": {"content": None}}],
+                }
+            )
+            is True
+        )
+
+    # KBR-285 finding-2 (reviewer): the Messages arm joins the mutation-
+    # measured surface alongside the CC arm; ``redacted_thinking`` was the
+    # predictable survivor (no test names it). Pin the degenerate form so
+    # removing ``redacted_thinking`` from the set is a killed mutant.
+
+    def test_redacted_thinking_only_is_empty(self):
+        """A Messages-shaped reply whose only block is ``redacted_thinking`` is empty."""
+        server = _make_server(1)
+        assert (
+            server._is_empty_cc_response(
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "redacted_thinking",
+                            "data": "EuYBCkQYAiJAgCs1m7CE+w==",
+                        }
+                    ],
+                }
+            )
+            is True
+        )
+
 
 class TestEmptyResponseNonBalancing:
     """Retry logic for single-profile setup (no balancing)."""
@@ -455,6 +609,82 @@ class TestEmptyResponseNonBalancing:
                 assert resp.status == 200
                 body = await resp.json()
                 assert body["choices"][0]["message"]["reasoning_content"] == "thinking hard"
+            # One registered response consumed by exactly one upstream call —
+            # a retry would have hit an unregistered request and raised.
+            assert list(m.requests.values())[0] and len(list(m.requests.values())[0]) == 1
+
+        await server.stop_async()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("message", "probe"),
+        [
+            pytest.param(
+                {"role": "assistant", "content": None, "refusal": "I can't help with that."},
+                lambda body: body["choices"][0]["message"]["refusal"] == "I can't help with that.",
+                id="refusal_only",
+            ),
+            pytest.param(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "function_call": {"name": "read_file", "arguments": '{"path": "a"}'},
+                },
+                lambda body: body["choices"][0]["message"]["function_call"]["name"] == "read_file",
+                id="legacy_function_call",
+            ),
+            pytest.param(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "here is the chart"},
+                        {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                    ],
+                },
+                lambda body: body["choices"][0]["message"]["content"][0]["text"] == "here is the chart",
+                id="multimodal_list_content",
+            ),
+        ],
+    )
+    async def test_non_streaming_new_shape_reply_succeeds_first_attempt(self, message, probe, monkeypatch):
+        """KBR-285 — non-streaming mirror of the streaming hold-release tests.
+
+        A Chat Completions POST whose only content is ``refusal``, a legacy
+        dict ``function_call``, or a list of multimodal parts returns the
+        model reply on the first attempt — the detector counts the shape, so
+        the ladder does not retry it. Pre-fix each shape was judged empty and
+        burned the retry schedule.
+
+        Args:
+            message: The ``choices[0].message`` the upstream returns.
+            probe: Asserts the shape's payload reached the client body.
+            monkeypatch: Pytest fixture, collapses the retry backoff.
+        """
+        monkeypatch.setattr(_server_module, "_EMPTY_RETRY_DELAYS", [0.0, 0.0])
+        monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
+
+        server = _make_server(1)
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        }
+        reply = {
+            "id": "chatcmpl-kbr285",
+            "model": "test-model",
+            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+        }
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post("https://api.example.com/v1/chat/completions", payload=reply)
+
+            async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+                assert probe(body)
             # One registered response consumed by exactly one upstream call —
             # a retry would have hit an unregistered request and raised.
             assert list(m.requests.values())[0] and len(list(m.requests.values())[0]) == 1

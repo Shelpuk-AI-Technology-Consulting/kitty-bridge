@@ -442,6 +442,122 @@ async def test_a_reasoning_only_raw_cc_prefix_releases_the_hold(provider_factory
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("provider_factory", "model"), _RAW_CC)
+async def test_a_refusal_only_raw_cc_stream_does_not_fire_the_empty_ladder(
+    provider_factory, model, monkeypatch
+):
+    """KBR-285 — a refusal-only completion carries content: one attempt, refusal on the wire.
+
+    OpenAI's moderation path answers with ``content: null`` and the refusal
+    string on ``delta.refusal`` — a normal provider shape. Pre-fix the
+    classifier judged the stream content-free, the hold kept it pre-emission,
+    and the ladder walked to the D4 terminal; after it the hold releases on
+    the refusal delta.
+
+    Args:
+        provider_factory: Builds a raw Chat Completions-wire adapter.
+        model: A model that adapter serves.
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    refusal = _render_cc_sse(
+        [
+            _cc_chunk({"role": "assistant", "content": None, "refusal": "I can't help with that."}),
+            _cc_chunk({}, finish="stop"),
+        ]
+    )
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        provider_factory, model, [(200, refusal), (200, _hello_stream())], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 1
+    events = _parse_data_lines(client_body)
+    deltas = [e["choices"][0]["delta"] for e in events if e.get("choices")]
+    assert "".join(d.get("refusal", "") for d in deltas) == "I can't help with that."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider_factory", "model"), _RAW_CC)
+async def test_a_legacy_function_call_raw_cc_stream_does_not_fire_the_empty_ladder(
+    provider_factory, model, monkeypatch
+):
+    """KBR-285 — a legacy dict ``function_call`` carries content: no retry.
+
+    Old Chat Completions carried a single dict ``function_call`` on the delta
+    instead of the ``tool_calls`` array; OpenAI's spec still documents the
+    shape (deprecated). The hold releases on the first call delta and the
+    streamed name/argument fragments reach the client whole.
+
+    Args:
+        provider_factory: Builds a raw Chat Completions-wire adapter.
+        model: A model that adapter serves.
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    call = _render_cc_sse(
+        [
+            _cc_chunk({"role": "assistant", "content": None}),
+            _cc_chunk({"function_call": {"name": "read_file", "arguments": '{"path": '}}),
+            _cc_chunk({"function_call": {"arguments": '"a"}'}}),
+            _cc_chunk({}, finish="function_call"),
+        ]
+    )
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        provider_factory, model, [(200, call), (200, _hello_stream())], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 1
+    events = _parse_data_lines(client_body)
+    deltas = [e["choices"][0]["delta"] for e in events if e.get("choices")]
+    calls_seen = [d["function_call"] for d in deltas if "function_call" in d]
+    assert calls_seen[0]["name"] == "read_file"
+    assert "".join(c["arguments"] for c in calls_seen) == '{"path": "a"}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider_factory", "model"), _RAW_CC)
+async def test_a_multimodal_list_content_raw_cc_stream_does_not_fire_the_empty_ladder(
+    provider_factory, model, monkeypatch
+):
+    """KBR-285 — list-typed multimodal ``content`` carries content: no retry.
+
+    Multimodal streaming on OpenAI-shaped backends carries ``delta.content``
+    as a list of content parts; the classifier's string check short-circuits
+    to False on it today, so the delta is held and the ladder fires. After
+    the widening a non-empty parts list releases the hold and reaches the
+    client verbatim (the raw path's translator is identity).
+
+    Args:
+        provider_factory: Builds a raw Chat Completions-wire adapter.
+        model: A model that adapter serves.
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    parts = [
+        {"type": "text", "text": "here is the chart"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/chart.png"}},
+    ]
+    multimodal = _render_cc_sse(
+        [
+            _cc_chunk({"role": "assistant", "content": None}),
+            _cc_chunk({"content": parts}),
+            _cc_chunk({}, finish="stop"),
+        ]
+    )
+
+    _server, status, client_body, calls, _bodies = await _stream(
+        provider_factory, model, [(200, multimodal), (200, _hello_stream())], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 1
+    events = _parse_data_lines(client_body)
+    deltas = [e["choices"][0]["delta"] for e in events if e.get("choices")]
+    assert [d["content"] for d in deltas if d.get("content")] == [parts]
+
+
+@pytest.mark.asyncio
 async def test_an_exhausted_raw_cc_empty_ladder_ends_in_the_d4_terminal(monkeypatch):
     """KBR-276 AC-4 — every attempt empty ends in the D4 error, not the empty stream.
 
