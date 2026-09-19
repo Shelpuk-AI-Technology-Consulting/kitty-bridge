@@ -586,6 +586,66 @@ class BedrockAdapter(ProviderAdapter):
 
         return chunks
 
+    def parse_stream_to_cc_response(self, raw: bytes) -> dict:
+        """Parse collected Chat Completions SSE chunks into a CC response.
+
+        :meth:`stream_request` writes the bytes this parser reads: the
+        ConverseStream events it translated through
+        :meth:`_translate_stream_event` are already Chat Completions SSE,
+        so re-parsing them here — instead of falling back to the
+        Responses-SSE parser, which cannot read CC chunks — is what lets
+        the bridge's custom-transport branch judge a Bedrock completion's
+        real content (KBR-287 review round 1: without this method the
+        parsed response was content-free for every Bedrock completion,
+        content-bearing or not, and the branch laddered it).
+
+        Args:
+            raw: The bytes :meth:`stream_request` wrote, in wire order.
+
+        Returns:
+            A Chat Completions response dict whose ``choices[0].message``
+            carries the streamed ``content`` and ``tool_calls``, and whose
+            ``finish_reason`` is the last one the wire carried (``stop``
+            when none did).
+        """
+        text_parts: list[str] = []
+        tool_calls: list[dict] = []
+        model = ""
+        finish_reason = "stop"
+
+        for line in raw.decode("utf-8", errors="replace").split("\n"):
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            model = chunk.get("model", model)
+            choice = (chunk.get("choices") or [{}])[0]
+            finish_reason = choice.get("finish_reason") or finish_reason
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                text_parts.append(delta["content"])
+            if delta.get("tool_calls"):
+                tool_calls.extend(delta["tool_calls"])
+
+        message: dict = {"role": "assistant", "content": "".join(text_parts) or None}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": 0,
+            "model": model,
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
     def _make_sse_chunk(
         self,
         response_id: str,
