@@ -504,11 +504,10 @@ class TestNameRequired:
     ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
     for a name is **not** lossless — a call nobody can name cannot be paired
     with its result or addressed by a register row. Chat Completions raises
-    :class:`~harness.contract.UnreadableBodyError` on a missing/non-string
-    name (``reader_chat_completions.py:464-467``); the reply reader mirrors
-    that. The request reader's ``_read_tool_calls`` is more lenient on this
-    point (a known contract violation; future-work flag in the requirements
-    doc).
+    :class:`~harness.contract.UnreadableBodyError` on an absent, empty, or
+    non-string name (KBR-281); the reply reader mirrors that, and the request
+    readers on both sides of the harness enforce the same non-empty-string
+    form.
     """
 
     @staticmethod

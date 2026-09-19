@@ -359,3 +359,113 @@ class TestFalsification:
         assert f"choices[0].message.{field}" in projected.residual
         with pytest.raises(c.ResidualFieldsError, match=field):
             c.verify_total(projected)
+
+
+class TestNameRequired:
+    """A tool_call whose ``function.name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers; KBR-281 aligns this reply direction's
+    ``tool_calls`` site on it. The legacy ``function_call`` site is pinned by
+    :class:`TestLegacyFunctionCallNameRequired` below.
+    """
+
+    @staticmethod
+    def _body_with_tool_call(function: dict[str, Any]) -> dict[str, Any]:
+        """Return the published reply body with one tool_call's ``function`` swapped in."""
+        body = json.loads(json.dumps(PUBLISHED_FULL_RESPONSE))
+        body["choices"][0]["message"] = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call_abc123", "type": "function", "function": function}],
+        }
+        body["choices"][0]["finish_reason"] = "tool_calls"
+        return body
+
+    def test_missing_function_name_raises(self) -> None:
+        """A tool_call with no ``function.name`` raises."""
+        body = self._body_with_tool_call({"arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function.name"):
+            cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+
+    def test_empty_function_name_raises(self) -> None:
+        """A tool_call with an empty ``function.name`` raises (KBR-281)."""
+        body = self._body_with_tool_call({"name": "", "arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function.name"):
+            cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+
+    def test_non_string_function_name_raises(self) -> None:
+        """A tool_call with a non-string ``function.name`` raises."""
+        body = self._body_with_tool_call({"name": 42, "arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function.name"):
+            cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+
+    def test_named_function_control_is_clean(self) -> None:
+        """Control — the published tool_call message projects cleanly."""
+        body = self._body_with_tool_call(
+            {"name": "get_current_weather", "arguments": '{"location": "Boston, MA"}'}
+        )
+
+        projected = cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+        c.verify_total(projected)
+        part = projected.parts[0]
+        assert isinstance(part, c.ToolUse)
+        assert part.name == "get_current_weather"
+
+
+class TestLegacyFunctionCallNameRequired:
+    """The legacy ``function_call`` field enforces the same name rule.
+
+    KBR-281: the deprecated form projects as an additional ``ToolUse``, so
+    its ``name`` carries the same pairing obligation as ``tool_calls`` —
+    the same losslessness argument applies verbatim.
+    """
+
+    @staticmethod
+    def _body_with_function_call(function_call: dict[str, Any]) -> dict[str, Any]:
+        """Return the published reply body with the message's ``function_call`` swapped in."""
+        body = json.loads(json.dumps(PUBLISHED_FULL_RESPONSE))
+        body["choices"][0]["message"] = {
+            "role": "assistant",
+            "content": None,
+            "function_call": function_call,
+        }
+        body["choices"][0]["finish_reason"] = "function_call"
+        return body
+
+    def test_missing_function_call_name_raises(self) -> None:
+        """A legacy ``function_call`` with no ``name`` raises."""
+        body = self._body_with_function_call({"arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function_call.name"):
+            cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+
+    def test_empty_function_call_name_raises(self) -> None:
+        """A legacy ``function_call`` with an empty ``name`` raises (KBR-281)."""
+        body = self._body_with_function_call({"name": "", "arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function_call.name"):
+            cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+
+    def test_non_string_function_call_name_raises(self) -> None:
+        """A legacy ``function_call`` with a non-string ``name`` raises."""
+        body = self._body_with_function_call({"name": 42, "arguments": "{}"})
+
+        with pytest.raises(c.UnreadableBodyError, match="function_call.name"):
+            cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+
+    def test_named_function_call_control_is_clean(self) -> None:
+        """Control — a named legacy ``function_call`` projects cleanly."""
+        body = self._body_with_function_call(
+            {"name": "get_current_weather", "arguments": '{"location": "Boston, MA"}'}
+        )
+
+        projected = cc.ChatCompletionsReplyProjection().read_reply(_reply(body))
+        c.verify_total(projected)
+        names = [part.name for part in projected.parts if isinstance(part, c.ToolUse)]
+        assert names == ["get_current_weather"]

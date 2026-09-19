@@ -666,9 +666,9 @@ class TestNameRequired:
     raised on this since KBR-267 (``test_reader_ollama_reply.py``'s
     ``TestNameRequired``); the request reader aligns here (KBR-279), so the
     rule lives in the shared ``_require_tool_call_name`` helper rather than
-    diverging within the module (§7.4.1). Chat Completions and Gemini raise
-    on a non-string name but accept ``""`` — the Ollama rule is the stricter
-    non-empty-string form.
+    diverging within the module (§7.4.1). Chat Completions, Gemini, and
+    Anthropic raise on the same absent/empty/non-string shapes (KBR-281) —
+    the Ollama rule is the module-shared non-empty-string form.
     """
 
     #: The published no-streaming with-tools multi-turn request (the
