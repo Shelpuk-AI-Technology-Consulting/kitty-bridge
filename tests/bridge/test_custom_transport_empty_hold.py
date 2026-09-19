@@ -17,10 +17,11 @@ Every test drives a real in-process :class:`~kitty.bridge.server.BridgeServer`
 whose custom-transport provider has its ``stream_request`` monkeypatched to
 feed canned bytes — the branch consumes collected bytes, not an aiohttp
 response, so no HTTP mocking is needed on the custom side. The canned shapes
-are what the branch's parse step reads: Responses-API SSE for the adapters
-without their own parser (Bedrock, OpenAI subscription — the
-``_parse_sse_to_response`` fallback) and Chat Completions SSE for Ollama
-Cloud (its own ``parse_stream_to_cc_response``).
+are what the branch's parse step reads: Chat Completions SSE for the
+adapters with their own ``parse_stream_to_cc_response`` (Ollama Cloud, and
+Bedrock — added by the review round in this change, closing the gap where
+Bedrock's CC-SSE bytes met the Responses-SSE fallback) and Responses-API
+SSE for the OpenAI subscription (the ``_parse_sse_to_response`` fallback).
 """
 
 from __future__ import annotations
