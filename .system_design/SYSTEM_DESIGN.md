@@ -462,17 +462,33 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   `_extract_text_content`, treats `refusal` as text, and maps legacy
   `function_call` onto the `tool_calls` machinery with a synthesised
   index/id and accumulating arguments; `translate_response` maps a legacy
-  `message.function_call` to one `tool_use` block.
+  `message.function_call` to one `tool_use` block. The auto-reviewer
+  surfaced that the **same consumer-side gap** lived on the two sibling
+  translators that share the same widening path — `ResponsesTranslator`
+  (`/v1/responses`, Codex CLI) and `GeminiTranslator`
+  (`/v1beta/...:streamGenerateContent`, Gemini CLI). Both are extended in
+  this PR with the same three-shape coercion, parallel
+  `translate_stream_chunk` / `translate_response` for each translator
+  (per-translator list-extract helpers, matching the existing
+  `_strip_thinking_tags` precedent). Pre-fix, `/v1/responses` non-stream
+  + list `content` would have crashed the handler's catch-all as `500
+  internal_error` (TypeError in `_strip_thinking_tags(content)` when
+  `content` is a list), and `/v1/responses` + `/v1beta` streams + refusal-
+  only or legacy-`function_call`-only replies would still have tripped the
+  ladder (their `response_was_empty` counted only the pre-widening shapes).
   `TranslationEngine`'s `_FINISH_REASON_MAP` learned the legacy
   `"function_call"` value so its stop_reason maps to `"tool_use"` the
-  same way `"tool_calls"` does. **OpenAI-spec vs OpenAI-compat tension:**
-  OpenAI's first-party `ChatCompletionStreamResponseDelta` declares
-  `content: string | null` (list content is **not** in the first-party
-  spec); the widening's list-`content` clause rests on OpenAI-*compatible*
-  multimodal backends (vLLM serving image-capable models, OpenRouter for
-  image outputs). The two first-party shapes the ticket names — `refusal`
-  and the deprecated `function_call` — are confirmed in OpenAI's
-  OpenAPI schema. **Pre-existing drift kept, deliberately:** the
+  same way `"tool_calls"` does; Gemini's `_CC_TO_GEMINI_FINISH` learned
+  `"function_call": "STOP"` (Gemini v1beta ends tool turns on STOP, so the
+  default mapping already lands right). **OpenAI-spec vs OpenAI-compat
+  tension:** OpenAI's first-party `ChatCompletionStreamResponseDelta`
+  declares `content: string | null` (list content is **not** in the
+  first-party spec); the widening's list-`content` clause rests on
+  OpenAI-*compatible* multimodal backends (vLLM serving image-capable
+  models, OpenRouter for image outputs). The two first-party shapes the
+  ticket names — `refusal` and the deprecated `function_call` — are
+  confirmed in OpenAI's OpenAPI schema. **Pre-existing drift kept,
+  deliberately:** the
   non-streaming `content` clause uses `.strip()` (whitespace-only content
   is empty) while the streaming predicate's `content` clause uses `!= ""`
   (whitespace-only content is content). The widening's four new clauses

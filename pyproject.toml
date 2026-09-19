@@ -350,12 +350,15 @@ only_mutate = [
     "src/kitty/bridge/gemini/*",
     "src/kitty/bridge/engine.py",
     "src/kitty/bridge/tool_audit.py",
-    # ``server.py`` carries the seven section-6.1 ``compaction_and_pairing``
-    # methods; every other def/class in it is suppressed by
-    # ``# pragma: no mutate block`` (mutmut's block pragma) so generation
-    # stays fast and the scope narrows to those seven methods. The guard
-    # ``tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven``
-    # pins the marker scheme against drift.
+    # ``server.py`` carries the section-6.1 registry-named targets — the
+    # seven ``compaction_and_pairing`` methods plus KBR-285's two content
+    # predicates (``_cc_chunk_carries_content`` and
+    # ``BridgeServer._is_empty_cc_response``); every other def/class in it
+    # is suppressed by ``# pragma: no mutate block`` (mutmut's block pragma)
+    # so generation stays fast and the scope narrows to the registered
+    # targets. The guard
+    # ``tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_registered``
+    # (KBR-266, generalised by KBR-285) pins the marker scheme against drift.
     "src/kitty/bridge/server.py",
     # Every adapter file carrying one of the three provider hooks
     # (translate_to_upstream / normalize_request / build_upstream_headers)

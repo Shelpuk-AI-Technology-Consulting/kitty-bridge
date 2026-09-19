@@ -5869,14 +5869,27 @@ reply and a multimodal-list reply. On the `/v1/messages` translated route,
 `_extract_text_content`, treats `refusal` as text, and maps legacy `function_call` onto
 the `tool_calls` machinery with a synthesised index/id and accumulating arguments;
 `translate_response` maps a legacy `message.function_call` to one `tool_use` block.
+The two sibling translators that share the same widening path carry the same coercion:
+`ResponsesTranslator` (`/v1/responses`, Codex CLI) and `GeminiTranslator`
+(`/v1beta/...:streamGenerateContent`, Gemini CLI) — pre-fix, `/v1/responses`
+non-stream + list `content` crashed the handler's catch-all as `500 internal_error`
+(TypeError in `_strip_thinking_tags(content)` on a list), and `/v1/responses` +
+`/v1beta` streams + refusal-only or legacy-function_call-only replies still tripped the
+ladder (their `response_was_empty` counted only the pre-widening shapes). Both now carry
+the three shapes with per-translator parallel helpers matching the existing
+`_strip_thinking_tags` precedent.
 `TranslationEngine._FINISH_REASON_MAP` learned the legacy `"function_call"` value so its
-stop_reason maps to `"tool_use"` the same way `"tool_calls"` does. The two predicates stay
+stop_reason maps to `"tool_use"` the same way `"tool_calls"` does; Gemini's
+`_CC_TO_GEMINI_FINISH` learned `"function_call": "STOP"` (Gemini v1beta ends tool turns
+on STOP). The two predicates stay
 as physical functions with the KBR-277 byte-for-byte mirror; both are now mutation-measured
 in the new `content_classifiers` group (the marker-scheme guard was generalised to derive
 the expected unmarked set from every registry row naming `kitty.bridge.server`). Tests:
 `tests/bridge/test_raw_cc_empty_hold.py` (streaming, three new "does-not-fire" tests),
 `tests/bridge/test_empty_response_retry.py` (non-streaming unit + bridge twin),
 `tests/bridge/test_messages_translator.py` (translator coercion),
+`tests/bridge/test_responses_translator.py` (sibling-route coercion, Codex CLI),
+`tests/test_gemini_translator.py` (sibling-route coercion, Gemini CLI),
 `tests/bridge/test_empty_response_reasoning_properties.py` (agreement property extended to
 the three new axes).
 

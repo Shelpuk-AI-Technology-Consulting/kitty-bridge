@@ -748,7 +748,11 @@ class MessagesTranslator:
         if has_function_call:
             try:
                 fc_input = json.loads(function_call.get("arguments", "{}"))
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
+                # TypeError: a malformed non-string ``arguments`` value (a
+                # dict or number) — the detector widening makes the shape
+                # reachable on this route, so it degrades to {} like the
+                # JSONDecodeError case rather than a 500.
                 fc_input = {}
             content.append(
                 {
