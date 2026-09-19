@@ -718,3 +718,89 @@ class TestBridgeModePanelAdvertisesStats:
 
         assert "/stats" in bodies[0]
         assert "/healthz" in bodies[0]
+
+
+class TestCorruptionReceivers:
+    """KBR-87: every ``cred_store.get`` receiver turns a corrupt value into its
+    existing clean-message path instead of a traceback.
+
+    The corruption raise is pinned at the store boundary
+    (``tests/test_credential_store.py``); these tests pin the receivers, one per
+    call site, so a refactor that drops a handler goes red instead of silently
+    regressing the message to a raw ``CredentialError`` traceback.
+    """
+
+    @staticmethod
+    def _corrupt_cred_store() -> object:
+        """A stand-in store whose ``get`` raises the corruption error."""
+        from types import SimpleNamespace
+
+        from kitty.credentials.store import CredentialError
+
+        def _raise(ref: str) -> str:
+            raise CredentialError(
+                f"Credential for ref {ref!r} is corrupt (binascii.Error): "
+                "restore it from a backup or re-enter the credential."
+            )
+
+        return SimpleNamespace(get=_raise)
+
+    def test_run_bridge_corruption_exits_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The single-profile ``kitty bridge`` path: message + exit, no traceback."""
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        seen = _record_bridge_kwargs(monkeypatch)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli_main._run_bridge(_profile_stub(), self._corrupt_cred_store(), validate=False)
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "corrupt" in captured.out + captured.err
+        assert seen == [], "BridgeServer must not be constructed under a corrupt credential"
+
+    def test_run_bridge_balancing_corruption_exits_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The balancing bridge path: message + exit before any member is wired."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        seen = _record_bridge_kwargs(monkeypatch)
+        _balancing_stubs(monkeypatch, _profile_stub(name="member-1"))
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli_main._run_bridge_balancing(
+                SimpleNamespace(name="ci-pool"), self._corrupt_cred_store(), validate=False
+            )
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "corrupt" in captured.out + captured.err
+        assert seen == [], "BridgeServer must not be constructed under a corrupt credential"
+
+    def test_launch_target_balancing_corruption_returns_one(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The agent-launch balancing path: the same clean message, exit code 1."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        _balancing_stubs(monkeypatch, _profile_stub(name="member-1"))
+
+        exit_code = cli_main._launch_target_balancing(
+            object(),
+            SimpleNamespace(name="ci-pool"),
+            self._corrupt_cred_store(),
+            [],
+        )
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "corrupt" in captured.out + captured.err

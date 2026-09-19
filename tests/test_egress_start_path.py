@@ -218,13 +218,29 @@ class TestReturnDiscardedFalsification:
 # ── KBR-87 — corruption receiver on this start path ────────────────────────
 
 
+class _CorruptCredentialStore:
+    """A ``CredentialStore`` stand-in whose ``get`` raises the corruption error."""
+
+    def __init__(self, backends: object = None) -> None:
+        pass
+
+    def get(self, ref: str) -> str:
+        from kitty.credentials.store import CredentialError
+
+        raise CredentialError(
+            f"Credential for ref {ref!r} is corrupt (binascii.Error): "
+            "restore it from a backup or re-enter the credential."
+        )
+
+
 class TestCorruptStoredCredential:
     """KBR-87: a corrupt stored value exits cleanly on this start path, not a traceback.
 
-    The single-profile branch of ``bridge_runner.main`` reads the credential through
-    ``cred_store.get``; under the corruption contract (SYSTEM_DESIGN.md §11.2) a
-    present-but-undecodable value raises ``CredentialError``. The receiver must turn
-    that into the same clean stderr message + exit as the missing-key branch: on the
+    Both branches of ``bridge_runner.main`` read credentials through
+    ``cred_store.get`` — the single-profile branch and the balancing-members loop —
+    and under the corruption contract (SYSTEM_DESIGN.md §11.2) a present-but-
+    undecodable value raises ``CredentialError``. The receivers must turn that into
+    the same clean stderr message + exit as the missing-key branches: on the
     service-managed paths the child's output lands in the service journal, where a
     raw traceback is exactly the KBR-154 diagnostic family this ticket closes.
     """
@@ -234,19 +250,8 @@ class TestCorruptStoredCredential:
         start_path: dict,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """``CredentialError`` from the store becomes ``Error: …`` + exit, no bridge."""
+        """Single-profile branch: ``CredentialError`` becomes ``Error: …`` + exit, no bridge."""
         from kitty import bridge_runner
-        from kitty.credentials.store import CredentialError
-
-        class _CorruptCredentialStore:
-            def __init__(self, backends: object = None) -> None:
-                pass
-
-            def get(self, ref: str) -> str:
-                raise CredentialError(
-                    f"Credential for ref {ref!r} is corrupt (binascii.Error): "
-                    "restore it from a backup or re-enter the credential."
-                )
 
         # `main()` imports the store lazily from its source module, so patch there
         # (the same binding the fixture patches for the control flow above).
@@ -266,4 +271,65 @@ class TestCorruptStoredCredential:
         assert start_path["captured"]["bridge_server_init_calls"] == 0, (
             "BridgeServer.__init__ was reached under a corrupt credential: a listening "
             "socket would have been bound"
+        )
+
+    def test_balancing_branch_corruption_exits_cleanly_before_any_member_is_wired(
+        self,
+        start_path: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Balancing branch: the first corrupt member aborts with the clean message.
+
+        The loop reads ``cred_store.get(mp.auth_ref)`` per member before any
+        adapter wiring, so one damaged member must end the start with the same
+        clean stderr treatment the single-profile branch gives — and construct no
+        bridge. Drives the real ``isinstance(backend, BalancingProfile)`` gate
+        with a genuine ``BalancingProfile`` so the branch selection is honest.
+        """
+        from types import SimpleNamespace
+
+        from kitty import bridge_runner
+        from kitty.profiles.schema import BalancingProfile
+
+        class _BalancingProfileStore:
+            def get_backend(self, name: str):
+                return BalancingProfile(name="pool-of-two", members=["a", "b"])
+
+        class _FakeResolver:
+            def __init__(self, store: object) -> None:
+                pass
+
+            def resolve_balancing(self, name: str):
+                return [
+                    SimpleNamespace(
+                        name="member-1",
+                        provider="bedrock",
+                        provider_config={"region": "us-east-1"},
+                        auth_ref="dummy-ref",
+                        model="anthropic.claude-3-sonnet",
+                    )
+                ]
+
+        start_path["monkeypatch"].setattr(
+            "kitty.credentials.store.CredentialStore", _CorruptCredentialStore
+        )
+        start_path["monkeypatch"].setattr(
+            "kitty.profiles.store.ProfileStore", _BalancingProfileStore
+        )
+        # The balancing branch imports the resolver lazily from its source module.
+        start_path["monkeypatch"].setattr(
+            "kitty.profiles.resolver.ProfileResolver", _FakeResolver
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            bridge_runner.main()
+
+        assert exc_info.value.code != 0, "a corrupt member credential must not start the bridge"
+
+        err = capsys.readouterr().err
+        assert "corrupt" in err, f"stderr must name the corruption, got {err!r}"
+        assert "dummy-ref" in err, f"the corruption message names the ref, got {err!r}"
+
+        assert start_path["captured"]["bridge_server_init_calls"] == 0, (
+            "BridgeServer.__init__ was reached under a corrupt member credential"
         )
