@@ -34,19 +34,23 @@ _ROOT = Path(__file__).resolve().parents[1]
 _CLAUDE_MD = _ROOT / "CLAUDE.md"
 _REVIEW_SECTION_HEADING = "## Resolving GitHub code reviews"
 
-# One entry per behaviour the ticket mandates. Every anchor is unique to
-# the rule that carries the behaviour — verified by an in-suite probe in
-# `test_the_section_extraction_does_not_leak_preamble_text` and by the
-# sub-clause rewrite probes the KBR-286 review rounds exercise by hand.
-# Losing any anchor means losing the sub-clause it pins, which is exactly
-# what this guard exists to report.
+# Anchors that pin each mandated behaviour. Uniqueness across rules was
+# verified by the hand-run rewrite probes the KBR-286 review rounds
+# exercise (not CI-runnable); section-scoping — that an anchor cannot
+# be satisfied from outside the review-resolution section — is
+# verified in-suite by
+# `test_the_section_extraction_does_not_leak_preamble_text`. Losing any
+# anchor means losing the sub-clause it pins, which is exactly what this
+# guard exists to report.
 _CLAUSES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "the PR-level summary comment (what was addressed and implemented, "
-        "what was deferred, with the reason)",
+        "what was deferred, with the reason; posted once per round)",
         (
             "Post a PR-level comment summarising the round",
+            "what was addressed and implemented",
             "what was deferred (with the reason)",
+            "posted once per round",
         ),
     ),
     (
@@ -54,11 +58,13 @@ _CLAUSES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("Reply in thread where detail helps", "not only in the summary comment"),
     ),
     (
-        "enumerate every open conversation and inline review thread, then "
-        "resolve the conversations that were taken and fixed",
+        "enumerate every open conversation and inline review thread, "
+        "assign each a disposition before responding, then resolve the "
+        "conversations that were taken and fixed",
         (
             "every open conversation",
             "including inline review threads",
+            "Assign each one a disposition",
             "Resolve every conversation that was taken and fixed",
         ),
     ),

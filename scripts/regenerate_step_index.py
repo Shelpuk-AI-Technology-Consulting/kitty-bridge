@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """Validate the ``.system_design/steps/`` dependency graph; write the index.
 
-KBR-278. ``CLAUDE.md`` §"System-design discipline" mandates running this
-script after adding a step file and treating a zero exit as the proof that
-the ``.system_design/steps/`` dependency graph is honest. This is the
-machine-checked half of that mandate; the developer-side half — running
-the script after every change — is the discipline the script exists to
-serve. The script is deliberately not wired into CI: a committed-tree
-test would couple CI to sibling pull requests' step files (see the
-REQUIREMENTS.md decision D2 in
+KBR-278 mandates running this script after adding a step file and treating
+a zero exit as the proof that the ``.system_design/steps/`` dependency graph
+is honest. This is the machine-checked half of that mandate; the
+developer-side half — running the script after every change — is the
+discipline the script exists to serve. The script is deliberately not wired
+into CI: a committed-tree test would couple CI to sibling pull requests'
+step files (see the REQUIREMENTS.md decision D2 in
 ``.requirements/20260917T185215Z_step_index_validator/``).
+
+🔴 The citation that used to point at ``CLAUDE.md`` §"System-design
+discipline" predated KBR-286, when the only ``CLAUDE.md`` on a reader's
+machine was their untracked, per-developer copy of the user's home file —
+so the reference was uncheckable but never wrong. The post-KBR-286
+tracked repo ``CLAUDE.md`` carries no such section; the mandate is
+documented in KBR-278's REQUIREMENTS.md (above) and in the user's home
+``CLAUDE.md``, not here.
 
 What the script does:
 
