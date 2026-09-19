@@ -95,10 +95,11 @@ class _ProtocolLauncher(LauncherAdapter):
 
 # ── Canned upstream shapes ────────────────────────────────────────────────
 #
-# Bedrock and the OpenAI subscription have no ``parse_stream_to_cc_response``,
-# so the branch parses their bytes with the Responses-API SSE fallback; Ollama
-# Cloud parses Chat Completions SSE chunks with its own parser. Each adapter
-# gets the empty and content-bearing shape its parser reads.
+# Bedrock and Ollama Cloud parse Chat Completions SSE with their own
+# ``parse_stream_to_cc_response``; the OpenAI subscription has no parser of
+# its own, so the branch parses its bytes with the Responses-API SSE
+# fallback. Each adapter gets the empty and content-bearing shape its
+# parser reads.
 
 
 def _responses_completed() -> dict:
@@ -298,7 +299,7 @@ def _cc_reasoning_only() -> bytes:
 #: passthrough on this tree — ``use_custom_transport`` is False — and is
 #: already covered by KBR-276's hold on the plain-POST branch.)
 _CUSTOM = [
-    pytest.param(BedrockAdapter, _responses_empty, _responses_hello, id="bedrock"),
+    pytest.param(BedrockAdapter, _cc_empty, _cc_hello, id="bedrock"),
     pytest.param(OllamaCloudAdapter, _cc_empty, _cc_hello, id="ollama_cloud"),
     pytest.param(OpenAISubscriptionAdapter, _responses_empty, _responses_hello, id="openai_subscription"),
 ]
@@ -547,7 +548,9 @@ async def test_a_tool_call_only_custom_transport_stream_releases_the_verdict(
         hello_body: Unused; part of the shared parametrisation.
         monkeypatch: Pytest fixture, collapses the retry backoff.
     """
-    tool_body = _responses_tool_calls() if provider_factory is not OllamaCloudAdapter else _cc_tool_calls()
+    # Bedrock and Ollama parse CC-SSE (their own parsers); the OpenAI
+    # subscription takes the Responses-SSE fallback.
+    tool_body = _cc_tool_calls() if provider_factory is not OpenAISubscriptionAdapter else _responses_tool_calls()
 
     _server, status, client_body, calls, _bodies = await _stream(provider_factory, [tool_body], monkeypatch)
 

@@ -551,20 +551,20 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   parse step, parametrised over `BedrockAdapter` / `OllamaCloudAdapter` /
   `OpenAISubscriptionAdapter`; the ticket's `vertex` mention is a ticket
   correction — `VertexAIAdapter` is a plain-POST OpenAI-compatible
-  passthrough on this tree and was already held by KBR-276). **Exposed
-  pre-existing gap, not this ticket's to fix:** the botocore harness's
-  bridge-driven converse_stream test
-  (`test_a_streamed_request_via_the_bridge_yields_a_defined_terminal`,
-  renamed from `..._yields_finish_reason`) pinned the skeleton — Bedrock's
-  `stream_request` emits translated CC-SSE bytes, the branch parses them
-  with the Responses-SSE fallback that cannot read them, the parsed
-  response comes back content-free, and pre-KBR-287 the branch still
-  synthesised a skeleton whose finish chunk carried the test's
-  `finish_reason` oracle. Post-KBR-287 that shape takes the ladder and
-  ends in the `empty_response` terminal, which the renamed test now pins
-  with the ladder collapsed. The parse-path gap itself (CC-SSE bytes
-  meeting a Responses-SSE parser) is pre-existing and a candidate
-  follow-up ticket.
+  passthrough on this tree and was already held by KBR-276). **The CI
+  round-1 review closed a second gap in the same change:** Bedrock's
+  `stream_request` emits translated CC-SSE bytes, which the branch's
+  Responses-SSE fallback cannot read — so every Bedrock completion
+  parsed content-free, pre-KBR-287 the bridge answered with a content-free
+  skeleton regardless of the completion's real content, and the first
+  KBR-287 cut made that a guaranteed ladder-to-terminal failure.
+  `BedrockAdapter.parse_stream_to_cc_response` (mirroring
+  `OllamaCloudAdapter`'s) is the fix: the branch now judges Bedrock's
+  real content, the botocore harness's bridge-driven test
+  (`test_a_streamed_request_via_the_bridge_yields_content_and_finish_reason`)
+  asserts content and finish_reason reach the client, and the same
+  single-predicate rule holds — the parser feeds `_cc_chunk_carries_content`
+  through the synthesis like every other adapter.
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
