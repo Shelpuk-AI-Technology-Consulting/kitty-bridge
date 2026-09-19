@@ -1072,12 +1072,13 @@ row + the KBR-154 scope addition). This section is the To Be state of
 - ref not in the store → `None` ("no credential");
 - ref present but the stored value is not decodable → `CredentialError` naming the ref,
   chained (`raise ... from`) from the cause. Undecodable means one of the four measured
-  shapes: not valid base64 (`binascii.Error`), a non-ASCII string (`ValueError` —
-  `b64decode(validate=True)` rejects it before any alphabet check), decoded bytes not
-  valid UTF-8 (`UnicodeDecodeError`), or a non-string stored value (`TypeError` — the file
-  is user-editable JSON). An explicit JSON `null` value is the **absent** spelling, not
-  corruption: `set()` never writes it and `data.get(ref)` returns `None` for it, so it
-  takes the absent branch by construction — pinned by test. `binascii.Error` and `UnicodeDecodeError` both subclass
+  shapes: not valid base64 (`binascii.Error`), a non-ASCII string (`ValueError` — raised
+  by `b64decode`'s ASCII-encode step, independent of the `validate=` flag), decoded bytes
+  not valid UTF-8 (`UnicodeDecodeError`), or a non-string stored value (`TypeError` — the
+  file is user-editable JSON). An explicit JSON `null` value is the **absent** spelling,
+  not corruption: `set()` never writes it and `data.get(ref)` returns `None` for it, so
+  it takes the absent branch by construction — pinned by test. `binascii.Error` and
+  `UnicodeDecodeError` both subclass
   `ValueError`, so the handler is `except (ValueError, TypeError)` — exactly as narrow as
   naming the subtypes, and complete over every measured shape.
 
@@ -1119,7 +1120,10 @@ the `str | None` interface at five call sites).*
 
 **Why `validate=True`.** `set` writes pure base64 alphabet, so `validate=True` accepts
 everything the store itself writes and rejects hand-edited or damaged values that the
-default silently truncates into plausible garbage.
+default silently truncates into plausible garbage. The load-bearing arm is pinned by
+test: `"ab@=="` strips to the length-valid `"ab=="` and silently decodes to the
+single byte `b"i"` under `validate=False` — corruption read back as a plausible
+single-character credential — while `validate=True` rejects it outright.
 
 ### 11.3 The keyring dependency contract
 

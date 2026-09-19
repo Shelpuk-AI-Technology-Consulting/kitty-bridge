@@ -60,11 +60,17 @@ class FileBackend(CredentialBackend):
         encoded = data.get(ref)
         if encoded is None:
             return None
-        # Corruption is store damage, not absence (KBR-87): b64decode(validate=True)
-        # rejects non-alphabet bytes that validate=False would silently truncate,
-        # and (ValueError, TypeError) covers every measured shape — binascii.Error
-        # and UnicodeDecodeError both subclass ValueError; TypeError covers a
-        # hand-edited non-string value.
+        # Corruption is store damage, not absence (KBR-87). The handler covers
+        # every measured shape: binascii.Error (invalid base64 alphabet and
+        # invalid base64 length) and UnicodeDecodeError both subclass ValueError,
+        # so `except (ValueError, TypeError)` is exactly as narrow as naming the
+        # subtypes and complete over every shape. The non-ASCII ValueError that
+        # `"mötley-key"` produces is raised by `b64decode`'s ASCII-encode step,
+        # not by the validate= regex — validate=False raises the same error there.
+        # `validate=True` is the load-bearing choice for inputs that happen to
+        # alphabet-strip to a valid length (e.g. `"ab@=="` silently decodes to
+        # `"i"` under validate=False and rejects under validate=True); the pin is
+        # in `tests/test_credential_store.py`.
         try:
             return base64.b64decode(encoded, validate=True).decode("utf-8")
         except (ValueError, TypeError) as exc:

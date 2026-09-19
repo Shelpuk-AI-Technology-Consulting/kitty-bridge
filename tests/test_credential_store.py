@@ -148,6 +148,27 @@ class TestFileBackend:
         with pytest.raises(CredentialError, match="ref1"):
             backend.get("ref1")
 
+    def test_validate_true_rejects_what_validate_false_would_silently_decode(self, tmp_path):
+        """The load-bearing arm of the ``validate=True`` choice.
+
+        Under ``validate=False``, ``"ab@=="`` strips the non-alphabet ``@`` to the
+        length-valid ``"ab=="`` and silently decodes to ``"i"`` — corruption read
+        back as a plausible single-character credential. Under ``validate=True``
+        (the production choice) it rejects outright. This is the falsification
+        the other corruption arms cannot provide: those raise under both modes
+        (length, non-ASCII, UTF-8, and type errors are validate-independent).
+        """
+        path = tmp_path / "creds.json"
+        path.write_text(json.dumps({"ref1": "ab@=="}), encoding="utf-8")
+        backend = FileBackend(path=path)
+
+        with pytest.raises(CredentialError, match="ref1"):
+            backend.get("ref1")
+
+        # The negative control for the falsification itself: what validate=True
+        # rejects is exactly what validate=False would have accepted as a value.
+        assert base64.b64decode("ab@==", validate=False) == b"i"
+
     def test_corrupt_ref_does_not_disturb_other_refs(self, tmp_path):
         """Corruption is per-ref: a damaged ref1 leaves a valid ref2 readable."""
         path = tmp_path / "creds.json"
