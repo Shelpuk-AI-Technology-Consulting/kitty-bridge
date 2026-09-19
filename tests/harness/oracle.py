@@ -1,7 +1,7 @@
 """The transparency oracle — makes Invariant I1 (message fidelity) testable.
 
 `.system_design/TEST_SUITE.md` §3.3, §3.3.1, §3.3.2, §3.3.4, §4.3 C2, §7.4,
-§10 · plan task **T-D1** (KBR-51).
+§10 · plan tasks **T-D1** (KBR-51) and **T-D2** (KBR-52).
 
 §3.3 of the test-suite design names the oracle as "the single piece of new
 infrastructure that makes I1 testable". Two assertions run on it; together they
@@ -18,6 +18,20 @@ assertion** on the native passthrough path. JSON key order is exactly what a
 provider fingerprints, so where kitty claims to be forwarding rather than
 translating, key order is part of the contract (§3.3.5 names the route as the
 property that decides this).
+
+**§3.3.5 adds the fourth: the routing assertion (T-D2, KBR-52).** On Azure the
+deployment id lives in the URL (P20) while P6 removes ``model`` from the body,
+so two requests to two different deployments have byte-identical bodies — a
+body-only comparison cannot tell them apart. When the caller supplies an
+``expected_route`` — derived *independently*, from the profile and the
+provider's published URL shape, never by calling ``build_base_url()`` /
+``get_upstream_path()`` — every route component of the captured request must
+match it. The authority-and-scheme normalisation is the caller's obligation
+(§3.3.5: the harness serves ``http://127.0.0.1:<ephemeral>`` where a published
+shape is ``https://`` on the provider's host, so the expectation is rewritten
+with the recorder's own authority before comparison); path and query are
+compared exactly as derived. With ``expected_route=None`` the assertion is
+absent, not vacuous — T-D1's callers are unchanged.
 
 **The oracle imports nothing from ``src/kitty``, and must not.** §3.3.1's
 independent-oracle rule: a projection that asked kitty how to read a body
@@ -71,6 +85,7 @@ from harness.contract import (
     Projection,
     Request,
     WireFormat,
+    _redact_query,
     verify_total,
 )
 
@@ -166,6 +181,72 @@ class NativePassthroughKeyOrderError(OracleError):
         self.captured_preview = captured_preview
 
 
+class RoutingMismatchError(OracleError):
+    """§3.3.5 routing assertion failed — the captured request went elsewhere.
+
+    Raised when an ``expected_route`` was supplied and one or more of its
+    components (``method``, ``scheme``, ``host``, ``path``, ``query``) do not
+    match the captured request. Path and query are where the Azure case
+    lives; scheme and host are part of the comparison only after the caller's
+    mandatory authority rewrite (§3.3.5's T-W4 scope addition) has
+    substituted the recorder's own values into the expectation.
+
+    Attributes:
+        paths: The ``route.<component>`` paths that failed — spelled with
+            :data:`tests.harness.contract.ROUTE_COMPONENTS` vocabulary so a
+            future reader sees the same failure shape the register rows use.
+    """
+
+    def __init__(self, message: str, *, paths: tuple[str, ...] = ()) -> None:
+        """Store the failing component paths alongside the message.
+
+        Args:
+            message: The human-readable failure text, naming every component
+                that failed and the two values that disagreed.
+            paths: The ``route.<component>`` paths that failed.
+        """
+        super().__init__(message, paths=paths)
+
+
+# --------------------------------------------------------------------------
+# Routing expectation
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExpectedRoute:
+    """The §3.3.5 routing expectation a caller derives independently.
+
+    The transparency oracle consumes the *route* alongside the body: on Azure
+    the deployment id lives in the URL while P6 removes ``model`` from the
+    body, so two requests to two different deployments have byte-identical
+    bodies and a body-only comparison cannot tell them apart. The caller
+    derives this value from the configured profile — provider, model,
+    ``provider_config`` — using the provider's published URL shape, never by
+    calling ``build_base_url()`` / ``get_upstream_path()``.
+
+    **The authority rewrite is the caller's obligation, not this class's.**
+    §3.3.5's T-W4 scope addition: the harness serves ``http`` on an ephemeral
+    loopback port where a published shape is ``https`` on the provider's own
+    hostname, so the expectation's scheme and host must already carry the
+    recorder's values when they arrive here. Path and query are compared
+    exactly as derived.
+
+    Attributes:
+        method: The HTTP method, ``"POST"`` for every bridge route today.
+        scheme: The recorder's scheme, after the caller's rewrite.
+        host: The recorder's host, port included, after the caller's rewrite.
+        path: The route path component, asserted exactly.
+        query: The route query component, asserted exactly.
+    """
+
+    method: str
+    scheme: str
+    host: str
+    path: str
+    query: str
+
+
 # --------------------------------------------------------------------------
 # Reader registry
 # --------------------------------------------------------------------------
@@ -246,21 +327,23 @@ def _REGISTRY_GUARD() -> None:
 class OracleReport:
     """A small report the oracle attaches to the end of a successful run.
 
-    T-D2 reads :attr:`expected_route` to assert on routing. For T-D1 the
-    field is recorded without assertion; the test surface is "the oracle
-    accepts an ``expected_route`` parameter and surfaces it". The report
-    also records the projections and the diff so a future T-I8 cross-attempt
+    :attr:`expected_route` records the routing expectation the caller
+    supplied — since T-D2 (KBR-52) an expectation that reached the report has
+    also been **asserted**: every component matched the captured request, or
+    :class:`RoutingMismatchError` would have raised first. The report also
+    records the projections and the diff so a future T-I8 cross-attempt
     comparison can read it without re-running the bridge.
 
     Attributes:
-        expected_route: The caller-supplied routing expectation, or ``None``.
+        expected_route: The caller-supplied routing expectation, or ``None``
+            when the caller ran the body assertions alone.
         inbound_projection: The wire-independent form of the inbound capture.
         captured_projection: The wire-independent form of the captured body.
         deltas: The concrete delta paths the structural diff found, in walk
             order. Empty on a run with byte-identical projections.
     """
 
-    expected_route: object | None
+    expected_route: ExpectedRoute | None
     inbound_projection: Request
     captured_projection: Request
     deltas: tuple[str, ...]
@@ -279,11 +362,11 @@ def assert_no_unclaimed_mutation(
     register: tuple[r.MutationRow, ...],
     triggers_met: frozenset[r.Trigger],
     *,
-    expected_route: object | None = None,
+    expected_route: ExpectedRoute | None = None,
 ) -> OracleReport:
     """Assert that every difference between the two projections is registered.
 
-    Runs the three obligations the oracle owns, in order:
+    Runs the four obligations the oracle owns, in order:
 
     1. **Totality gate** (§3.3.1, §7.4). Both projections pass through
        :func:`~harness.contract.verify_total`. A non-empty residual or a
@@ -304,6 +387,18 @@ def assert_no_unclaimed_mutation(
        byte-for-byte. (The native route is the *absence* of the
        non-native trigger — there is no ``NATIVE_UPSTREAM_WIRE`` enum
        member, and using one would silently miss every native route.)
+    4. **§3.3.5 routing assertion (T-D2, KBR-52).** When ``expected_route``
+       is supplied, every route component of the captured request —
+       ``method``, ``scheme``, ``host``, ``path``, ``query`` — must equal
+       it. The component set is driven from
+       :data:`~harness.contract.ROUTE_COMPONENTS` so it cannot drift, and
+       any disagreement raises :class:`RoutingMismatchError` with the
+       failing ``route.<component>`` paths. ``expected_route=None`` is
+       the absence of the assertion, not a vacuous pass — T-D1's callers
+       are unchanged. The routing falsification: a capture rerouted to
+       another deployment with a byte-identical body reaches this step
+       with every body obligation passed, and fails on routing and only
+       on routing.
 
     Args:
         inbound: The agent's inbound request as observed on the wire.
@@ -319,13 +414,16 @@ def assert_no_unclaimed_mutation(
             corpus entry that over-declares here makes assertion 1 claim
             every delta; under-declaring is the symmetric lever and is the
             one T-D1's falsification uses.
-        expected_route: An optional routing expectation T-D2 will assert
-            on. T-D1 records the value on the returned :class:`OracleReport`
-            without asserting.
+        expected_route: The independently derived routing expectation
+            (§3.3.5). When supplied, every component of the captured
+            request's route must match it — method, scheme, host, path and
+            query — after the caller has rewritten the expectation's
+            authority with the recorder's own. ``None`` (every T-D1 caller)
+            leaves the routing assertion out entirely.
 
     Returns:
         An :class:`OracleReport` recording the projections, the deltas, and
-        the routing expectation. The report is what T-D2 / T-I8 read on a
+        the routing expectation. The report is what T-I8 reads on a
         successful run.
 
     Raises:
@@ -340,6 +438,10 @@ def assert_no_unclaimed_mutation(
             fired without its trigger; ``paths`` are the offending deltas.
         NativePassthroughKeyOrderError: When §4.3 C2 fails. The exception
             surfaces both bodies' first 200 bytes for diff.
+        RoutingMismatchError: When §3.3.5's routing assertion fails — an
+            ``expected_route`` was supplied and some component of the
+            captured request's route disagrees. The exception's ``paths``
+            name the failing ``route.<component>`` paths.
     """
     # Step 1 — project both captures through the registered readers.
     inbound_projection = _reader_for(inbound_format).read_request(inbound)
@@ -358,6 +460,14 @@ def assert_no_unclaimed_mutation(
     # *absence* of NON_NATIVE_UPSTREAM_WIRE in triggers_met.
     if r.Trigger.NON_NATIVE_UPSTREAM_WIRE not in triggers_met:
         _native_passthrough_check(inbound, captured)
+
+    # Step 7 — §3.3.5 routing assertion (T-D2). Runs last so the body
+    # failures — the louder diagnosis — surface first, and so the
+    # falsification case (a rerouted capture with a byte-identical body)
+    # fails on routing and only on routing: the body obligations have
+    # already passed by the time this raises.
+    if expected_route is not None:
+        _routing_check(captured, expected_route)
 
     return OracleReport(
         expected_route=expected_route,
@@ -496,6 +606,86 @@ def _native_passthrough_check(inbound: CapturedRequest, captured: CapturedReques
             inbound_preview=inbound.body[:200],
             captured_preview=captured.body[:200],
         )
+
+
+def _routing_check(captured: CapturedRequest, expected: ExpectedRoute) -> None:
+    """Assert the captured request went where the derived expectation says.
+
+    §3.3.5: routing is part of the request, and the body cannot show it. The
+    comparison runs over **every** route component — method, scheme, host,
+    path, query — driven from :data:`tests.harness.contract.ROUTE_COMPONENTS`
+    so the component set cannot drift from the contract vocabulary if a
+    component is ever added. Scheme and host are compared on the strength of
+    the caller's mandatory authority rewrite: the expectation must already
+    carry the recorder's values when it arrives (§3.3.5's T-W4 scope
+    addition), so a mismatch here means the caller skipped the rewrite or the
+    request genuinely went to another authority.
+
+    **Runs after the body obligations, by design.** The caller orders the
+    routing assertion last so body failures — the louder diagnosis — surface
+    first, and so the §3.3.5 falsification (a rerouted capture with a
+    byte-identical body) fails on routing and only on routing.
+
+    Args:
+        captured: The captured request.
+        expected: The independently derived routing expectation, with the
+            recorder's authority already rewritten in.
+
+    Raises:
+        RoutingMismatchError: When any component disagrees. Every failing
+            component is named in both places — the message carries each
+            component's expected and captured values (the query redacted,
+            the rest verbatim), and ``paths`` carries the matching
+            ``route.<component>`` constants — so a misderived expectation
+            and a misrouted request are distinguishable at a glance.
+    """
+    # Collect every disagreement before raising: one failure that names all
+    # five components is worth more than five runs that each name one.
+    mismatches: list[tuple[str, str, str]] = []
+    for component in sorted(c.ROUTE_COMPONENTS):
+        actual = getattr(captured, component)
+        wanted = getattr(expected, component)
+        if actual != wanted:
+            mismatches.append((component, wanted, actual))
+    if not mismatches:
+        return
+    paths = tuple(c.route_path(component) for component, _, _ in mismatches)
+    # The ``query`` component carries wire-visible credentials when a profile's
+    # ``base_url`` does (the KBR-143 merge brings them into the composed query).
+    # Route them through the contract's redaction so a routing mismatch on
+    # such a profile does not surface the credential into the pytest failure
+    # message — the same redaction ``CapturedRequest.__repr__`` and the
+    # diagnostic helper apply, now closing the last unmasked surface on the
+    # oracle's output. Other components carry no secret and stay verbatim.
+    detail = "; ".join(
+        f"{component}: expected {_render(component, wanted)!r}, captured {_render(component, actual)!r}"
+        for component, wanted, actual in mismatches
+    )
+    raise RoutingMismatchError(
+        f"§3.3.5 routing assertion: {len(mismatches)} route component(s) "
+        f"differ from the derived expectation — {detail}",
+        paths=paths,
+    )
+
+
+def _render(component: str, value: str) -> str:
+    """Render one route component's value for the routing-failure message.
+
+    The ``query`` component may carry credentials; the other components carry
+    none. The split matches the contract's redaction in
+    :meth:`~tests.harness.contract.CapturedRequest.__repr__`, so the oracle's
+    own failure surface honours the same masking.
+
+    Args:
+        component: The route component whose value is being rendered.
+        value: The raw value as captured or expected.
+
+    Returns:
+        A display string safe for a log or an assertion diff.
+    """
+    if component == "query":
+        return _redact_query(value)
+    return value
 
 
 def _first_key_order_divergence(a: Any, b: Any, at: str) -> str | None:
@@ -988,9 +1178,11 @@ _REGISTRY_GUARD()
 
 __all__ = [
     "ConditionalRowFiredWithoutTriggerError",
+    "ExpectedRoute",
     "NativePassthroughKeyOrderError",
     "OracleError",
     "OracleReport",
+    "RoutingMismatchError",
     "UnclaimedMutationError",
     "assert_no_unclaimed_mutation",
 ]
