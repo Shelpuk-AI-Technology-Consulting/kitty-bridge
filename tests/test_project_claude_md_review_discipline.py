@@ -34,14 +34,20 @@ _ROOT = Path(__file__).resolve().parents[1]
 _CLAUDE_MD = _ROOT / "CLAUDE.md"
 _REVIEW_SECTION_HEADING = "## Resolving GitHub code reviews"
 
-# One entry per behaviour the ticket mandates. The anchors are phrases that
-# only the behaviour's own wording contains; losing any one of them is losing
-# the behaviour, which is exactly what this guard exists to report.
+# One entry per behaviour the ticket mandates. Every anchor is unique to
+# the rule that carries the behaviour — verified by an in-suite probe in
+# `test_the_section_extraction_does_not_leak_preamble_text` and by the
+# sub-clause rewrite probes the KBR-286 review rounds exercise by hand.
+# Losing any anchor means losing the sub-clause it pins, which is exactly
+# what this guard exists to report.
 _CLAUSES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "the PR-level summary comment (what was addressed and implemented, "
-        "what was deferred)",
-        ("PR-level comment", "deferred"),
+        "what was deferred, with the reason)",
+        (
+            "Post a PR-level comment summarising the round",
+            "what was deferred (with the reason)",
+        ),
     ),
     (
         "the optional in-thread replies with further detail",
@@ -52,14 +58,18 @@ _CLAUSES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "resolve the conversations that were taken and fixed",
         (
             "every open conversation",
-            "inline review thread",
+            "including inline review threads",
             "Resolve every conversation that was taken and fixed",
         ),
     ),
     (
         "the declined-conversation disposition (never silently resolved, "
         "left open with a stated reason)",
-        ("never silently resolved", "leave the conversation open"),
+        (
+            "never silently resolved",
+            "leave the conversation open",
+            "naming the reason",
+        ),
     ),
 )
 
@@ -139,8 +149,14 @@ class TestProjectClaudeMdShips:
             text=True,
         )
         # Exit 0 means "matched an ignore pattern", 1 means "matched
-        # nothing", 128 means git itself failed — only the middle state is
-        # acceptable.
+        # nothing", 128 means git itself failed. Branch the message so a
+        # broken git sends the reader at the git failure, not at a phantom
+        # ignore pattern (KBR-286 review round 3 suggestion).
+        if result.returncode == 128:
+            pytest.fail(
+                "git check-ignore --no-index failed (exit 128); the "
+                f"ignore-status guard could not run: {result.stderr.strip()}"
+            )
         assert result.returncode == 1, (
             "CLAUDE.md is matched by .gitignore "
             f"(git check-ignore --no-index exited {result.returncode}); "
@@ -150,6 +166,27 @@ class TestProjectClaudeMdShips:
 
 class TestTheReviewResolutionSection:
     """Every mandated behaviour stays stated in the review-resolution section."""
+
+    def test_the_section_extraction_does_not_leak_preamble_text(self) -> None:
+        """The section extraction stays bounded above by the heading.
+
+        §6.2's self-guard rule: a scan whose boundary drifts must fail red,
+        not silently widen. If ``_review_section`` ever starts swallowing
+        the text above the review-resolution heading, the clause anchors
+        would be satisfiable from outside the section while every clause
+        test stays green — the anchors live in the section either way, so
+        only this negative assertion notices (KBR-286 review round 3).
+        """
+        section = _review_section()
+        assert "user-level instructions" not in section, (
+            "_review_section() leaked the preamble above the "
+            "review-resolution heading; the clause anchors are no longer "
+            "scoped to the section"
+        )
+        assert "Kitty Bridge — project instructions" not in section, (
+            "_review_section() leaked the document title; the clause "
+            "anchors are no longer scoped to the section"
+        )
 
     @pytest.mark.parametrize(("behaviour", "anchors"), _CLAUSES)
     def test_the_section_states_the_behaviour(

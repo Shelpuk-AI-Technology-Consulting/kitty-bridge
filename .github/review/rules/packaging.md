@@ -65,13 +65,15 @@ tests do not execute. A change that makes it advisory is a critical finding.
 
 ## `.gitignore`
 
-🔴 It excludes `/.requirements/`, `/CLAUDE.md` and `/.references/`. **None of
-those reaches a CI checkout**, which means none of them reaches the automated
-reviewer either. `/.system_design/` is deliberately **not** excluded, so the
-design documents do reach it: the committed specification is `README.md` plus
-`.system_design/`. Re-ignoring that directory would silently blind every
-automated review, so treat a change adding it back as a critical finding unless
-the pull request argues for it explicitly.
+🔴 It excludes `/.requirements/` and `/.references/`. **Neither reaches a CI
+checkout**, which means neither reaches the automated reviewer either.
+`CLAUDE.md` left `.gitignore` with KBR-286 and is now tracked, so it does
+reach the checkout — but it is agent workflow instructions, not part of the
+reviewer's specification. `/.system_design/` is deliberately **not** excluded,
+so the design documents do reach it: the committed specification is
+`README.md` plus `.system_design/`. Re-ignoring that directory would silently
+blind every automated review, so treat a change adding it back as a critical
+finding unless the pull request argues for it explicitly.
 
 So a line added or removed here silently widens or narrows every future review,
 and nothing goes red. Two specific checks:

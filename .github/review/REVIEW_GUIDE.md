@@ -20,9 +20,11 @@ Do not review the diff in isolation.
   It is ~33 KB; read it whole.
 
 ⚠️ **What you can and cannot read, as a property of the checkout rather than a
-preference.** `.gitignore` excludes `/.requirements/`, `/CLAUDE.md` and
-`/.references/`, so none of them exists in a CI checkout. Do **not** report a
-missing `REQUIREMENTS.md` as a finding, and do not claim to have read one.
+preference.** `.gitignore` excludes `/.requirements/` and `/.references/`, so
+neither exists in a CI checkout. Do **not** report a missing `REQUIREMENTS.md`
+as a finding, and do not claim to have read one. `CLAUDE.md` left `.gitignore`
+with KBR-286 and is now tracked, so it is in the checkout — it carries agent
+workflow instructions, not reviewer specifications.
 
 `/.system_design/` **is tracked** and is present. Together with `README.md` it is
 the specification: the README is the user-facing interface contract, the design
