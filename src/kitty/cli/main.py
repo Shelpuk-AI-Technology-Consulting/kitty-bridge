@@ -513,6 +513,7 @@ def _run_bridge(
     from contextlib import suppress
 
     from kitty.bridge.server import BridgeServer
+    from kitty.credentials.store import CredentialError
     from kitty.egress import get_egress as _get_egress
     from kitty.egress_guard import egress_block_reason
     from kitty.profiles.schema import BalancingProfile
@@ -535,9 +536,14 @@ def _run_bridge(
 
     profile = backend  # type: ignore[assignment]
 
-    # Resolve API key from credential store
+    # Resolve API key from credential store (KBR-87: a corrupt stored value
+    # reports cleanly and exits, where today's missing-key path does)
     auth_ref = profile.auth_ref  # type: ignore[attr-defined, union-attr]
-    resolved_key = cred_store.get(auth_ref)  # type: ignore[attr-defined, union-attr]
+    try:
+        resolved_key = cred_store.get(auth_ref)  # type: ignore[attr-defined, union-attr]
+    except CredentialError as exc:
+        print_error(str(exc))
+        sys.exit(1)
     if not resolved_key:
         print_error(f"No API key found for profile {profile.name!r}")  # type: ignore[attr-defined, union-attr]
         sys.exit(1)
@@ -630,6 +636,7 @@ def _run_bridge_balancing(
     import sys
 
     from kitty.bridge.server import BridgeServer
+    from kitty.credentials.store import CredentialError
     from kitty.egress import get_egress as _get_egress
     from kitty.egress_guard import egress_block_reason
     from kitty.profiles.resolver import ProfileResolver
@@ -647,7 +654,13 @@ def _run_bridge_balancing(
     # Build backends list: (provider, resolved_key, profile)
     backends = []
     for mp in member_profiles:
-        key = cred_store.get(mp.auth_ref)  # type: ignore[attr-defined, union-attr]
+        # KBR-87: a corrupt stored value reports cleanly and exits, where
+        # today's missing-key path does.
+        try:
+            key = cred_store.get(mp.auth_ref)  # type: ignore[attr-defined, union-attr]
+        except CredentialError as exc:
+            print_error(str(exc))
+            sys.exit(1)
         if not key:
             print_error(f"No API key found for member profile {mp.name!r}")
             sys.exit(1)
@@ -782,6 +795,7 @@ def _launch_target_balancing(
 ) -> int:
     """Launch a coding agent with a balancing profile (random healthy member selection)."""
     from kitty.cli.launcher import launch
+    from kitty.credentials.store import CredentialError
     from kitty.profiles.resolver import ProfileResolver
     from kitty.profiles.store import ProfileStore
     from kitty.providers.registry import get_provider
@@ -793,7 +807,15 @@ def _launch_target_balancing(
     # Build backends list
     backends = []
     for mp in member_profiles:
-        key = cred_store.get(mp.auth_ref)  # type: ignore[attr-defined, union-attr]
+        # KBR-87: a corrupt stored value reports cleanly and returns, where
+        # today's missing-key path does.
+        try:
+            key = cred_store.get(mp.auth_ref)  # type: ignore[attr-defined, union-attr]
+        except CredentialError as exc:
+            from kitty.tui.display import print_error
+
+            print_error(str(exc))
+            return 1
         if not key:
             from kitty.tui.display import print_error
 

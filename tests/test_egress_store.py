@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from kitty.credentials.file_backend import FileBackend
-from kitty.credentials.store import CredentialStore
+from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.egress import ENV_PROXY
 from kitty.egress_store import STORE_VERSION, EgressRecord, EgressStore, resolve_egress
 
@@ -155,6 +155,32 @@ class TestResolveEgress:
 
         with pytest.raises(ValueError, match="reconfigure"):
             resolve_egress(store=store, cred_store=cred_store)
+
+    def test_corrupt_stored_credential_surfaces_as_the_documented_valueerror(
+        self, tmp_path, store: EgressStore, cred_store: CredentialStore
+    ):
+        """A corrupt stored password resolves to the same actionable ValueError.
+
+        KBR-87: cli/main.py's `except ValueError` handler carries the recovery-
+        command carve-out — `kitty egress` must stay reachable when the stored
+        gateway is broken, so the corruption signal has to land in this handler,
+        chained (with the cause text included) rather than escaping as a raw
+        CredentialError that would crash the repair command itself at startup.
+        """
+        store.save(EgressRecord(proxy_url="http://proxy.example.com:3128", username="u", auth_ref="damaged"))
+        (tmp_path / "credentials.json").write_text(
+            json.dumps({"damaged": "@@@ not base64 @@@"}), encoding="utf-8"
+        )
+        # CredentialError is not a ValueError subclass — the boundary contract:
+        # present-but-undecodable raises, absent returns None (KBR-87).
+        with pytest.raises(CredentialError, match="damaged"):
+            cred_store.get("damaged")
+
+        with pytest.raises(ValueError, match="reconfigure") as excinfo:
+            resolve_egress(store=store, cred_store=cred_store)
+
+        assert excinfo.value.__cause__ is not None
+        assert "corrupt" in str(excinfo.value)
 
 
 class TestConcurrentResolution:
