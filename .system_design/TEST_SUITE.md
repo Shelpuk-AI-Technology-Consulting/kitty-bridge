@@ -2075,11 +2075,41 @@ bridge tests (`tests/bridge/`).
 The Anthropic streaming format is a grammar, not a schema: `message_start` …
 `content_block_start` / `content_block_delta`* / `content_block_stop` … `message_delta`,
 `message_stop`. A malformed sequence breaks Claude Code in ways a per-event schema check cannot
-see.
+see. The same kind of grammar applies to OpenAI Responses (`response.created`,
+`response.output_item.added`, …, `response.completed`), Chat Completions (`data: {chunk}`* →
+`data: [DONE]`), and Gemini (`data: {GenerateContentResponse}`* — no sentinel).
 
 Test as a state machine over the byte stream the bridge writes: every stream it produces —
-including error streams, failover mid-stream, and the empty-response fallback — must be a
-sentence in that grammar. Applies to all three streaming protocols.
+including error streams, failover mid-stream, the empty-response fallback, and the documented
+close-out shapes (the native Messages-wire fallback that appends one `error` event, the
+translated-path `finalize_interrupted_stream`, the KBR-250 in-stream exhaustion shapes, the
+KBR-241 pre-content error ladder, the KBR-236 empty-verdict-after-content gate) — must
+classify as one of:
+
+- **`complete_sentence`** — the grammar's closing event was reached (`message_stop` /
+  `response.completed` / `[DONE]` / Gemini end-of-stream).
+- **`error_terminal`** — the stream ended with the documented error event(s) and **all**
+  opened structure was closed first (e.g. Messages `[…, block_stop(s)…, error]`, the KBR-236
+  empty-after-emission shape).
+- **`json_error`** — no stream was written; the bridge returned a JSON error body (KBR-155
+  D1–D7: every pre-release failure is JSON, not SSE).
+- **`truncated`** — at `finish()`, an opened content block / output item is still open (the
+  native Messages-wire close-out writes exactly this: one `error` event with the forwarded
+  blocks left open, and the trailing error does not rescue an unclosed block).
+- **`malformed`** — a structural violation: an illegal event kind at its position, an
+  out-of-window delta, a frame after the terminal, an unparseable payload.
+
+The classification precedence (when two rules both apply) is fixed and pinned by the
+falsification suite: `malformed > truncated (open structure at finish) > complete_sentence
+> error_terminal > truncated (no terminal)`.
+
+Applies to all four inbound streaming protocols (`/v1/messages`, `/v1/responses`,
+`/v1/chat/completions`, `/v1beta/models/{model}:streamGenerateContent`); the non-streaming
+`:generateContent` route has no stream to validate. Per-shape expectations — including the
+post-emission injection-point matrix whose per-cell classification depends on which blocks
+the injected frames close — live in
+`.requirements/20260917T120913Z_sse_grammar_state_machine/REQUIREMENTS.md` §4, which is the
+working table the grammar module and bridge-driven test module assert against.
 
 #### 6.2.3 Register and docs ⇄ code
 

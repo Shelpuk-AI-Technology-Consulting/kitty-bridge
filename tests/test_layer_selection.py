@@ -561,6 +561,13 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_route_registration_matrix.py",
             "tests/test_responses_normalizer.py",
             "tests/test_route_preflight.py",
+            # KBR-83 (T-G7). A §6.2.2 contract guard: the downstream SSE
+            # grammar state machine driven over a real BridgeFixture — every
+            # stream the bridge writes must classify as one of the five
+            # documented outcomes (complete_sentence / error_terminal /
+            # json_error / truncated / malformed). The grammar module itself
+            # stays at the l1 default; only this bridge-driven half claims l2.
+            "tests/bridge/test_sse_grammar.py",
         }
 
         actual = {
