@@ -1582,11 +1582,11 @@ class ResponsesReplyProjection:
             # §7.4.2 rule 7 row 2 — the strict posture (KBR-292): absent,
             # empty, and non-string names all raise, matching the request
             # direction and the other strict readers.
-            _require_tool_call_name(item.get("name"), f"{prefix}.name")
+            name = _require_tool_call_name(item.get("name"), f"{prefix}.name")
             _residualise(item, set(cls._FUNCTION_CALL_KEYS), prefix, residual)
             return (
                 c.ToolUse(
-                    name=item["name"],
+                    name=name,
                     arguments=c.decode_arguments(
                         item.get("arguments"), f"{prefix}.arguments", residual
                     ),

@@ -935,9 +935,10 @@ def decode_arguments(raw: Any, path: str, residual: dict[str, Any]) -> Mapping[s
     empty / non-string tool names — Gemini, Ollama, Bedrock Converse, and both
     Responses directions via the per-module ``_require_tool_call_name``
     helper, Chat Completions and Anthropic inline at the call site (the
-    settled §7.4.2 rule 7 row 2 posture, KBR-281 + KBR-292); Gemini
-    declarations still residualise a missing-name leaf on the field's own
-    path, with the part projected.  The test generalises to every required field: *can the
+    settled §7.4.2 rule 7 row 2 posture, KBR-281 + KBR-292); the declaration
+    branches (Gemini ``FunctionDeclaration``, Responses ``FunctionTool``,
+    Converse ``toolSpec``) still residualise a missing-name leaf on the
+    field's own path, with the declaration projected.  The test generalises to every required field: *can the
     projection represent the absence losslessly?*  ``{}`` is a true statement
     about a call — seen and classified, the same ground on which
     :data:`STOP_REASONS` gives ``other`` its escape instead of the residual.
