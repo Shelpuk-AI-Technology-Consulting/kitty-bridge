@@ -14,6 +14,7 @@ The translator emits the full Responses API streaming lifecycle:
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 
@@ -32,7 +33,12 @@ from kitty.bridge.responses.events import (
     format_response_in_progress_event,
 )
 
-__all__ = ["InvalidResponsesRequest", "ResponsesTranslator", "normalize_responses_request"]
+__all__ = [
+    "InvalidResponsesRequest",
+    "ResponsesTranslator",
+    "carry_responses_tool_choice",
+    "normalize_responses_request",
+]
 
 # MiniMax interleaved thinking tags: <اخل>...</اخل>
 _THINKING_TAG_RE = re.compile(r"<\u0627\u062e\u0644>.*?</\u0627\u062e\u0644>", re.DOTALL)
@@ -40,6 +46,145 @@ _EMPTY_ASSISTANT_FALLBACK_TEXT = (
     "Upstream model returned an empty response. Please retry. "
     "If the context is full, use /clear to reset the conversation."
 )
+
+#: Chat Completions ``tool_choice`` string values the Responses wire publishes
+#: with the same spelling (KBR-221 R1).
+_RESPONSES_SIMPLE_TOOL_CHOICES: frozenset[str] = frozenset({"auto", "none", "required"})
+
+
+def _names_degraded_responses_tool(tools: object, name: str) -> bool:
+    """Report whether the inbound Responses ``tools`` list declares ``name`` as a tool the hop degraded.
+
+    A function-typed ``tool_choice`` is only forceable onto a tool the route
+    still declares as a function.  ``type: "custom"`` freeform tools and the
+    hosted ``ToolChoiceTypes`` built-ins (``web_search_preview`` and the rest,
+    enumerated in :mod:`kitty.bridge.responses.translator` prose and in the
+    ``TestResponsesToolChoice.test_tool_choice_hosted_is_omitted`` parametrize)
+    carry no Chat Completions form on this hop -- forcing a call to one would
+    force a call nothing on the route can execute (KBR-221 D10).  This helper
+    tests the simple property ``type != "function"`` because it catches every
+    non-function declaration -- hosted types, ``custom``, anything malformed
+    the wire may yet publish -- without enumerating the closed set in two
+    places that would have to stay in sync.
+
+    A name the list does not declare is **not** reported: that body is the
+    agent's mistake, and the provider's error says so better than a silent
+    omission would (KBR-221 D8 -- the KBR-214 precedent carries undeclared
+    names so the provider's 400 names the mistake).
+
+    Args:
+        tools: The inbound Responses ``tools`` list.  A non-list value is
+            treated as empty.
+        name: The tool name a ``tool_choice`` of type ``function`` selects.
+
+    Returns:
+        True when a declaration with that name is present and carries a
+        non-function ``type``; False otherwise.
+    """
+    if not isinstance(tools, list):
+        return False
+    return any(
+        isinstance(tool, dict) and tool.get("name") == name and tool.get("type") != "function"
+        for tool in tools
+    )
+
+
+def carry_responses_tool_choice(responses_request: dict, cc_request: dict) -> None:
+    """Carry a Responses ``tool_choice`` and ``parallel_tool_calls`` onto a Chat Completions body.
+
+    Called from :meth:`ResponsesTranslator.translate_request`, the way KBR-214's
+    :func:`kitty.bridge.messages.translator.carry_tool_choice_and_metadata` is
+    called from the Messages converter.  ``tool_choice`` is a constraint, not a
+    hint: dropping ``"required"`` lets the model answer in prose where the agent
+    demanded a tool call, and dropping ``"none"`` lets it call a tool the agent
+    forbade (KBR-221).
+
+    Most Responses choices share the Chat Completions spelling.  The named
+    function form moves ``name`` under ``function``; ``allowed_tools`` carries
+    by its ``mode`` because the mode is the only part the canonical vocabulary
+    models.  The omissions mirror the KBR-214 decisions:
+
+    * **No tools, no choice** (D9).  The gate reads the *Chat Completions*
+      tool list this body will ship, not the inbound list: a Responses
+      ``tools`` list of only hosted entries filters to an empty CC list, and
+      OpenAI rejects a choice beside no tools ("'tool_choice' is only allowed
+      when 'tools' are specified").  The gate scopes to the ``tool_choice``
+      carry alone -- the parallel knob is a standalone wire field and ships
+      regardless.
+    * **A forced call to a degraded tool is not carried** (D10).  Hosted,
+      MCP and ``custom`` tools are flattened away on this hop; forcing one
+      would force a call nothing on the route can execute.  The named-tool
+      lookup walks the inbound ``tools`` list, the only place the degraded
+      entries still live.  A choice naming an **undeclared** tool is carried
+      -- the agent's mistake, and the provider's error names it (D8).
+    * **Values with no Chat Completions form are omitted, not repaired**
+      (D5).  The eleven hosted types, ``mcp``, and any shape that is neither
+      a published string nor a published object are left out; kitty has no
+      authority to invent a reading.
+
+    ``parallel_tool_calls`` is forwarded only when the wire carries an
+    explicit ``False`` (D2).  ``True`` is the documented default on both wires,
+    so writing it would add a field whose behaviour it does not change; a
+    non-boolean value would residualise upstream and manufacture an unclaimed
+    delta (D5).  Unlike the Anthropic Messages knob -- which nests inside
+    ``tool_choice.disable_parallel_tool_use`` and so is structurally tied to
+    the choice -- Responses carries ``parallel_tool_calls`` as a standalone
+    top-level boolean, and the carry is **independent of the D9 gate**: an
+    inbound ``false`` is forwarded even when no tools are present, so an agent
+    that sends the knob without tools reaches the backbone with the
+    instruction intact.  This matches R2's unconditional mapping table.
+
+    Args:
+        responses_request: The inbound OpenAI Responses body.  Not modified.
+        cc_request: The Chat Completions body being built, mutated in place.
+
+    Returns:
+        None.  ``cc_request`` gains ``tool_choice`` and ``parallel_tool_calls``
+        only where the inbound body carries a representable value for them.
+    """
+    # The two carries are independent: D9 gates only ``tool_choice``; the
+    # parallel knob ships even when no tools are present.
+
+    # D2 / D5: forward only the explicit non-default ``False``; ``True`` is the
+    # default on both wires and a non-bool value would residualise upstream.
+    # Done before the D9 gate -- a Responses ``false`` is the wire's
+    # standalone instruction, not a child of the choice.
+    if responses_request.get("parallel_tool_calls") is False:
+        cc_request["parallel_tool_calls"] = False
+
+    # D9: the gate reads the CC list the body will ship.  An inbound list of
+    # only hosted entries filters to an empty CC list, and an absent key means
+    # no tools at all -- both cases omit the choice.  Applied only to the
+    # ``tool_choice`` carry; the parallel knob was already handled above.
+    cc_tools = cc_request.get("tools")
+    if not isinstance(cc_tools, list) or not cc_tools:
+        return
+
+    choice = responses_request.get("tool_choice")
+    if isinstance(choice, str):
+        if choice in _RESPONSES_SIMPLE_TOOL_CHOICES:
+            cc_request["tool_choice"] = choice
+    elif isinstance(choice, dict):
+        kind = choice.get("type")
+        name = choice.get("name")
+        if kind == "function":
+            # D10: a function-typed choice naming a tool the hop degraded is
+            # omitted.  The lookup walks the inbound list, the only place the
+            # degraded entry still lives -- the CC list has already filtered
+            # it out.  Undeclared names fall through to the carry (D8).
+            if isinstance(name, str) and not _names_degraded_responses_tool(
+                responses_request.get("tools"), name
+            ):
+                cc_request["tool_choice"] = {"type": "function", "function": {"name": name}}
+        elif kind == "allowed_tools":
+            mode = choice.get("mode")
+            # Only the mode has a canonical home (the reader projects just the
+            # mode); non-published or non-string modes are omitted (D5).
+            if isinstance(mode, str) and mode in _RESPONSES_SIMPLE_TOOL_CHOICES:
+                cc_request["tool_choice"] = mode
+        # Hosted types, ``mcp`` and ``custom`` fall through -- no CC form
+        # (D5), and the degraded-tool rule (D10) keeps a named reference to
+        # them from riding along either.
 
 
 def _empty_assistant_fallback_text(context: dict | None = None) -> str:
@@ -67,6 +212,30 @@ def _empty_assistant_fallback_text(context: dict | None = None) -> str:
 def _strip_thinking_tags(text: str) -> str:
     """Strip MiniMax-style interleaved thinking tags from content."""
     return _THINKING_TAG_RE.sub("", text).strip()
+
+
+def _extract_text_parts(content: list) -> str:
+    """Extract a joined text string from a multimodal parts list.
+
+    KBR-285: newer multimodal streaming on OpenAI-shaped backends carries
+    ``content`` as a list of content parts. Only text parts carry a string
+    the Responses wire can hold; image parts have no output equivalent and
+    are dropped (the raw-CC route delivers them verbatim).
+
+    Args:
+        content: The parts list from ``delta.content`` / ``message.content``.
+
+    Returns:
+        The joined text of the list's text parts (empty string when the
+        list carries no text part).
+    """
+    text_parts = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            text_val = part.get("text")
+            if isinstance(text_val, str) and text_val.strip():
+                text_parts.append(text_val)
+    return "\n".join(text_parts)
 
 
 class InvalidResponsesRequest(ValueError):
@@ -105,6 +274,24 @@ def normalize_responses_request(body: object) -> dict:
     omitted because the rewrite is real bytes on the ``curl_cffi`` boundary, and
     it binds the future OpenAI-Responses reader to read the two forms alike.
 
+    The shape checks below are **scoped to the fields the translator actually
+    reads containers and members off**.  Each one exists because a measured
+    body reached the translator and crashed inside it (KBR-159): every
+    unguarded container here is an unhandled-exception 500 the
+    ``.system_design/TEST_SUITE.md`` §6.2.1 ``not_a_server_error`` check
+    forbids.  Fields the translator *tolerates* are deliberately **not**
+    validated -- ``instructions`` as an object, ``reasoning`` as a string and
+    a bare-number message ``content`` all pass through today, and rejecting
+    them would refuse bodies real clients legitimately send (KBR-82's
+    "why publish a schema" paragraph).
+
+    The ``function_call_output`` shape with missing ``call_id`` is **not**
+    validated here -- KBR-169's orphan-drop pass (``_drop_orphan_response_outputs``
+    at ``src/kitty/bridge/server.py:388``) handles that shape by silently
+    dropping the unpaired item and answering 200.  Validating it here would
+    duplicate KBR-169's job and break its contract -- KBR-169 deliberately
+    treats a missing ``call_id`` as "undeclared" (its docstring).
+
     Args:
         body: The decoded inbound request body.  Typed ``object`` rather than
             ``dict`` because this is a trust boundary: the caller has decoded
@@ -117,12 +304,33 @@ def normalize_responses_request(body: object) -> dict:
         unchanged, so calling this twice is safe.
 
     Raises:
-        InvalidResponsesRequest: The body is not a JSON object, or ``input`` is
-            neither a string nor an array of objects.
+        InvalidResponsesRequest: The body is not a JSON object; or ``input`` is
+            neither a string nor an array of objects; or one of the containers
+            the translator iterates (``tools``, a reasoning item's ``summary``)
+            carries the wrong shape.
     """
     # A field can only be read off an object; valid JSON is a weaker claim.
     if not isinstance(body, dict):
         raise InvalidResponsesRequest(f"Request body must be a JSON object, got {type(body).__name__}")
+
+    # `tools` is iterated and its members have `.get` called on them in the
+    # translator; a non-list here iterates its keys (a dict) or its characters
+    # (a string) and crashes.  Function tools must carry a name and a
+    # parameters object; every other tool kind (`web_search`, `custom`, MCP,
+    # ...) is skipped by the translator on purpose and must stay unvalidated.
+    if "tools" in body:
+        tools = body["tools"]
+        if not isinstance(tools, list):
+            raise InvalidResponsesRequest(f"'tools' must be an array, got {type(tools).__name__}")
+        for index, tool in enumerate(tools):
+            if not isinstance(tool, dict):
+                raise InvalidResponsesRequest(f"'tools[{index}]' must be an object, got {type(tool).__name__}")
+            if tool.get("type") == "function":
+                name = tool.get("name")
+                if not isinstance(name, str) or not name:
+                    raise InvalidResponsesRequest(f"'tools[{index}].name' must be a non-empty string")
+                if not isinstance(tool.get("parameters"), dict):
+                    raise InvalidResponsesRequest(f"'tools[{index}].parameters' must be an object")
 
     if "input" not in body:
         return body
@@ -136,12 +344,48 @@ def normalize_responses_request(body: object) -> dict:
     if not isinstance(value, list):
         raise InvalidResponsesRequest(f"'input' must be a string or an array, got {type(value).__name__}")
 
-    # Reported by index, because a client sending a long transcript needs to know which item.
+    _validate_input_items(value)
+    return body
+
+
+def _validate_input_items(value: list) -> None:
+    """Validate the shapes inside ``input`` that the translator reads members off.
+
+    A reasoning item's ``summary`` must be a list of objects carrying a string
+    ``text``: the translator iterates it and joins the texts, so both a string
+    ``summary`` and a non-string ``text`` crash it. The
+    ``function_call_output`` shape is **not** validated here -- see the
+    docstring of :func:`normalize_responses_request` for the KBR-169 boundary.
+
+    Args:
+        value: The ``input`` field's array form, after the string form has
+            been rewritten.
+
+    Raises:
+        InvalidResponsesRequest: One of the container shapes above is wrong.
+            Items are reported by index, because a client sending a long
+            transcript needs to know which one.
+    """
     for index, element in enumerate(value):
         if not isinstance(element, dict):
             raise InvalidResponsesRequest(f"'input[{index}]' must be an object, got {type(element).__name__}")
 
-    return body
+        if element.get("type") == "reasoning":
+            summary = element.get("summary", [])
+            if not isinstance(summary, list):
+                raise InvalidResponsesRequest(
+                    f"'input[{index}].summary' must be an array, got {type(summary).__name__}"
+                )
+            for position, entry in enumerate(summary):
+                if not isinstance(entry, dict):
+                    raise InvalidResponsesRequest(
+                        f"'input[{index}].summary[{position}]' must be an object, "
+                        f"got {type(entry).__name__}"
+                    )
+                if not isinstance(entry.get("text"), str):
+                    raise InvalidResponsesRequest(
+                        f"'input[{index}].summary[{position}].text' must be a string"
+                    )
 
 
 class ResponsesTranslator:
@@ -341,6 +585,9 @@ class ResponsesTranslator:
             result["_reasoning_effort"] = effort
             result["_thinking_enabled"] = effort != "none"
 
+        # KBR-221: carry the agent's tool_choice and parallel_tool_calls.
+        carry_responses_tool_choice(responses_request, result)
+
         return result
 
     @staticmethod
@@ -438,8 +685,19 @@ class ResponsesTranslator:
                 }
             )
 
-        # Text content
+        # Text content. KBR-285: a raw-CC upstream may deliver content as a
+        # list of multimodal parts — coerce to the string the Responses wire
+        # carries — and a refusal-only reply carries the model's reply on
+        # ``refusal`` with ``content`` null, which becomes text too. A parts
+        # list with no text element coerces to "" and emits no item: the
+        # Responses wire has no image-delta equivalent.
         content = message.get("content")
+        if isinstance(content, list):
+            content = _extract_text_parts(content)
+        if not content:
+            refusal = message.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                content = refusal
         if content:
             content = _strip_thinking_tags(content)
             if content:
@@ -462,6 +720,33 @@ class ResponsesTranslator:
                     "call_id": tc.get("id", f"call_{uuid.uuid4().hex}"),
                     "name": func.get("name", ""),
                     "arguments": func.get("arguments", "{}"),
+                    "status": "completed",
+                }
+            )
+
+        # KBR-285: the deprecated single-dict ``function_call`` maps to one
+        # function_call item, the same shape the ``tool_calls`` loop emits.
+        # No real upstream carries both; if one did, the ``tool_calls`` loop
+        # already ran and the legacy path appends a second item — the least-
+        # bad merge, recorded for the precondition. A non-string
+        # ``arguments`` value (the detector widening makes the shape
+        # reachable) serialises as JSON rather than shipping a Python repr.
+        function_call = message.get("function_call")
+        has_function_call = isinstance(function_call, dict) and bool(function_call)
+        if has_function_call:
+            raw_args = function_call.get("arguments", "{}")
+            if not isinstance(raw_args, str):
+                try:
+                    raw_args = json.dumps(raw_args)
+                except (TypeError, ValueError):
+                    raw_args = "{}"
+            output.append(
+                {
+                    "type": "function_call",
+                    "id": f"fc_{uuid.uuid4().hex[:24]}",
+                    "call_id": f"call_{uuid.uuid4().hex}",
+                    "name": function_call.get("name", ""),
+                    "arguments": raw_args,
                     "status": "completed",
                 }
             )
@@ -547,8 +832,19 @@ class ResponsesTranslator:
                 )
             self._accumulated_reasoning += reasoning_content
 
-        # Text delta
+        # Text delta. KBR-285: a raw-CC upstream may deliver content as a list of
+        # multimodal parts — coerce to the string the Responses wire carries —
+        # and a refusal-only delta carries the model's reply on ``refusal``
+        # with ``content`` null, which becomes text too. A parts list with no
+        # text element coerces to "" and emits no delta: the Responses wire
+        # has no image-delta equivalent.
         content = delta.get("content")
+        if isinstance(content, list):
+            content = _extract_text_parts(content)
+        if not content:
+            refusal = delta.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                content = refusal
         if content:
             # Lazily start text item on first content
             if not self._text_started:
@@ -590,8 +886,36 @@ class ResponsesTranslator:
                 )
             )
 
-        # Tool call delta
+        # Tool call delta. KBR-285: the deprecated single-dict ``function_call``
+        # maps onto the same machinery — the opening delta synthesises the
+        # id/index and carries the name, later deltas argument-append. The
+        # existing ``tool_calls`` branch handles both shapes unchanged. No
+        # real upstream carries both fields; if one did, a ``tool_calls``
+        # list wins and a later legacy delta appends to the index-0 buffer
+        # that call opened.
         tool_calls = delta.get("tool_calls")
+        if not tool_calls:
+            legacy_call = delta.get("function_call")
+            if isinstance(legacy_call, dict) and legacy_call:
+                if 0 in self._tool_call_meta:
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "function": {"arguments": legacy_call.get("arguments", "")},
+                        }
+                    ]
+                else:
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "id": f"call_{uuid.uuid4().hex[:24]}",
+                            "type": "function",
+                            "function": {
+                                "name": legacy_call.get("name", ""),
+                                "arguments": legacy_call.get("arguments", ""),
+                            },
+                        }
+                    ]
         if tool_calls:
             for tc_delta in tool_calls:
                 idx = tc_delta.get("index", 0)

@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 
 from kitty.egress import get_egress
 from kitty.providers.anthropic import _safe_json_load_args
-from kitty.providers.base import ProviderAdapter, ProviderError
+from kitty.providers.base import ProviderAdapter, ProviderError, WireShape
 
 __all__ = ["BedrockAdapter"]
 
@@ -87,6 +87,18 @@ class BedrockAdapter(ProviderAdapter):
     def use_custom_transport(self) -> bool:
         return True
 
+    @property
+    def upstream_wire_shape(self) -> WireShape:
+        """:attr:`WireShape.OTHER` — Bedrock Converse is a fifth wire, not Messages.
+
+        KBR-137 added this declaration.  The default is
+        :attr:`~kitty.providers.base.WireShape.CHAT_COMPLETIONS`, which would
+        mis-label Bedrock's Converse body (``inferenceConfig``, ``toolSpec``,
+        ``system: [{text: …}]``) as Chat Completions and let a CC-style
+        thinking-carrier recovery reach a body that does not accept it.
+        """
+        return WireShape.OTHER
+
     # ── Credential helpers ───────────────────────────────────────────────
 
     def parse_aws_credentials(self, raw: str) -> tuple[str, ...]:
@@ -138,6 +150,13 @@ class BedrockAdapter(ProviderAdapter):
 
         Uses AWS credentials from resolved_key or SSO profile from
         provider_config.
+
+        ``provider_config["endpoint_url"]`` is the test-harness seam: the
+        recording upstream (T-B3) points botocore at a local aiohttp server
+        by setting this key. Production profiles do not carry it, so the
+        key is consumed only when truthy — passing ``None`` raises on
+        some botocore versions and is silently ignored on others, and the
+        contract must be one or the other.
         """
         try:
             import boto3
@@ -155,6 +174,10 @@ class BedrockAdapter(ProviderAdapter):
             from botocore.config import Config as _BotoConfig
 
             client_kwargs["config"] = _BotoConfig(proxies=egress.proxies_dict())
+
+        endpoint_url = provider_config.get("endpoint_url")
+        if endpoint_url:
+            client_kwargs["endpoint_url"] = endpoint_url
 
         if self.is_sso_mode(resolved_key):
             profile_name = self.get_profile_name(provider_config)
@@ -265,12 +288,18 @@ class BedrockAdapter(ProviderAdapter):
         """
         content_blocks: list[dict] = []
 
+        # KBR-264: the published botocore ``bedrock-runtime`` ``ReasoningContentBlock``
+        # union is exactly ``{reasoningText, redactedContent}``; ``reasoningText``
+        # nests the ``text`` member. A top-level ``text`` inside ``reasoningContent``
+        # is rejected by ``botocore.validate.validate_parameters`` before the
+        # request reaches AWS, so every thinking-enabled Converse call must use the
+        # nested spelling — populated and empty alike.
         reasoning = msg.get("reasoning_content")
         thinking_enabled = (cc_request or {}).get("_thinking_enabled")
         if reasoning:
-            content_blocks.append({"reasoningContent": {"text": reasoning}})
+            content_blocks.append({"reasoningContent": {"reasoningText": {"text": reasoning}}})
         elif thinking_enabled:
-            content_blocks.append({"reasoningContent": {"text": ""}})
+            content_blocks.append({"reasoningContent": {"reasoningText": {"text": ""}}})
 
         text = msg.get("content")
         if text:
@@ -383,17 +412,52 @@ class BedrockAdapter(ProviderAdapter):
 
     # ── Custom transport: non-streaming ──────────────────────────────────
 
-    async def make_request(self, cc_request: dict) -> dict:
-        """Perform a non-streaming Bedrock Converse call via boto3."""
+    def _bedrock_body(self, cc_request: dict) -> tuple[str, dict]:
+        """Build the ``(model_id, body_kwargs)`` pair the Converse calls take.
+
+        Applies register row P18 to the hook's output: boto3 takes the model
+        id as a ``modelId`` call argument and selects streaming by choosing
+        ``converse`` vs ``converse_stream``, so neither key rides in
+        the body.
+
+        Pure — no IO, no boto3 client. Extracted from the two transport
+        methods so the pops are reachable from an L1 selection (KBR-89 /
+        T-H2: a mutation of either pop now fails
+        ``TestBedrockBody::test_body_lacks_modelid_and_stream`` instead of
+        living untested inside a network method).
+
+        The ``stream`` pop is defensive: ``translate_to_upstream`` does not
+        emit ``stream`` today, but if a future translator change starts to,
+        this pop catches it at L1 rather than letting AWS reject the call at
+        runtime.
+
+        Args:
+            cc_request: CC-format request, identical to what
+                :meth:`translate_to_upstream` accepts.
+
+        Returns:
+            A ``(model_id, body)`` tuple; ``body`` is the kwargs dict to
+            splat into ``client.converse(modelId=model_id, **body)`` or
+            ``client.converse_stream(modelId=model_id, **body)``.
+
+        Raises:
+            KeyError: If ``cc_request`` lacks the required ``"model"`` key
+                — propagated from :meth:`translate_to_upstream`.
+        """
         bedrock_request = self.translate_to_upstream(cc_request)
         model_id = bedrock_request.pop("modelId")
+        bedrock_request.pop("stream", None)
+        return model_id, bedrock_request
+
+    async def make_request(self, cc_request: dict) -> dict:
+        """Perform a non-streaming Bedrock Converse call via boto3."""
+        model_id, bedrock_request = self._bedrock_body(cc_request)
 
         # Extract provider_config for credential resolution
         provider_config = cc_request.get("_provider_config", {})
         resolved_key = cc_request.get("_resolved_key", "")
 
         client = self._get_boto3_client(resolved_key, provider_config)
-        bedrock_request.pop("stream", None)
 
         # Run boto3 call in thread pool (it's synchronous)
         loop = asyncio.get_event_loop()
@@ -415,14 +479,12 @@ class BedrockAdapter(ProviderAdapter):
         write: Callable[[bytes], Awaitable[None]],
     ) -> None:
         """Perform a streaming Bedrock ConverseStream call via boto3."""
-        bedrock_request = self.translate_to_upstream(cc_request)
-        model_id = bedrock_request.pop("modelId")
+        model_id, bedrock_request = self._bedrock_body(cc_request)
 
         provider_config = cc_request.get("_provider_config", {})
         resolved_key = cc_request.get("_resolved_key", "")
 
         client = self._get_boto3_client(resolved_key, provider_config)
-        bedrock_request.pop("stream", None)
 
         # Run boto3 call in thread pool
         loop = asyncio.get_event_loop()
@@ -523,6 +585,66 @@ class BedrockAdapter(ProviderAdapter):
                     raise err
 
         return chunks
+
+    def parse_stream_to_cc_response(self, raw: bytes) -> dict:
+        """Parse collected Chat Completions SSE chunks into a CC response.
+
+        :meth:`stream_request` writes the bytes this parser reads: the
+        ConverseStream events it translated through
+        :meth:`_translate_stream_event` are already Chat Completions SSE,
+        so re-parsing them here — instead of falling back to the
+        Responses-SSE parser, which cannot read CC chunks — is what lets
+        the bridge's custom-transport branch judge a Bedrock completion's
+        real content (KBR-287 review round 1: without this method the
+        parsed response was content-free for every Bedrock completion,
+        content-bearing or not, and the branch laddered it).
+
+        Args:
+            raw: The bytes :meth:`stream_request` wrote, in wire order.
+
+        Returns:
+            A Chat Completions response dict whose ``choices[0].message``
+            carries the streamed ``content`` and ``tool_calls``, and whose
+            ``finish_reason`` is the last one the wire carried (``stop``
+            when none did).
+        """
+        text_parts: list[str] = []
+        tool_calls: list[dict] = []
+        model = ""
+        finish_reason = "stop"
+
+        for line in raw.decode("utf-8", errors="replace").split("\n"):
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            model = chunk.get("model", model)
+            choice = (chunk.get("choices") or [{}])[0]
+            finish_reason = choice.get("finish_reason") or finish_reason
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                text_parts.append(delta["content"])
+            if delta.get("tool_calls"):
+                tool_calls.extend(delta["tool_calls"])
+
+        message: dict = {"role": "assistant", "content": "".join(text_parts) or None}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": 0,
+            "model": model,
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
 
     def _make_sse_chunk(
         self,

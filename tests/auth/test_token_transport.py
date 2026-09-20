@@ -129,7 +129,7 @@ class TestTheTimeoutIsExplicit:
 
         ``curl_cffi`` happens to default to 30 s today, which is what the
         ``aiohttp`` leg used, but that is an undocumented dependency default
-        under an unbounded version range.  ``get_valid_api_key`` holds its
+        under the pinned range.  ``get_valid_api_key`` holds its
         refresh lock across both POSTs, so an unbounded timeout would stall
         every concurrent request on the session, not just one.
         """

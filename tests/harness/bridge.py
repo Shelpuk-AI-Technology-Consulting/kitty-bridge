@@ -68,6 +68,7 @@ __all__ = [
     "TransportTimeout",
     "UpstreamTransport",
     "AiohttpTransport",
+    "assert_fixture_reached_its_recorder",
     "assert_transport_reaches_its_recorder",
     "backend_for",
     "inbound_path",
@@ -270,26 +271,33 @@ def registered_transports() -> tuple[str, ...]:
     return tuple(sorted(_TRANSPORTS))
 
 
-def transport(name: str, fmt: WireFormat, *, responder: Responder | None = None) -> UpstreamTransport:
+def transport(name: str, fmt: WireFormat, *, responder: Responder | None = None, **kwargs: Any) -> UpstreamTransport:
     """Build a registered transport.
 
     Args:
         name: A registered transport name.
         fmt: The upstream wire format it should serve.
         responder: What to reply with; the transport's own default when omitted.
+        **kwargs: Forwarded to the factory. Reserved for transport-specific
+            configuration the registry factory declares — the curl_cffi
+            transport's TLS context and CA path, for instance. A factory that
+            does not name a kwarg rejects it with ``TypeError``, so the call
+            site sees the misconfiguration immediately rather than silently
+            building a transport without the security it required.
 
     Returns:
         An unstarted transport.
 
     Raises:
         LookupError: When ``name`` is not registered.
+        TypeError: When ``kwargs`` names a parameter the factory does not accept.
     """
     try:
         factory = _TRANSPORTS[name]
     except KeyError:
         raise LookupError(f"no transport named {name!r}; registered: {registered_transports()}") from None
 
-    return factory(fmt, responder=responder)
+    return factory(fmt, responder=responder, **kwargs)
 
 
 def marker() -> str:
@@ -584,9 +592,9 @@ def profile_for(
     """Return a valid profile pointed at ``transport``.
 
     ``provider_config`` is the channel the bridge reads — ``profile`` in
-    balancing mode, the constructor keyword in single-backend mode.
-    ``Profile.base_url`` is neither: the resolver never reads it, and it is typed
-    ``HttpsUrl``, which a loopback recorder serving ``http://`` cannot satisfy.
+    balancing mode, the constructor keyword in single-backend mode. The base
+    URL, if any, lives in ``provider_config["base_url"]``; ``Profile.base_url``
+    was deleted in KBR-158 and a profile that sets it raises.
 
     Args:
         transport: A **started** transport; its binding is read here.
@@ -701,6 +709,11 @@ class BridgeFixture:
     transport: UpstreamTransport
     model: str | None = MODEL
     backend_models: Sequence[str] | None = None
+    #: The bridge's resolved credential. Most adapters ignore this; the OpenAI
+    #: subscription provider reads it as a path to an OAuth session file, so
+    #: the curl_cffi transport must hand in a path that resolves to a real
+    #: JSON file. Defaults to :data:`_KEY` for the transports that ignore it.
+    key: str = _KEY
     server: BridgeServer | None = field(init=False, default=None)
     _port: int = field(init=False, default=0, repr=False)
 
@@ -741,7 +754,7 @@ class BridgeFixture:
             self.server = BridgeServer(
                 None,  # type: ignore[arg-type]
                 adapter,
-                _KEY,
+                self.key,
                 model=self.model,
                 provider_config=provider_config,
             )
@@ -753,7 +766,7 @@ class BridgeFixture:
             self.server = BridgeServer(
                 None,  # type: ignore[arg-type]
                 adapter,
-                _KEY,
+                self.key,
                 model=self.model,
                 backends=backends,
             )
@@ -884,7 +897,7 @@ class BridgeFixture:
 
 
 async def assert_transport_reaches_its_recorder(
-    subject: UpstreamTransport, *, protocol: InboundProtocol | None = None
+    subject: UpstreamTransport, *, protocol: InboundProtocol | None = None, key: str | None = None
 ) -> None:
     """Assert a registered transport actually carries a bridge's request.
 
@@ -907,6 +920,10 @@ async def assert_transport_reaches_its_recorder(
         subject: An unstarted transport. Started and stopped by this function.
         protocol: The inbound route to drive; the one matching the transport's
             declared format by default.
+        key: The bridge's resolved credential; :data:`_KEY` when omitted. Most
+            adapters ignore it. The OpenAI subscription provider reads it as a
+            path to an OAuth session file, so a transport on that adapter names
+            a path that resolves.
 
     Raises:
         AssertionError: When the bridge did not reach *this* transport's
@@ -917,7 +934,11 @@ async def assert_transport_reaches_its_recorder(
     route = protocol if protocol is not None else protocol_for(subject.format)
     sent = marker()
 
-    async with BridgeFixture(subject) as fixture:
+    fixture_kwargs: dict[str, Any] = {}
+    if key is not None:
+        fixture_kwargs["key"] = key
+
+    async with BridgeFixture(subject, **fixture_kwargs) as fixture:
         status, text = await fixture.post(inbound_path(route), minimal_inbound_body(route, sent))
         captures = list(subject.captures)
 
@@ -949,3 +970,72 @@ async def assert_transport_reaches_its_recorder(
     #    since `__aexit__` raises first either way, and an assertion nothing can
     #    kill is the thing plan section 1.4 objects to. `_MisdeclaredTransport`
     #    falsifies the teardown call instead.
+
+
+async def assert_fixture_reached_its_recorder(
+    fixture: BridgeFixture, *, marker: str, status: int, body: str
+) -> None:
+    """Assert a **started** fixture's recorder carries exactly one marked request.
+
+    The started-fixture twin of :func:`assert_transport_reaches_its_recorder`:
+    the same three in-body assertions, minus the lifecycle. The original owns a
+    transport end to end — it starts the fixture, drives the one request, and
+    tears it down — which is what its falsification suite and the
+    transport-completeness meta-test need. A Gherkin scenario cannot use that
+    shape: its ``When`` step drives the request and its ``Then`` step asserts,
+    against a fixture the scenario's own fixture started. This helper is the
+    assertion half of the same check for that caller, so the acceptance layer
+    binds to it (§6.4.1: "every scenario binds to an L3 harness rather than
+    re-implementing one") instead of inlining a weaker copy of these checks.
+
+    The teardown assertion is again the caller's, by construction: the fixture
+    was started outside, so its ``stop()`` — and the teardown-clean assertion,
+    which only ``__aexit__`` runs on the clean path — belongs to whoever owns
+    the fixture lifecycle. A caller that wants all four of the original's
+    assertions must mirror that: stop, then the transport's
+    :meth:`~AiohttpTransport.assert_teardown_clean` (or
+    :meth:`RecordingUpstream.assert_teardown_clean`), on the clean path only.
+    The acceptance layer's ``bridge_session`` fixture does exactly that.
+
+    Args:
+        fixture: A **started** fixture that has served at least the one request
+            the caller means to verify. Lifecycle is the caller's.
+        marker: The :func:`marker` string the caller sent, to be found in the
+            captured body.
+        status: The status the caller's own request returned, to be asserted
+            ``200``.
+        body: The raw response text the caller's own request returned, for the
+            same diagnostic tail the original's third assertion includes — a
+            failed ``200`` check without the body is half the evidence, and
+            the two messages must share their vocabulary so a reader can
+            match one to its twin without a second decode pass.
+
+    Raises:
+        AssertionError: When the recorder did not carry *this* fixture's
+            request, exactly once, with this marker, with the client served —
+            the same three defects :func:`assert_transport_reaches_its_recorder`
+            detects, reachable here by handing the wrong ``marker`` or
+            ``status``, or by driving a second request. Falsified in
+            ``test_bridge_falsification.py`` alongside the original's four.
+    """
+    name = fixture.transport.name
+    captures = list(fixture.captures)
+
+    # The same three assertions, in the same order, with the same failure
+    # vocabulary as the original — a reader of one message should be able to
+    # find its twin without a second decode pass.
+    assert len(captures) == 1, (
+        f"transport {name!r} holds {len(captures)} capture(s), expected exactly 1: "
+        f"0 means the bridge reached some other upstream and every assertion built "
+        f"on this fixture would be quantified over nothing; more than 1 means a retry "
+        f"ladder fired, so the binding cannot be told from a broken one"
+    )
+
+    assert marker.encode() in (captures[0].body or b""), (
+        f"transport {name!r} captured a request whose body does not carry the "
+        f"marker {marker!r}; the capture cannot see the content under test"
+    )
+
+    assert status == 200, (
+        f"transport {name!r} captured the request correctly but the bridge answered {status}: {body[:200]!r}"
+    )

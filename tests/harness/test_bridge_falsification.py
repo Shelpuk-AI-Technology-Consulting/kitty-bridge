@@ -41,6 +41,8 @@ it would also make the registry-completeness meta-test assert over them.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 
 import pytest
@@ -48,8 +50,15 @@ import pytest
 from harness.bridge import (
     AiohttpTransport,
     Binding,
+    BridgeFixture,
+    InboundProtocol,
     MisdeclaredFormatError,
+    assert_fixture_reached_its_recorder,
     assert_transport_reaches_its_recorder,
+    inbound_path,
+    marker,
+    minimal_inbound_body,
+    transport,
 )
 from harness.contract import CapturedRequest, WireFormat
 from harness.recorder import RecordingUpstream, Reply
@@ -299,3 +308,97 @@ class TestTheDefectsAreOrthogonal:
         with pytest.raises(AssertionError):
             await assert_transport_reaches_its_recorder(decoy)
         assert list(decoy.captures) == []
+
+
+class TestTheStartedFixtureTwinIsCaughtToo:
+    """``assert_fixture_reached_its_recorder`` detects what its arguments can lie about.
+
+    The twin shares the original's three in-body assertions, but a scenario
+    reaches it with **arguments** — the marker it claims to have sent and the
+    status it claims to have received — rather than with a defective transport.
+    A caller (or a step definition) that lies in either argument, or drives a
+    second request, must be caught; an honest call must pass. §1.4 applied to
+    the twin's own first working version.
+    """
+
+    @staticmethod
+    @asynccontextmanager
+    async def _started() -> AsyncIterator[BridgeFixture]:
+        """Start a fixture and yield it; stop it however the body exits.
+
+        The whole body runs inside this context, so a raise from the drive or
+        the assertion still stops the fixture — a per-test ``try``/``finally``
+        wrapped only the assertion and would have leaked a started fixture on
+        a raise from the drive itself.
+        """
+        fixture = BridgeFixture(transport("aiohttp", FORMAT))
+        await fixture.start()
+        try:
+            yield fixture
+        finally:
+            await fixture.stop()
+
+    async def test_a_marker_that_was_never_sent_is_caught(self) -> None:
+        """The marker argument is checked against the capture, not trusted."""
+        sent = marker()
+        async with self._started() as fixture:
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, sent),
+            )
+
+            with pytest.raises(AssertionError) as excinfo:
+                await assert_fixture_reached_its_recorder(
+                    fixture, marker=f"kbr31-not-{sent}", status=200, body="ok"
+                )
+            assert "marker" in str(excinfo.value)
+
+    async def test_a_status_that_was_never_served_is_caught(self) -> None:
+        """The status argument is checked against 200, not trusted."""
+        sent = marker()
+        async with self._started() as fixture:
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, sent),
+            )
+
+            with pytest.raises(AssertionError) as excinfo:
+                await assert_fixture_reached_its_recorder(
+                    fixture, marker=sent, status=500, body="server exploded"
+                )
+            assert "500" in str(excinfo.value)
+
+    async def test_a_second_request_is_caught(self) -> None:
+        """Two requests through one fixture break the exactly-one assertion.
+
+        This is the twin's decoy-class guard: a step that re-drives the request
+        inside a retry loop must not be able to hand the checker a capture list
+        it has not quantified over.
+        """
+        sent = marker()
+        async with self._started() as fixture:
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, sent),
+            )
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, marker()),
+            )
+
+            with pytest.raises(AssertionError) as excinfo:
+                await assert_fixture_reached_its_recorder(
+                    fixture, marker=sent, status=200, body="ok"
+                )
+            assert "2 capture" in str(excinfo.value)
+
+    async def test_an_honest_call_passes(self) -> None:
+        """The good case is green — the checker accepts what it should."""
+        sent = marker()
+        async with self._started() as fixture:
+            await fixture.post(
+                inbound_path(InboundProtocol.MESSAGES),
+                minimal_inbound_body(InboundProtocol.MESSAGES, sent),
+            )
+
+            await assert_fixture_reached_its_recorder(fixture, marker=sent, status=200, body="ok")

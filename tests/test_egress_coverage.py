@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -178,42 +179,552 @@ class TestNoProxyEnvironmentVariables:
         assert not offenders, f"trust_env=True found at {offenders}"
 
 
+#: The file that defines the ``BridgeServer`` class. Excluded from the
+#: construction scan: the ``class BridgeServer:`` declaration is an
+#: ``ast.ClassDef``, not an ``ast.Call``, so the class line itself is invisible
+#: to the walker and needs no exclusion — but the file-level skip also covers
+#: any ``BridgeServer(`` **call** the file might come to contain, and that
+#: skip is only sound because
+#: ``test_no_bridge_server_construction_in_definition_file`` asserts the file
+#: holds none. A future factory or test helper inside it must surface here
+#: rather than bypass the egress-guard check silently.
+_BRIDGE_SERVER_DEFINITION_FILE = "bridge/server.py"
+
+
+def _called_name(node: ast.Call) -> str | None:
+    """Return the called function's short name, or ``None`` for other shapes.
+
+    Args:
+        node: The ``ast.Call`` node to inspect.
+
+    Returns:
+        The callee's identifier as a string — the ``Name.id`` for a bare call
+        such as ``BridgeServer(...)`` or the ``Attribute.attr`` for a dotted
+        call such as ``kitty.bridge.server.BridgeServer(...)``. ``None`` for
+        any other shape (subscripts, calls, etc.).
+    """
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _enclosing_function(
+    tree: ast.Module, lineno: int
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """Return the innermost function whose body covers ``lineno``.
+
+    Args:
+        tree: Parsed module to search.
+        lineno: 1-based line number the covering function must span.
+
+    Returns:
+        The innermost (deepest-starting) ``FunctionDef`` or ``AsyncFunctionDef``
+        whose span contains ``lineno``, or ``None`` when the line sits at
+        module scope.
+    """
+    best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = node.end_lineno or node.lineno
+        if node.lineno <= lineno <= end and (best is None or node.lineno > best.lineno):
+            best = node
+    return best
+
+
+def _iter_constructions_in_tree(tree: ast.AST) -> list[ast.Call]:
+    """Yield every ``BridgeServer(`` ``Call`` node anywhere in ``tree``.
+
+    Args:
+        tree: Any parsed AST (module, function body, etc.).
+
+    Returns:
+        Every ``ast.Call`` whose callee is a ``Name`` or final ``Attribute``
+        named ``"BridgeServer"``. The matcher is shared by the live-source
+        scan and the synthetic-tree falsification probes so a regression to
+        the matching logic is exercised by both.
+    """
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _called_name(node) == "BridgeServer"
+    ]
+
+
+def _iter_aliased_bridge_server_imports_in_tree(tree: ast.AST) -> list[tuple[int, str, str]]:
+    """Yield every aliased ``BridgeServer`` import in ``tree``.
+
+    Args:
+        tree: Any parsed AST (module, function body, etc.).
+
+    Returns:
+        ``(lineno, original_name, asname)`` for each ``import ... BridgeServer as
+        <asname>`` (or ``from ... import BridgeServer as <asname>``) binding. A
+        renamed import hides any construction site that uses the alias from
+        the construction walker, so any aliased import is itself a guard
+        failure. The matcher is shared by the live-source scan and the
+        synthetic-tree falsification probe so a regression to the matching
+        logic is exercised by both.
+    """
+    found: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        for alias in node.names:
+            if alias.name.endswith("BridgeServer") and alias.asname:
+                found.append((node.lineno, alias.name, alias.asname))
+    return found
+
+
+def _iter_bridge_constructions() -> list[tuple[str, int]]:
+    """Find every ``BridgeServer(`` construction under ``src/kitty``.
+
+    Returns:
+        ``(relative_path, line_number)`` for each construction, excluding the
+        class-definition file.
+    """
+    found: list[tuple[str, int]] = []
+    for path in sorted(SRC.rglob("*.py")):
+        rel = path.relative_to(SRC).as_posix()
+        if rel == _BRIDGE_SERVER_DEFINITION_FILE:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in _iter_constructions_in_tree(tree):
+            found.append((rel, node.lineno))
+    return found
+
+
+#: Nested scopes whose bodies do NOT execute when the enclosing function runs —
+#: a guard call lexically inside any of these does not dominate a construction
+#: in the enclosing function. ``GeneratorExp`` is included because generator
+#: bodies are lazy (their ``elt`` only runs on iteration, not on the line where
+#: the ``( ... for ... )`` expression appears); ``ListComp`` / ``SetComp`` /
+#: ``DictComp`` are deliberately excluded because their elements execute
+#: eagerly at the line where the comprehension appears.
+_DEFERRED_SCOPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.GeneratorExp,
+)
+
+
+def _calls_in_own_scope(scope: ast.AST):
+    """Yield ``Call`` nodes in ``scope``'s own body, skipping deferred subtrees.
+
+    Args:
+        scope: An ``ast`` node whose direct body is executed when the scope
+            runs (typically a function).
+
+    Yields:
+        Every ``ast.Call`` directly in the scope, plus any in eagerly-executed
+        subexpressions (``ListComp``/``SetComp``/``DictComp`` elts, conditional
+        expressions, etc.). Calls in deferred subtrees — nested ``def`` /
+        ``class`` / ``lambda`` bodies, and generator-expression elts — are
+        skipped entirely; those bodies do not run when the enclosing scope
+        runs, so they cannot dominate anything here.
+    """
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Call):
+            yield node
+        if isinstance(node, _DEFERRED_SCOPES):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _is_dominated(tree: ast.Module, target_lineno: int) -> bool:
+    """Report whether a ``BridgeServer`` construction is egress-guarded.
+
+    A construction is dominated when its innermost enclosing function holds a
+    call to ``egress_block_reason`` on an earlier line, in the function's own
+    body (not in a nested helper scope, whose body is deferred and would not
+    have run by the time the construction executes unless explicitly invoked).
+    A construction at module scope has no enclosing function and is never
+    dominated.
+
+    Args:
+        tree: Parsed module containing the construction.
+        target_lineno: 1-based line number of the ``BridgeServer(`` call.
+
+    Returns:
+        ``True`` when a preceding ``egress_block_reason(`` call exists in the
+        same function scope, ``False`` otherwise.
+    """
+    func = _enclosing_function(tree, target_lineno)
+    if func is None:
+        return False
+    for node in _calls_in_own_scope(func):
+        if (
+            isinstance(node, ast.Call)
+            and _called_name(node) == "egress_block_reason"
+            and node.lineno < target_lineno
+        ):
+            return True
+    return False
+
+
 class TestEveryStartPathIsGuarded:
     """R10 structurally: a new way to start a bridge must not skip the check.
 
     The first version of this feature wired the fail-closed guard into the agent
     launcher only, leaving foreground `kitty bridge` and the background runner
-    able to start with a provider that cannot honour the proxy. Counting call
-    sites catches that class of omission; a behavioural test of the guard
-    function cannot.
+    able to start with a provider that cannot honour the proxy. The first
+    structural version of this test was file-granular — a file holding a
+    `BridgeServer(` call needed only to contain an `egress_block_reason(` call
+    anywhere. `cli/main.py` already holds two start paths, so a third added
+    there without a guard call would have passed unguarded. Domination is now
+    checked at AST level: the guard call must precede the construction in the
+    same function scope.
     """
 
-    @staticmethod
-    def _files_calling(name: str) -> set[str]:
-        """Return source files containing a call to ``name``."""
-        pattern = re.compile(rf"\b{re.escape(name)}\(")
-        return {
-            path.relative_to(SRC).as_posix()
-            for path in SRC.rglob("*.py")
-            if pattern.search(path.read_text(encoding="utf-8"))
-        }
+    def test_every_construction_is_dominated_by_a_guard_call(self):
+        """Every `BridgeServer(` construction must be preceded by `egress_block_reason(`."""
+        offenders: list[str] = []
+        for rel, lineno in _iter_bridge_constructions():
+            tree = ast.parse((SRC / rel).read_text(encoding="utf-8"), filename=str(SRC / rel))
+            if not _is_dominated(tree, lineno):
+                func = _enclosing_function(tree, lineno)
+                where = func.name if func is not None else "<module scope>"
+                offenders.append(f"{rel}:{lineno} in {where}()")
 
-    def test_every_file_constructing_a_bridge_also_checks_egress(self):
-        constructors = self._files_calling("BridgeServer") - {"bridge/server.py"}
-        guarded = self._files_calling("egress_block_reason")
+        assert not offenders, (
+            "these BridgeServer constructions are not dominated by an egress_block_reason call "
+            "in the same function scope, so a provider that cannot be proxied would leak from "
+            f"them: {offenders}"
+        )
 
-        unguarded = sorted(constructors - guarded)
+    def test_no_bridge_server_construction_in_definition_file(self):
+        """The class-definition file must hold no ``BridgeServer(`` calls.
 
-        assert not unguarded, (
-            "these files start a BridgeServer without calling egress_block_reason, so a provider "
-            f"that cannot be proxied would leak from them: {unguarded}"
+        The file-level skip in ``_iter_bridge_constructions`` excludes
+        ``bridge/server.py`` wholesale, so a ``BridgeServer(`` **call**
+        introduced there — a factory, a test helper, anything of that shape —
+        would be silently invisible to the domination guard. The class line
+        itself is not the reason (a ``class BridgeServer:`` declaration is an
+        ``ast.ClassDef``, not an ``ast.Call``, and the matcher never sees it);
+        this test is what makes the file-level skip sound. If it fails, the
+        new call is either a new start path that belongs outside this file or
+        a helper that needs an explicit decision here.
+        """
+        definition_file = SRC / _BRIDGE_SERVER_DEFINITION_FILE
+        tree = ast.parse(definition_file.read_text(encoding="utf-8"), filename=str(definition_file))
+        calls = _iter_constructions_in_tree(tree)
+
+        assert calls == [], (
+            f"a `BridgeServer(...)` call inside {_BRIDGE_SERVER_DEFINITION_FILE} would be "
+            "silently skipped by the file-level exclusion in `_iter_bridge_constructions`; "
+            f"either move it or handle it explicitly. Found at lines "
+            f"{[call.lineno for call in calls]}"
         )
 
     def test_the_scan_finds_the_known_start_paths(self):
-        """Guards against the regex silently matching nothing."""
-        constructors = self._files_calling("BridgeServer") - {"bridge/server.py"}
+        """Guards against a broken AST walk silently matching nothing."""
+        sites = _iter_bridge_constructions()
+        files = {rel for rel, _lineno in sites}
 
-        assert constructors == {"cli/launcher.py", "cli/main.py", "bridge_runner.py"}
+        assert len(sites) >= 5, (
+            f"the scan found {len(sites)} BridgeServer constructions; at least five start "
+            "paths are known to exist, so the AST walk is likely broken"
+        )
+        assert files == {"cli/launcher.py", "cli/main.py", "bridge_runner.py"}, (
+            f"the set of files constructing BridgeServer changed: {sorted(files)}. Review each "
+            "for egress domination before updating this assertion."
+        )
+
+    def test_undominated_construction_is_caught(self):
+        """Falsification control: the walker must reject an unguarded construction.
+
+        Without this, a broken `_is_dominated` that always returns True would
+        pass every other test in this class while proving nothing. The five
+        shapes exercise the pairwise combinations of {construction, guard}
+        across {own scope, nested scope}, plus generator laziness:
+
+        - **sibling-undominated** — guard absent (the degenerate case).
+        - **sibling-dominated** — guard precedes construction in the same scope.
+        - **outer-guard, inner-construction** — guards are not transitive into
+          inner scopes; this closes the "innermost vs outermost enclosing
+          function" blind spot. A walker that picked the outermost covering
+          function would accept the inner construction here.
+        - **outer-construction, inner-guard (never invoked)** — guards confined
+          to nested scopes do not dominate a construction in the enclosing
+          scope, because the nested helper is deferred and structurally
+          indistinguishable from an unguarded code path. A walker that used
+          plain ``ast.walk(func)`` over the entire enclosing function would
+          wrongly accept this shape.
+        - **outer-construction, guard inside a generator expression** —
+          generator bodies are lazy (the ``elt`` runs only on iteration), so
+          this is the same deferral shape as the nested-def case with the
+          guard written inline rather than in a helper. A walker that omitted
+          ``ast.GeneratorExp`` from ``_DEFERRED_SCOPES`` would wrongly accept
+          this shape.
+        """
+        source = textwrap.dedent(
+            """\
+            from kitty.bridge.server import BridgeServer
+            from kitty.egress_guard import egress_block_reason
+
+            def unguarded():
+                return BridgeServer()
+
+            def guarded():
+                egress_block_reason(None, None, None)
+                return BridgeServer()
+
+            def outer_with_inner_construction():
+                egress_block_reason(None, None, None)
+                def inner():
+                    return BridgeServer()
+                return inner
+
+            def guard_confined_to_nested_def():
+                def _helper():
+                    egress_block_reason(None, None, None)
+                return BridgeServer()
+
+            def guard_inside_generator():
+                # Generator elt is lazy; the guard does not execute until iteration.
+                gen = (egress_block_reason(None, None, None) for _ in range(1))
+                next(gen)
+                return BridgeServer()
+            """
+        )
+        tree = ast.parse(source)
+        constructions = sorted(
+            _iter_constructions_in_tree(tree), key=lambda n: n.lineno
+        )
+        assert len(constructions) == 5, "fixture must hold exactly five constructions"
+
+        assert not _is_dominated(tree, constructions[0].lineno), (
+            "sibling-undominated: a construction with no preceding guard must be reported"
+        )
+        assert _is_dominated(tree, constructions[1].lineno), (
+            "sibling-dominated: a guard in the same scope must be accepted"
+        )
+        assert not _is_dominated(tree, constructions[2].lineno), (
+            "outer-guard/inner-construction: a guard in the outer scope must not dominate "
+            "a construction in an inner function"
+        )
+        assert not _is_dominated(tree, constructions[3].lineno), (
+            "outer-construction/inner-guard: a guard confined to a nested helper scope "
+            "must not dominate a construction in the enclosing function"
+        )
+        assert not _is_dominated(tree, constructions[4].lineno), (
+            "outer-construction/inner-generator-guard: a guard inside a generator expression "
+            "is lazy and must not dominate a sibling-level construction"
+        )
+
+    def test_dotted_construction_spellings_are_matched(self):
+        """The ``Attribute`` branch is load-bearing: ``mod.BridgeServer(...)`` must be found.
+
+        Without the ``Attribute`` branch in ``_called_name``, a construction
+        written as ``kitty.bridge.server.BridgeServer(...)`` would be invisible
+        to the construction scan and the guard would silently miss it. The
+        scan against ``SRC`` is bound to the source tree, so this helper probe
+        exercises the production matcher (``_iter_constructions_in_tree``) on
+        a synthetic dotted call — a regression in the shared helper fails
+        this test.
+        """
+        source = textwrap.dedent(
+            """\
+            import kitty.bridge.server
+
+            def dotted_call():
+                return kitty.bridge.server.BridgeServer()
+            """
+        )
+        tree = ast.parse(source)
+        matched = _iter_constructions_in_tree(tree)
+        assert len(matched) == 1, (
+            "a dotted `mod.BridgeServer(...)` call must be matched by the walker; the "
+            "Attribute branch of `_called_name` may have regressed"
+        )
+
+    def test_no_aliased_bridge_server_imports(self):
+        """An aliased import would hide a construction from the Name/Attribute matcher.
+
+        The construction walker matches ``BridgeServer(...)`` as a ``Name`` or
+        the final ``Attribute`` of ``mod.BridgeServer(...)``. It cannot see a
+        construction under a renamed alias — ``from kitty.bridge.server
+        import BridgeServer as BS; BS(...)`` — without resolving imports. No
+        production file aliases it today; if any file starts to, the safety
+        net is to fail this test and force a deliberate decision (extend the
+        walker or rename the import back).
+        """
+        offenders: list[str] = []
+        for path in sorted(SRC.rglob("*.py")):
+            rel = path.relative_to(SRC).as_posix()
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for lineno, original, asname in _iter_aliased_bridge_server_imports_in_tree(tree):
+                offenders.append(f"{rel}:{lineno}: `{original} as {asname}`")
+        assert not offenders, (
+            "BridgeServer is imported under an alias, so a construction call would be "
+            f"invisible to the AST walker: {offenders}"
+        )
+
+    def test_aliased_bridge_server_import_is_detected(self):
+        """Falsification control: a synthetic aliased import is flagged.
+
+        The live tree has zero aliased ``BridgeServer`` imports, so the matcher
+        is unproven by data — the test above is structurally incapable of
+        failing on a regression like ``endswith("BS")``. This probe parses a
+        small aliased import and exercises the **production** matcher
+        (``_iter_aliased_bridge_server_imports_in_tree``) on it, so a
+        regression in the shared helper fails this test rather than only its
+        own copy of the loop.
+        """
+        source = textwrap.dedent(
+            """\
+            from kitty.bridge.server import BridgeServer as BS
+
+            def aliased_call():
+                return BS()
+            """
+        )
+        tree = ast.parse(source)
+        offenders = _iter_aliased_bridge_server_imports_in_tree(tree)
+        formatted = [f"line {lineno}: `{original} as {asname}`" for lineno, original, asname in offenders]
+
+        assert formatted == ["line 1: `BridgeServer as BS`"], (
+            "the alias matcher must surface `from kitty.bridge.server import "
+            f"BridgeServer as BS` as an offender; got {formatted}"
+        )
+
+
+class TestProxyApplicationSitesInventory:
+    """R4 (T-E8): the asymmetry-pin inventory — site-loss and bypass-addition guards.
+
+    **Scope (narrowed from the original R4 claim).** This class catches **source loss**
+    (a site removed) and the **specific bypass-addition shape** of "consulting
+    ``should_bypass`` inside a custom-transport file". It does **not** catch a new
+    transport that adds a proxy-less client construction site — that is the
+    ``TestEveryHttpClientIsAccountedFor`` registry sweep's responsibility and the
+    per-adapter sweep in ``tests/test_wire_shape_honesty.py`` covers adapter additions.
+    The two checks complement each other; both must hold.
+
+    **Why a per-site keyword count.** Three distinct construction functions and three
+    aiohttp consumers cover §5.5's five rows plus the sixth site the catalogue names.
+    The count is the simplest signal a silent deletion cannot pass: removing a site
+    drops the count to zero, this class fails, and the failure names the missing site.
+    """
+
+    #: Custom-transport files that **must not** reference ``should_bypass`` — adding a
+    #: bypass here would silently route local traffic through a rented proxy that
+    #: cannot reach it (the design's §5.5 consequence 1). ``validation.py`` is
+    #: intentionally absent from this set: its ``aiohttp_session_kwargs`` use
+    #: (``validation.py:152``) does consult ``should_bypass`` deliberately, as part of
+    #: the pre-flight key check, and that bypass is by design.
+    _BYPASS_FORBIDDEN_FILES: tuple[str, ...] = (
+        "auth/openai_oauth.py",
+        "providers/ollama_cloud.py",
+        "providers/bedrock.py",
+        "providers/openai_subscription.py",
+        "providers/model_context_sync.py",
+    )
+
+    #: Per-file keyword counts for the proxy-application sites. Adding a site without
+    #: updating this table is the failure mode this guard is designed to surface;
+    #: removing a site (deleting the line) drops the count and the test fails. The
+    #: ``_new_curl_session`` row is the **function definition** (not a call), since
+    #: the function is invoked from a closed surface and a call-count scan would miss
+    #: it after a regression that broke the builder without removing the calls.
+    _EXPECTED_PROXY_APPLICATION_COUNTS: dict[tuple[str, str], int] = {
+        ("auth/openai_oauth.py", "aiohttp_session_kwargs"): 1,
+        ("providers/ollama_cloud.py", "aiohttp_session_kwargs"): 1,
+        ("providers/model_context_sync.py", "aiohttp_session_kwargs"): 1,
+        ("providers/openai_subscription.py", "_new_curl_session"): 1,
+        ("providers/bedrock.py", "_BotoConfig_with_proxies"): 1,
+    }
+
+    @staticmethod
+    def _iter_pattern(pattern: re.Pattern[str]) -> list[tuple[str, int, str]]:
+        """Yield every ``(relative_path, line, text)`` matching ``pattern`` in source."""
+        found: list[tuple[str, int, str]] = []
+        for path in sorted(SRC.rglob("*.py")):
+            rel = path.relative_to(SRC).as_posix()
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if pattern.search(line):
+                    found.append((rel, lineno, line.strip()))
+        return found
+
+    def test_each_proxy_application_site_is_still_present(self) -> None:
+        """AC4.1: each site still exists at its recorded location.
+
+        Deleting one of the six sites drops its count below the expected floor and
+        this test fails — naming the deleted site in the assertion message so the
+        fix is local.
+        """
+        aiohttp_session_kwargs = re.compile(r"\baiohttp_session_kwargs\(")
+        new_curl_session = re.compile(r"\bdef _new_curl_session\(")
+        boto_config_with_proxies = re.compile(r"_BotoConfig\s*\(\s*proxies\s*=")
+
+        patterns: dict[str, re.Pattern[str]] = {
+            "aiohttp_session_kwargs": aiohttp_session_kwargs,
+            "_new_curl_session": new_curl_session,
+            "_BotoConfig_with_proxies": boto_config_with_proxies,
+        }
+
+        actual: dict[tuple[str, str], int] = {}
+        for kind, pattern in patterns.items():
+            for rel, _lineno, _line in self._iter_pattern(pattern):
+                key = (rel, kind)
+                actual[key] = actual.get(key, 0) + 1
+
+        offenders: list[str] = []
+        for (rel, kind), expected in self._EXPECTED_PROXY_APPLICATION_COUNTS.items():
+            count = actual.get((rel, kind), 0)
+            if count != expected:
+                offenders.append(f"{rel} ({kind}): expected {expected}, found {count}")
+
+        assert not offenders, (
+            "proxy-application site inventory changed — review each for egress, "
+            "then update _EXPECTED_PROXY_APPLICATION_COUNTS: " + "; ".join(offenders)
+        )
+
+    def test_no_custom_transport_file_consults_should_bypass(self) -> None:
+        """R4 anti-bypass pin: a ``should_bypass`` reference inside a custom-transport file
+        is the regression this guard exists to catch.
+
+        A bypass added to ``auth/openai_oauth.py`` would route the OAuth-login leg
+        through a rented proxy that cannot reach a private LAN, and the
+        behavioural L3 tests in ``tests/harness/test_*_containment_slice.py`` do not
+        drive the OAuth path at startup (R-3 in §5.5 consequence 3). Catching the
+        defect at the structural layer is the cheapest line of defence.
+
+        The companion ``tests/test_egress.py::TestShouldBypass`` pins the
+        ``should_bypass`` function's classification; this guard pins *who calls it*,
+        which is a different property.
+        """
+        pattern = re.compile(r"\bshould_bypass\b")
+        offenders: list[str] = []
+        for rel in self._BYPASS_FORBIDDEN_FILES:
+            for found_rel, lineno, _text in self._iter_pattern(pattern):
+                if found_rel == rel:
+                    offenders.append(f"{rel}:{lineno} — a bypass was added to a custom-transport path")
+                    break
+
+        assert not offenders, (
+            "these custom-transport files must not consult `should_bypass` "
+            "(§5.5 consequence 1 — the proxy is unconditional here): " + "; ".join(offenders)
+        )
+
+    def test_the_scan_actually_finds_something(self) -> None:
+        """A broken regex would silently pass the inventory check above."""
+        aiohttp_session_kwargs = re.compile(r"\baiohttp_session_kwargs\(")
+        aiohttp_matches = {
+            rel
+            for rel, _lineno, _line in self._iter_pattern(aiohttp_session_kwargs)
+            if (rel, "aiohttp_session_kwargs") in self._EXPECTED_PROXY_APPLICATION_COUNTS
+        }
+
+        assert len(aiohttp_matches) == 3, (
+            f"the aiohttp_session_kwargs scan found {len(aiohttp_matches)} sites, "
+            f"expected 3 — the regex or the table is broken: {sorted(aiohttp_matches)}"
+        )
 
 
 class TestTypeSuppressionsAreSpecific:
@@ -240,8 +751,7 @@ class TestTypeSuppressionsAreSpecific:
         offenders = [f"{rel}:{lineno}" for rel, lineno, line in self._suppressions() if bare.search(line)]
 
         assert not offenders, (
-            "these suppressions disable every check on their line; name the specific "
-            f"error codes instead: {offenders}"
+            f"these suppressions disable every check on their line; name the specific error codes instead: {offenders}"
         )
 
     def test_no_blanket_file_level_suppression(self):

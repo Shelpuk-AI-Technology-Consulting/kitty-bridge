@@ -88,8 +88,7 @@ class Exemption:
 # list is supposed to trend towards zero.
 #
 # It shipped EMPTY until KBR-164. KBR-188's five Windows rows and KBR-189's row
-# came out with their defect's fixes; KBR-249's two rows below name a live
-# defect. Deliberately not counted in this comment:
+# came out with their defect's fixes. Deliberately not counted in this comment:
 # a count in prose is wrong the moment the next row lands, and nothing checks
 # it -- the rule §8's own header states about naming things rather than
 # counting them.
@@ -117,7 +116,7 @@ class Exemption:
 #: Windows; it is **false** there, and that is a debt with a ticket, not a
 #: platform difference.
 #:
-#: **The mechanism has now paid out once, which is worth recording.** KBR-188
+#: **The mechanism has paid out once, which is worth recording.** KBR-188
 #: held five rows here, all naming one cause: the recorder stamped `arrival`
 #: with `time.monotonic()`, which on Windows under Python 3.12 is
 #: `GetTickCount64()` at 15.625ms, so two adjacent requests shared a timestamp.
@@ -134,35 +133,19 @@ class Exemption:
 #: statement runs, so a mid-stream abort sent headers and no body. It now uses
 #: `transport.close()`, which flushes first; the Windows leg of the PR that
 #: removed the row is the evidence. The registry is empty again.
-EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType(
-    {
-        "kbr-249-failover-plain-post-status": Exemption(
-            assertion=(
-                "The reply a client receives after a streaming failover to the "
-                "stream-capable backend answers 200"
-            ),
-            condition=(
-                "While a streaming failover can hand the request to a custom-transport backend that only "
-                "the plain-POST streaming branch is driving: that branch POSTs over HTTP to a provider "
-                "that serves over its own transport, the answer is contentless, and the KBR-235 "
-                "emptiness ladder ends the turn in the D4 502. KBR-249 owns the dispatch fix; on the "
-                "day it lands this assertion passes and the row must be deleted."
-            ),
-            issue="KBR-249",
-        ),
-        "kbr-249-failover-plain-post-sse": Exemption(
-            assertion=(
-                "The reply a client receives after a streaming failover to the "
-                "stream-capable backend is an SSE stream"
-            ),
-            condition=(
-                "Same cause as kbr-249-failover-plain-post-status: the terminal outcome on this path is "
-                "the D4 502, a JSON error response, not the event stream the branch was chosen to produce."
-            ),
-            issue="KBR-249",
-        ),
-    }
-)
+#:
+#: **KBR-9 paid out a second time (2026-09-17).** The README's bridge-mode endpoint
+#: table listed `POST /v1/gemini/generateContent` (no such route) and omitted
+#: the two real Gemini routes plus `GET /v1/models`; the README ⇄ routes guard
+#: landed with KBR-76 (T-G1) under the exemption path so the four-route table
+#: drift could ship with a register naming it. The README correction — the
+#: endpoint table now lists the eight bridge-mode routes exactly, including the
+#: aiohttp converter literal `{model:.*}` — made the exempt assertion pass, the
+#: `ratchet` raised `UnexpectedExemptionPass`, and the row was withdrawn together
+#: with its `ratchet` plumbing in `tests/test_readme_table_guards.py`. The
+#: failure is the signal to **delete the row**, not to widen it; the guard now
+#: gates normally on the §6.2 self-pinning rule.
+EXEMPTIONS: Mapping[str, Exemption] = MappingProxyType({})
 
 
 class UnknownExemption(Exception):

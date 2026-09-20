@@ -303,12 +303,54 @@ class TestEnvelope:
         assert projected.envelope.extra["tool_choice"] == expected
         c.verify_total(projected)
 
-    def test_disable_parallel_tool_use_is_not_part_of_the_canonical_value(self) -> None:
-        """R2.4 — it is a separate knob; folding it in would make the value unmatched."""
+    def test_disable_parallel_tool_use_true_maps_onto_parallel_tool_calls_false(self) -> None:
+        """R2.4 — KBR-205, closing G36. The flag inverts onto ``parallel_tool_calls = False``,
+        the Chat Completions spelling and polarity fixed in §3.3.1b so the T-A2
+        reader meets the same address.
+        """
         projected = _read(_minimal(tool_choice={"type": "auto", "disable_parallel_tool_use": True}))
 
         assert projected.envelope.extra["tool_choice"] == "auto"
-        assert projected.residual == {"tool_choice.disable_parallel_tool_use": True}
+        assert projected.envelope.extra["parallel_tool_calls"] is False
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+    def test_disable_parallel_tool_use_false_writes_no_parallel_entry(self) -> None:
+        """R2.4 — paired control: an explicit ``false`` is the Anthropic default and
+        KBR-214's forwarding rule does not write ``parallel_tool_calls``. Absent
+        and ``false`` are one request on both wires.
+        """
+        projected = _read(_minimal(tool_choice={"type": "auto", "disable_parallel_tool_use": False}))
+
+        assert projected.envelope.extra["tool_choice"] == "auto"
+        assert "parallel_tool_calls" not in projected.envelope.extra
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+    def test_disable_parallel_tool_use_absent_writes_no_parallel_entry(self) -> None:
+        """R2.4 — paired control: absent is the implicit default and behaves like ``false``."""
+        projected = _read(_minimal(tool_choice={"type": "auto"}))
+
+        assert projected.envelope.extra["tool_choice"] == "auto"
+        assert "parallel_tool_calls" not in projected.envelope.extra
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+    def test_a_disable_parallel_tool_use_typo_residualises(self) -> None:
+        """R2.4 — the unregistered-mutation guard on the parallel knob's wire spelling.
+
+        A typo'd sibling (``disable_parallel_tool_usee: true``) is not in the
+        reader's mapped set and residualises at its own path, the same guard
+        §3.3.1 names for every other field the reader consumes. The run fails
+        closed with the field named.
+        """
+        projected = _read(
+            _minimal(tool_choice={"type": "auto", "disable_parallel_tool_usee": True})
+        )
+
+        assert projected.residual == {"tool_choice.disable_parallel_tool_usee": True}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
 
     def test_a_stale_name_beside_a_non_tool_choice_residualises(self) -> None:
         """R4.10 — `name` is consumed only on the branch that read it.
@@ -748,7 +790,7 @@ class TestContentBlocks:
         assert part.kind == kind
         c.verify_total(projected)
 
-    @pytest.mark.parametrize("kind", ["myCustomBlock", "guardContent", "toolAddition"])
+    @pytest.mark.parametrize("kind", ["myCustomBlock", "toolUse"])
     def test_a_type_with_no_canonical_name_is_an_unreadable_body_not_a_reader_bug(self, kind: str) -> None:
         """KBR-174 — the diagnosis must name the wire, not the harness.
 
@@ -758,6 +800,14 @@ class TestContentBlocks:
         it — matching the branch above, which already raises `UnreadableBodyError`
         for a non-string `type`. Left untranslated, a camelCase vendor type would
         be reported as a defect in this harness.
+
+        ``toolUse`` is Converse's ``ContentBlock`` spelling for a block that
+        projects to a first-class :class:`~harness.contract.ToolUse` — no
+        Anthropic body carries it, and it has no ``OPAQUE_ALIASES`` entry
+        because it never becomes :class:`~harness.contract.Opaque`. Passing
+        it to the Anthropic reader proves the diagnosis still names the
+        wire, not the harness, for camelCase types that the shared table
+        does not reconcile.
         """
         body = _minimal(messages=[{"role": "user", "content": [{"type": kind, "x": 1}]}])
 
@@ -851,6 +901,62 @@ class TestContentBlocks:
         projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
 
         assert projected.residual == {"messages[0].content[0].source.unknown": 1}
+
+
+class TestUndecodableImagePayloads:
+    """An undecodable base64 payload residualises the leaf and keeps its part.
+
+    §7.4 rule 7 row 3 (KBR-251). The reader used to raise `UnreadableBodyError`
+    here, which §7.4.1 calls "the other wrong answer: it blinds the oracle to
+    everything else in a request it could otherwise diff" — and the case is
+    real traffic, not a hypothetical: `validate=True` rejects every RFC 2045
+    line break, and Google's own image-understanding sample passes `-w0` to
+    `base64(1)` precisely because its default output is wrapped.
+    `reader_gemini._read_inline_data` is the reference implementation;
+    `contract.image_digest`'s second recipe (KBR-192) gives the part its
+    identity.
+    """
+
+    def test_wrapped_base64_residualises_instead_of_killing_the_request(self) -> None:
+        """A single newline in one blob must not abort the whole projection."""
+        wrapped = base64.b64encode(b"hello world" * 8).decode("ascii")
+        wrapped = wrapped[:20] + "\n" + wrapped[20:]
+        block = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": wrapped},
+            "cache_control": {"type": "ephemeral"},
+        }
+
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block, {"type": "text", "text": "and"}]}]))
+
+        # The part keeps its place, the later part keeps its index, and the
+        # digest is the raw wire bytes per `image_digest`'s second recipe —
+        # the breakpoint the block carried travels with it either way.
+        assert projected.conversation.turns[0].parts == (
+            c.Image(
+                digest=c.image_digest(wrapped.encode("utf-8")),
+                media_type="image/png",
+                cache_control={"type": "ephemeral"},
+            ),
+            c.Text("and"),
+        )
+        assert projected.residual == {"messages[0].content[0].source.data": wrapped}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_no_failure_branch_drops_a_part_and_shifts_the_later_indices(self) -> None:
+        """The claim all undecodable-payload branches share, asserted as one fact.
+
+        A reader that dropped the part would shift every later part's index —
+        §7.4.1: "that invented delta lands on every part of the turn and on
+        every turn after it".
+        """
+        block = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "@@not-b64@@"}}
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block, {"type": "text", "text": "last"}]}]))
+
+        parts = projected.conversation.turns[0].parts
+        assert len(parts) == 2
+        assert parts[1] == c.Text("last")
 
 
 # --------------------------------------------------------------------------
@@ -1006,11 +1112,38 @@ class TestToolsAndSampling:
         assert projected.conversation.turns[0].parts[0].arguments == {}
         assert projected.residual == {"messages[0].content[0].input": ["ab", "cd"]}
 
-    def test_a_server_tool_residualises_its_type_under_an_indexed_key(self) -> None:
-        """R5.2 — indexed, not by name (§7.4.1): a residual key is the body's own path."""
+    def test_a_tool_with_a_server_type_is_carried_into_tool_decl(self) -> None:
+        """R5.2 — ``type`` rides the tool declaration, indexed (§7.4.1), into ``ToolDecl.type``.
+
+        KBR-205 closes G35's blocker: a tool's discriminator — ``"custom"`` on a
+        client tool, a dated vendor spelling (e.g. ``web_search_20250305``) on a
+        server tool — projects onto :attr:`ToolDecl.type`. Residual empty; the
+        paired control below covers the absent-type case.
+        """
         projected = _read(_minimal(tools=[{"type": "web_search_20250305", "name": "web_search"}]))
 
-        assert projected.residual == {"tools[0].type": "web_search_20250305"}
+        assert projected.conversation.tools[0].type == "web_search_20250305"
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+    def test_a_custom_client_tool_type_is_carried_into_tool_decl(self) -> None:
+        """R5.2 — client tools declare ``"custom"`` and it projects verbatim."""
+        projected = _read(_minimal(tools=[{"type": "custom", "name": "get_weather"}]))
+
+        assert projected.conversation.tools[0].type == "custom"
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+    def test_a_tool_with_a_wrongly_typed_type_residualises_at_its_path(self) -> None:
+        """R5.2 — §7.4.1's wrongly-typed-leaf rule at the new slot.
+
+        A non-string ``type`` residualises at its own path so the run fails
+        closed, the same shape :func:`_typed_leaf` gives every other tool leaf.
+        """
+        projected = _read(_minimal(tools=[{"type": 7, "name": "get_weather"}]))
+
+        assert projected.conversation.tools[0].type is None
+        assert projected.residual == {"tools[0].type": 7}
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
 
@@ -1477,3 +1610,250 @@ class TestUnreadableBodies:
         assert projected.conversation.turns == ()
         assert projected.envelope.model is None
         c.verify_total(projected)
+
+
+# --------------------------------------------------------------------------
+# R8 — the declared-ignored mechanism (§3.3.1, KBR-205)
+# --------------------------------------------------------------------------
+
+
+class TestDeclaredIgnoredBlockFields:
+    """R8 — §3.3.1's third outcome, its first users, and the guard it ships with.
+
+    Each of the four Anthropic block fields in :data:`IGNORED_BLOCK_FIELDS` is
+    consumed without being modelled, per its own block type. The falsification
+    cases ride along: a re-spelled sibling residualises (the unregistered-
+    mutation guard), a wrong-typed value residualises (§7.4.1's
+    wrongly-typed-leaf rule), and the reporter rejects an entry without a
+    reason.
+    """
+
+    @pytest.mark.parametrize(
+        ("block", "field", "kind"),
+        [
+            # A text block carrying a citation list — replayed into a request
+            # when an agent feeds a prior response back as input.
+            (
+                {"type": "text", "text": "The grass is green.", "citations": []},
+                "citations",
+                "text",
+            ),
+            # An image block carrying the server-side preprocessing config.
+            (
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": PNG_B64,
+                    },
+                    "transformations": {"oversized_image": "downsize"},
+                },
+                "transformations",
+                "image",
+            ),
+            # A tool_use block carrying the invocation context.
+            (
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "search",
+                    "input": {"q": "weather"},
+                    "caller": {"type": "direct"},
+                },
+                "caller",
+                "tool_use",
+            ),
+            # A tool_use block carrying the toolset family it belongs to.
+            (
+                {
+                    "type": "tool_use",
+                    "id": "t2",
+                    "name": "screenshot",
+                    "input": {},
+                    "toolset_name": "computer",
+                },
+                "toolset_name",
+                "tool_use",
+            ),
+            # A tool_result block echoing the toolset family.
+            (
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t2",
+                    "content": "ok",
+                    "toolset_name": "computer",
+                },
+                "toolset_name",
+                "tool_result",
+            ),
+        ],
+        ids=[
+            "text.citations",
+            "image.transformations",
+            "tool_use.caller",
+            "tool_use.toolset_name",
+            "tool_result.toolset_name",
+        ],
+    )
+    def test_each_declared_ignored_field_consumed_at_its_own_block_type(
+        self, block: dict[str, Any], field: str, kind: str
+    ) -> None:
+        """R8.1 — §3.3.1, KBR-205: each of the four fields consumed, run passes.
+
+        The field's value is *not* in the residual, *not* on the part, and
+        *not* anywhere the oracle reads — it is accounted for by the registry,
+        named and reasoned there. `verify_total` is the totality oracle: a
+        body that consumed its ignored fields passes it; a body that dropped
+        one would not.
+        """
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
+
+        assert projected.residual == {}, f"{kind}.{field} leaked into the residual"
+        c.verify_total(projected)
+
+    def test_a_respelled_sibling_of_an_ignored_field_still_residualises(self) -> None:
+        """R8.2 — the unregistered-mutation guard on the wire spelling.
+
+        §3.3.1: "an unaccounted field is precisely where an unregistered
+        mutation hides." A re-spelled sibling is a different entry the
+        registry does not know, residualises, and fails the run. The registry
+        cannot be widened by a spelling mistake — every entry is named and
+        reasoned, so adding one is a deliberate edit.
+        """
+        block = {"type": "text", "text": "hi", "CitationS": []}
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
+
+        assert projected.residual == {"messages[0].content[0].CitationS": []}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_wrongly_typed_value_at_an_ignored_path_still_residualises(self) -> None:
+        """R8.3 — §7.4.1's wrongly-typed-leaf rule at the ignored paths.
+
+        The registry declares the *field* ignorable, not the *value*
+        well-formed. A non-iterable ``citations`` residualises at its own path
+        and fails the run with the field named — a reader that mistyped a
+        sibling cannot use the declared-ignored rule as a doorway to swallow
+        anything the field carries.
+        """
+        block = {"type": "text", "text": "hi", "citations": "garbage"}
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
+
+        assert projected.residual == {"messages[0].content[0].citations": "garbage"}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_null_value_at_an_ignored_path_is_consumed_as_a_noop(self) -> None:
+        """R8.4 — ``cache_control`` precedent: absent is not a type mismatch.
+
+        ``citations: null`` carries the key but with the absent value; the
+        block is accounted for and the run passes. The bridge does not invent
+        an absence the body did not declare.
+        """
+        block = {"type": "text", "text": "hi", "citations": None}
+        projected = _read(_minimal(messages=[{"role": "user", "content": [block]}]))
+
+        assert projected.residual == {}
+        c.verify_total(projected)
+
+    def test_the_shipped_registry_passes_its_own_reporter(self) -> None:
+        """R8.5 — the module-import assert makes this true at import time; here it is named."""
+        assert c.ignored_field_problems(c.IGNORED_BLOCK_FIELDS) == ()
+
+    @pytest.mark.parametrize("reason", [None, "", "   "])
+    def test_an_entry_without_a_reason_is_rejected(self, reason: str | None) -> None:
+        """R8.6 — §1.4's falsification case for the reporter.
+
+        A reason-less entry is exactly the shape `row_shape_problems` rejects
+        on a register row (§3.3.1a: "an empty cell would leave those rows
+        silently unfalsifiable"), and the same posture applies here: a
+        future reader that declares a field ignored without saying why
+        cannot use the mechanism to lose a fidelity finding.
+        """
+        bad = {("text", "citations"): (list, reason)}
+
+        problems = c.ignored_field_problems(bad)
+
+        assert problems, f"a reason of {reason!r} must be rejected"
+        assert any("reason" in problem for problem in problems), problems
+
+    def test_a_wrongly_typed_value_in_the_registry_is_rejected(self) -> None:
+        """R8.7 — the expected type must be a real type; the value must be the pair."""
+        bad = {("text", "citations"): ("not a type", "reason")}
+
+        problems = c.ignored_field_problems(bad)
+
+        assert any("expected type" in problem for problem in problems), problems
+
+    def test_is_ignored_matches_the_exact_wire_spelling_only(self) -> None:
+        """R8.8 — a re-spelled sibling is a different entry, and :func:`is_ignored` says so."""
+        assert c.is_ignored("text", "citations")
+        assert not c.is_ignored("text", "CitationS")
+        assert not c.is_ignored("image", "citations")
+
+    def test_ignored_fields_for_returns_only_that_block_kind(self) -> None:
+        """R8.9 — the per-kind view a reader uses to extend its mapped-keys set."""
+        text_ignored = c.ignored_fields_for("text")
+
+        assert "citations" in text_ignored
+        assert "transformations" not in text_ignored
+        assert c.ignored_fields_for("thinking") == {}
+
+
+class TestNameRequired:
+    """A ``tool_use`` block whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers; KBR-281 aligns Anthropic on it. The site is
+    ``_read_block``, shared by the request turns, the reply content, and the
+    nested ``tool_result`` blocks, so these request-direction cases pin the
+    one line all three entries reach.
+    """
+
+    @staticmethod
+    def _body_with_tool_use(name: Any) -> dict[str, Any]:
+        """Return a request body whose one ``tool_use`` block carries ``name``.
+
+        ``None`` means the key is absent rather than an explicit ``null`` —
+        the absent form is the one the schema calls required.
+        """
+        block: dict[str, Any] = {
+            "type": "tool_use",
+            "id": PUBLISHED_TOOL_USE["id"],
+            "input": {"ticker": "^GSPC"},
+        }
+        if name is not None:
+            block["name"] = name
+        return _minimal(
+            messages=[
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": [block]},
+            ]
+        )
+
+    def test_missing_tool_use_name_raises(self) -> None:
+        """A ``tool_use`` block with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="tool_use"):
+            _read(self._body_with_tool_use(None))
+
+    def test_empty_tool_use_name_raises(self) -> None:
+        """A ``tool_use`` block with an empty ``name`` raises (KBR-281)."""
+        with pytest.raises(c.UnreadableBodyError, match="tool_use"):
+            _read(self._body_with_tool_use(""))
+
+    def test_non_string_tool_use_name_raises(self) -> None:
+        """A ``tool_use`` block with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="tool_use"):
+            _read(self._body_with_tool_use(42))
+
+    def test_named_tool_use_control_is_clean(self) -> None:
+        """Control — the published ``tool_use`` block projects cleanly."""
+        projected = _read(self._body_with_tool_use(PUBLISHED_TOOL_USE["name"]))
+
+        assert projected.residual == {}
+        tool_use = projected.conversation.turns[1].parts[0]
+        assert isinstance(tool_use, c.ToolUse)
+        assert tool_use.name == "get_stock_price"

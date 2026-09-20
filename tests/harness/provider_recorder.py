@@ -37,6 +37,8 @@ an adapter; nothing here asks kitty how to read a request.
 from __future__ import annotations
 
 import json
+import ssl
+from dataclasses import dataclass
 from typing import Any
 
 from harness.contract import CapturedRequest, WireFormat
@@ -49,6 +51,7 @@ from harness.recorder import RecordingUpstream, Reply, _wants_stream
 
 __all__ = [
     "ProviderRecordingUpstream",
+    "ProviderTlsRecordingUpstream",
     "OLLAMA_CHAT_SUFFIX",
     "OAUTH_TOKEN_SUFFIX",
     "format_for_provider_path",
@@ -303,3 +306,57 @@ class ProviderRecordingUpstream(RecordingUpstream):
         await response.begin(200, {"Content-Type": "application/json"})
         await response.write(encoded)
         await response.write_eof()
+
+
+# ── T-E5: TLS-at-construction subclass (KBR-65) ──────────────────────────────
+#
+# The sealed-network harness's ``SealedNetwork.recorder_factory`` builds a
+# recorder and then calls ``await recorder.start()`` with **no arguments**
+# (containment.py:443-455) — so a factory-built recorder must bind its TLS
+# context at construction, not at start. ``CurlRecordingUpstream`` takes
+# ``ssl_context=`` at construction for the same reason (KBR-63). The base
+# ``RecordingUpstream.start(ssl_context=None)`` accepts the context as a
+# start-time argument, which is what ``SealedNetwork`` uses when the
+# factory is absent; this subclass captures the context at construction
+# and forwards it on ``start()``.
+#
+# Why a dataclass field rather than a constructor parameter: ``ProviderRecordingUpstream``
+# is a plain subclass of the dataclass ``RecordingUpstream``, so inheriting
+# the dataclass ``__init__`` and adding a field with a default keeps the
+# constructor signature a factory call site can satisfy in one expression.
+# ``ssl_context`` defaults to ``None`` to mirror the base recorder's
+# "plain HTTP" shape; the harness always supplies one.
+
+
+@dataclass
+class ProviderTlsRecordingUpstream(ProviderRecordingUpstream):
+    """``ProviderRecordingUpstream`` that binds TLS at construction.
+
+    The single addition is an ``ssl_context`` field; ``start()`` is
+    overridden to forward it to the base implementation's start-time
+    argument. ``SealedNetwork``'s ``recorder_factory`` seam expects this
+    shape — the factory builds the recorder with the harness's TLS
+    context and the harness then calls ``start()`` with no arguments.
+
+    The dataclass ordering rule (no-default fields before default fields)
+    is satisfied here: the inherited ``default_format`` is required and
+    sits first; ``ssl_context`` defaults to ``None`` and follows.
+
+    Attributes:
+        ssl_context: The server-side TLS context to present on
+            ``start()``. ``None`` keeps the recorder's plain-HTTP shape
+            — the harness always supplies one.
+    """
+
+    ssl_context: ssl.SSLContext | None = None
+
+    async def start(self) -> None:
+        """Start the recorder, forwarding the construction-time TLS context.
+
+        ``SealedNetwork``'s factory path calls ``start()`` with no
+        arguments; the base recorder accepts an ``ssl_context`` argument
+        at start, so this override is the channel that bridges the two
+        shapes (factory supplies the context, harness invokes without
+        args).
+        """
+        await super().start(ssl_context=self.ssl_context)

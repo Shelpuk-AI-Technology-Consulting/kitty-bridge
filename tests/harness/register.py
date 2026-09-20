@@ -38,8 +38,8 @@ must a corpus entry exist in which this row's mutation is provably **absent**.
 That is not the same as "the trigger cell says something".  P13's trigger is the
 CC-origin path through ``openai_subscription``; every request on that route meets
 it, so there is no complement to write and §3.2.2 lists the row as unconditional.
-A trigger is a *route* property or a *request* property, and only the second kind
-can be varied by a corpus entry.
+A trigger is arranged by one of four kinds — :class:`ArrangingBy` — and only
+:attr:`~ArrangingBy.REQUEST` can be varied by a corpus entry (KBR-186).
 
 **There is deliberately no scope column, and the site does not supply one.**
 §6.2.3's completeness guard and T-D8's coverage check both need to know, per
@@ -108,6 +108,45 @@ from harness import contract as c
 # --------------------------------------------------------------------------
 
 
+class ArrangingBy(Enum):
+    """How a trigger's condition is decided.
+
+    KBR-186. A trigger is one of four kinds:
+
+    * :attr:`REQUEST` — a property of the inbound request; the corpus entry
+      that carries the request decides it. Only REQUEST can be varied by a
+      corpus entry, so only REQUEST triggers count toward the §3.3.2
+      assertion-2 complement case.
+    * :attr:`ROUTE` — a property of the adapter/route dispatch. Every request
+      on the route meets it (or none does); a corpus entry cannot vary it.
+      ``P13`` :attr:`~Trigger.CC_ORIGIN_PATH` is the canonical case: under
+      reading (2) of its trigger ("the body reaching ``_cc_to_responses``,
+      regardless of inbound wire"), it is met when
+      ``provider.dispatch == "_cc_to_responses"``.
+    * :attr:`RESPONSE` — a property of the upstream response, arranged by a
+      scripted recorder (``M6``, ``M8``, ``M9``, ``M12``, ``M17``). T-D8
+      reads these from a named scripted-recorder test, not from the corpus.
+    * :attr:`PROFILE` — derived from the profile (``M1`` — profile model;
+      ``M4`` / ``M5`` — compaction budget from profile model, and on a
+      balancing profile from the smallest context in the pool). Declared
+      at the call site that resolves the profile.
+
+    The classification lets ``harness.corpus.NOT_CORPUS_DECIDABLE`` be
+    *derived* from the register rather than hand-listed — that is the
+    single-edit invariant this ticket exists to establish.
+
+    The enum is deliberately named ``ArrangingBy`` so it matches the
+    per-trigger attribute grammar (``Trigger.X.arranged_by``), which the
+    ticket fixed. Renaming the enum to ``TriggerKind`` would require
+    renaming the attribute too.
+    """
+
+    REQUEST = "request"
+    ROUTE = "route"
+    RESPONSE = "response"
+    PROFILE = "profile"
+
+
 class Trigger(Enum):
     """The conditions under which a registered mutation is permitted to fire.
 
@@ -117,50 +156,153 @@ class Trigger(Enum):
     spell one condition two ways and leave a row silently uncovered.
 
     :attr:`ALWAYS` is the absence of a condition, not a condition — a row
-    carrying it fires on every request that reaches its site.
+    carrying it fires on every request that reaches its site. It carries no
+    ``arranged_by``: the four kinds of :class:`ArrangingBy` are for the
+    triggers that *are* conditions.
+
+    Each non-``ALWAYS`` member carries an ``arranged_by`` of one of the four
+    :class:`ArrangingBy` kinds (F1 in :mod:`tests.harness.test_register`).
+    For compound triggers (e.g. :attr:`GEMINI_NON_STREAMING`) the
+    corpus-decidability of the discriminating component picks the kind —
+    that is the load-bearing choice, not abstract purity.
     """
 
-    ALWAYS = "always"
+    def __new__(cls, value: str, arranged_by: ArrangingBy | None = None) -> Trigger:
+        """Construct a member, storing ``arranged_by`` alongside ``.value``.
+
+        ``ALWAYS`` passes ``None`` and skips the attribute assignment so it
+        carries no ``arranged_by`` (the test ``test_always_does_not_carry_an_arranging_by``
+        is the guard).
+        """
+        obj = object.__new__(cls)
+        obj._value_ = value
+        if arranged_by is not None:
+            obj.arranged_by = arranged_by
+        return obj
+
+    # Absence of a condition. No ``arranged_by`` — see the enum docstring.
+    ALWAYS = ("always", None)
 
     # Bridge-level, request path.
-    PROFILE_SETS_MODEL = "profile_sets_model"
-    NON_NATIVE_UPSTREAM_WIRE = "non_native_upstream_wire"
-    TOOL_RESULT_OVER_LIMIT = "tool_result_over_limit"
-    COMPACTION_RAN_WITH_OVERSIZED_TOOL_RESULT = "compaction_ran_with_oversized_tool_result"
-    OVER_COMPACTION_BUDGET = "over_compaction_budget"
-    UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING = "upstream_rejected_oversized_on_balancing"
-    ORPHAN_TOOL_RESULT = "orphan_tool_result"
-    THINKING_ROUNDTRIP_REJECTED = "thinking_roundtrip_rejected"
-    THINKING_SIGNATURE_REJECTED = "thinking_signature_rejected"
-    NATIVE_TOOL_USE_FORMAT_ERROR = "native_tool_use_format_error"
-    GEMINI_PROTOCOL = "gemini_protocol"
-    GEMINI_NON_STREAMING = "gemini_non_streaming"
+    PROFILE_SETS_MODEL = ("profile_sets_model", ArrangingBy.PROFILE)
+    NON_NATIVE_UPSTREAM_WIRE = ("non_native_upstream_wire", ArrangingBy.ROUTE)
+    TOOL_RESULT_OVER_LIMIT = ("tool_result_over_limit", ArrangingBy.REQUEST)
+    COMPACTION_RAN_WITH_OVERSIZED_TOOL_RESULT = (
+        "compaction_ran_with_oversized_tool_result",
+        ArrangingBy.PROFILE,
+    )
+    OVER_COMPACTION_BUDGET = ("over_compaction_budget", ArrangingBy.PROFILE)
+    UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING = (
+        "upstream_rejected_oversized_on_balancing",
+        ArrangingBy.RESPONSE,
+    )
+    ORPHAN_TOOL_RESULT = ("orphan_tool_result", ArrangingBy.REQUEST)
+    THINKING_ROUNDTRIP_REJECTED = ("thinking_roundtrip_rejected", ArrangingBy.RESPONSE)
+    THINKING_SIGNATURE_REJECTED = ("thinking_signature_rejected", ArrangingBy.RESPONSE)
+    NATIVE_TOOL_USE_FORMAT_ERROR = ("native_tool_use_format_error", ArrangingBy.RESPONSE)
+    GEMINI_PROTOCOL = ("gemini_protocol", ArrangingBy.ROUTE)
+    GEMINI_NON_STREAMING = ("gemini_non_streaming", ArrangingBy.REQUEST)
+    # The inbound Gemini functionCall/functionResponse carries no ``id``
+    # (KBR-195). REQUEST — a property of the inbound body, decidable per
+    # corpus entry — so §3.3.2 assertion 2 owes a complement, delivered with
+    # T-D5 (Gemini corpus entries).
+    GEMINI_INBOUND_ID_ABSENT = ("gemini_inbound_id_absent", ArrangingBy.REQUEST)
 
     # Bridge-level, response path.
-    UPSTREAM_EMPTY_RESPONSE = "upstream_empty_response"
+    UPSTREAM_EMPTY_RESPONSE = ("upstream_empty_response", ArrangingBy.RESPONSE)
 
     # Provider-level.
-    ZAI_THINKING_ENABLED = "zai_thinking_enabled"
-    ZAI_THINKING_DISABLED = "zai_thinking_disabled"
-    REASONING_EFFORT_PRESENT = "reasoning_effort_present"
-    MAX_TOKENS_ABSENT = "max_tokens_absent"
-    MULTIPLE_SYSTEM_BLOCKS = "multiple_system_blocks"
-    ANTHROPIC_THINKING_ENABLED = "anthropic_thinking_enabled"
-    ADAPTIVE_THINKING_KEYS_PRESENT = "adaptive_thinking_keys_present"
-    ASSISTANT_TURN_LACKS_THINKING_BLOCK = "assistant_turn_lacks_thinking_block"
-    NON_STREAMING_MAX_TOKENS_OVER_4096 = "non_streaming_max_tokens_over_4096"
-    THINKING_SIGNALLED_OR_INFERRED = "thinking_signalled_or_inferred"
-    CC_ORIGIN_PATH = "cc_origin_path"
-    RESPONSES_ORIGIN_PATH = "responses_origin_path"
-    ALLOWLISTED_FIELD_IS_FALSY = "allowlisted_field_is_falsy"
-    NON_ENTRA_CREDENTIAL = "non_entra_credential"
-    CHATGPT_ACCOUNT_ID_PRESENT = "chatgpt_account_id_present"
-    # Both sit on the credential side of the G21 line — neither is decidable
-    # from the inbound request: NON_ENTRA_CREDENTIAL reads the profile's
-    # credential, CHATGPT_ACCOUNT_ID_PRESENT the `id_token` the
-    # openai_subscription profile authenticates with. NOT_CORPUS_DECIDABLE
-    # classifies neither — that classification is KBR-186's, filed rather
-    # than guessed.
+    ZAI_THINKING_ENABLED = ("zai_thinking_enabled", ArrangingBy.REQUEST)
+    ZAI_THINKING_DISABLED = ("zai_thinking_disabled", ArrangingBy.REQUEST)
+    REASONING_EFFORT_PRESENT = ("reasoning_effort_present", ArrangingBy.REQUEST)
+    MAX_TOKENS_ABSENT = ("max_tokens_absent", ArrangingBy.REQUEST)
+    MULTIPLE_SYSTEM_BLOCKS = ("multiple_system_blocks", ArrangingBy.REQUEST)
+    ANTHROPIC_THINKING_ENABLED = ("anthropic_thinking_enabled", ArrangingBy.REQUEST)
+    ADAPTIVE_THINKING_KEYS_PRESENT = ("adaptive_thinking_keys_present", ArrangingBy.REQUEST)
+    # KBR-44 (2026-09-14, B1-A): the row's deferred comment anticipated this
+    # trigger. The translator emits `_output_config` and `_effort` in
+    # independent `if`s (translator.py:425-426 vs :438-439), and the adapter
+    # restores `output_config` on `_output_config is not None` alone
+    # (anthropic.py:572-577) — so a request carrying `output_config` with no
+    # `thinking` and no top-level `effort` produces a delta at
+    # `envelope.extra[output_config]` with P5d's `ADAPTIVE_THINKING_KEYS_PRESENT`
+    # unmet. A separate trigger is the design's own plan and §3.2.2's P5d
+    # trigger-cell wording ("or output_config present") already anticipated it
+    # as data-orphan until this row landed.
+    OUTPUT_CONFIG_PRESENT = ("output_config_present", ArrangingBy.REQUEST)
+    ASSISTANT_TURN_LACKS_THINKING_BLOCK = (
+        "assistant_turn_lacks_thinking_block",
+        ArrangingBy.REQUEST,
+    )
+    NON_STREAMING_MAX_TOKENS_OVER_4096 = (
+        "non_streaming_max_tokens_over_4096",
+        ArrangingBy.REQUEST,
+    )
+    THINKING_SIGNALLED_OR_INFERRED = ("thinking_signalled_or_inferred", ArrangingBy.REQUEST)
+    CC_ORIGIN_PATH = ("cc_origin_path", ArrangingBy.ROUTE)
+    RESPONSES_ORIGIN_PATH = ("responses_origin_path", ArrangingBy.REQUEST)
+    # An allowlisted field whose value is falsy (`include: []`, `reasoning: {}`)
+    # is dropped by the truthiness branches — decided by the inbound request's
+    # own field values, so REQUEST (KBR-186's classification).
+    ALLOWLISTED_FIELD_IS_FALSY = ("allowlisted_field_is_falsy", ArrangingBy.REQUEST)
+    # Both decided by the resolved profile, not by the inbound request:
+    # NON_ENTRA_CREDENTIAL reads the profile's configured `api_key`
+    # (``AzureOpenAIAdapter.build_upstream_headers``); CHATGPT_ACCOUNT_ID_PRESENT
+    # reads the OAuth `id_token` the openai_subscription profile authenticates
+    # with (``OpenAISubscriptionAdapter._build_codex_headers`` → ``_extract_account_id``).
+    # PROFILE per KBR-186's classification.
+    NON_ENTRA_CREDENTIAL = ("non_entra_credential", ArrangingBy.PROFILE)
+    CHATGPT_ACCOUNT_ID_PRESENT = ("chatgpt_account_id_present", ArrangingBy.PROFILE)
+    # KBR-214 / KBR-184 (G33). Decided by the CC body's ``tool_choice`` value
+    # and the presence of ``tools``: met when tools exist and the choice is
+    # absent, ``none``, or any value except ``required`` and the named function
+    # form (the two KBR-214 maps onto Converse ``any`` / ``tool``). REQUEST.
+    BEDROCK_FORCES_AUTO_TOOL_CHOICE = (
+        "bedrock_forces_auto_tool_choice",
+        ArrangingBy.REQUEST,
+    )
+    # KBR-214 / KBR-184 (G34). Met when the inbound Anthropic body carries
+    # ``disable_parallel_tool_use: false``; the flag is mapped only when
+    # ``true`` (D2), so an explicit ``false`` is omitted. REQUEST.
+    ANTHROPIC_PARALLEL_FALSE_OMITTED = (
+        "anthropic_parallel_false_omitted",
+        ArrangingBy.REQUEST,
+    )
+    # KBR-214 / KBR-184 (G35). Met when the inbound Anthropic body carries a
+    # ``tool_choice`` that KBR-214 D9/D10 omits: a choice over no tools, or
+    # a forced call to an Anthropic-defined tool (declared ``type`` other
+    # than absent / ``null`` / ``"custom"``). REQUEST.
+    TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED = (
+        "tool_choice_omitted_as_legal_but_unsupported",
+        ArrangingBy.REQUEST,
+    )
+
+
+#: Docstrings on the two adapter-dispatch triggers — the asymmetry is
+#: deliberately recorded because the names look like a symmetric pair and
+#: are not. ``CC_ORIGIN_PATH`` is ROUTE because ``provider.dispatch`` decides
+#: it (the body reaches ``_cc_to_responses`` regardless of inbound wire, per
+#: KBR-186's second comment). ``RESPONSES_ORIGIN_PATH`` is REQUEST because the
+#: inbound wire — Responses-shaped — decides it.
+Trigger.CC_ORIGIN_PATH.__doc__ = (
+    "Met when the adapter dispatches the body to ``_cc_to_responses``, "
+    "regardless of inbound wire. A Messages-origin request on the "
+    "``openai_subscription`` provider meets this trigger — the dispatch is "
+    "decided by the provider's routing, not by the request's wire shape. "
+    "Under KBR-186 this is a ROUTE property (the provider decides), not a "
+    "REQUEST property. Reading (1) — ``the inbound wire was Chat "
+    "Completions`` — would leave KBR-178's ``stop`` carry unclaimed on a "
+    "Messages-origin entry and the oracle would report a false I1 breach on "
+    "a deliberate mutation."
+)
+Trigger.RESPONSES_ORIGIN_PATH.__doc__ = (
+    "Met when the inbound wire is Responses-shaped (``/v1/responses``), so "
+    "``_original_body`` is set on the cc_request and ``_prepare_responses_body`` "
+    "is the dispatch site. Unlike ``CC_ORIGIN_PATH`` (ROUTE), this trigger is "
+    "decided by the request's own wire shape — REQUEST, not ROUTE. The "
+    "asymmetry is deliberate and load-bearing: the two names read as a "
+    "symmetric pair, but only one is decided by the provider's dispatch."
+)
 
 
 # --------------------------------------------------------------------------
@@ -257,6 +399,8 @@ def row_shape_problems(row: MutationRow) -> tuple[str, ...]:
 _SERVER = "kitty/bridge/server.py"
 _BASE = "kitty/providers/base.py"
 _SUBSCRIPTION = "kitty/providers/openai_subscription.py"
+_OLLAMA_CLOUD = "kitty/providers/ollama_cloud.py"
+_BEDROCK = "kitty/providers/bedrock.py"
 
 _ALWAYS = Trigger.ALWAYS
 
@@ -297,6 +441,38 @@ _CODEX_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
     "text",
     "truncation",
     "user",
+)
+
+#: KBR-184 / P24 — the CC-origin twin of `_CODEX_DROPPED_CONTROL_FIELDS`. The
+#: Chat Completions reader's `_PUBLISHED_EXTRA_KEYS` (T-A2 / KBR-34, retrieved
+#: 2026-09-14 from `openai/openai-openapi` master) intersected with the
+#: dropped set: every published top-level CC control field except `store`
+#: (which `_cc_to_responses` rewrites to `False`, not drops — P17's territory)
+#: and `parallel_tool_calls` (G36 / KBR-205 moved it to a canonical knob
+#: address, and KBR-214 began carrying it on this route). 14 - 1 = 13 keys.
+#:
+#: Three keys the ticket listed (`prompt_cache_key`, `prompt_cache_retention`,
+#: `safety_identifier`) are not in T-A2's CC-surface extra table — the reader
+#: residualises them, which §3.3.2 names as a "named, honest failure" rather
+#: than an unclaimed delta, so no row is owed for them.
+#:
+#: The derivation guard `TestP24ClaimsTheDroppedNonSamplingControlFields`
+#: recomputes this set from the AST; widening the reader table or the builder
+#: literal both turn the row red.
+_CC_DROPPED_CONTROL_FIELDS: tuple[str, ...] = (
+    "audio",
+    "function_call",
+    "functions",
+    "metadata",
+    "modalities",
+    "moderation",
+    "prediction",
+    "prompt_cache_options",
+    "reasoning_effort",
+    "service_tier",
+    "user",
+    "verbosity",
+    "web_search_options",
 )
 
 # --------------------------------------------------------------------------
@@ -402,6 +578,13 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         site=(
             f"{_SERVER}:BridgeServer._compact_with_tighter_budget",
             f"{_SERVER}:BridgeServer._request_with_retry_balancing",
+            # KBR-256: the four streaming ladders engage the same recovery on a
+            # pre-byte oversized 413 (position-as-guarantee for the three eager-
+            # prepared routes; `sr is None` on `_stream_messages`).
+            f"{_SERVER}:BridgeServer._stream_messages",
+            f"{_SERVER}:BridgeServer._stream_responses",
+            f"{_SERVER}:BridgeServer._stream_gemini",
+            f"{_SERVER}:BridgeServer._stream_chat_completions",
         ),
         trigger=Trigger.UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING,
         paths=(c.CONVERSATION_TURNS,),
@@ -545,8 +728,11 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # The native route's guarantee is proven as product behaviour instead
         # (epic KBR-197), not by a complement nobody could author.
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
-        # Three anchors because Anthropic permits a breakpoint at three carriers
-        # and Claude Code uses all three. Each names the **field**, never the
+        # Four anchors: three block-level carriers (Anthropic permits a
+        # breakpoint at all three and Claude Code uses all three) plus the
+        # top-level automatic-caching form (Anthropic projects it to
+        # `envelope.extra[cache_control]`; KBR-263 closing G38 -- a literal
+        # path, so no `_SHAPES` entry). Each names the **field**, never the
         # block: `conversation.turns[*].parts[*]` would also claim a deleted
         # part, and `conversation.tools[*]` a deleted tool description -- two of
         # §3.3.1's five oracle falsification cases. That is §3.3.1a's P15 lesson
@@ -555,6 +741,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
             c.system_path(c.WILDCARD, "cache_control"),
             c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
             c.tool_path(c.WILDCARD, "cache_control"),
+            c.extra_path("cache_control"),
         ),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1 · §3.3.1a",
@@ -569,6 +756,142 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
         design_ref="§3.2.1 · §3.3.1a · §4.3 C3",
+    ),
+    MutationRow(
+        id="M18",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator._translate_content",),
+        trigger=Trigger.GEMINI_INBOUND_ID_ABSENT,
+        # KBR-195, functionCall half. When the inbound Gemini functionCall
+        # carries no ``id``, the translator synthesises a fresh
+        # ``call_<uuid>`` — the Chat Completions wire requires one, and the
+        # delta is real: the upstream projection carries a synthetic id
+        # where the Gemini reader projected absence. Conditional, because
+        # the complement (a corpus entry whose functionCall carries an id)
+        # is plainly writeable and arrives with T-D5.
+        #
+        # Kept distinguishable from M19 by ``paths`` (``id`` vs
+        # ``tool_use_id``) — the axis
+        # ``test_no_two_rows_are_indistinguishable`` keys on — not by the
+        # site, which both rows share.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
+        conditional=True,
+        design_ref="§3.2.1",
+    ),
+    MutationRow(
+        id="M19",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator._translate_content",),
+        trigger=Trigger.GEMINI_INBOUND_ID_ABSENT,
+        # KBR-195, functionResponse half — M18's tool-result twin. The
+        # synthesised id lands on the tool message's ``tool_call_id``, not
+        # on the call's ``id``, so the row anchors at the other field.
+        # Kept distinguishable from M18 by ``paths`` — the axis
+        # ``test_no_two_rows_are_indistinguishable`` keys on — not by the
+        # site.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "tool_use_id"),),
+        conditional=True,
+        design_ref="§3.2.1",
+    ),
+    MutationRow(
+        id="M20",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # KBR-194 gave the Gemini reader a slot for the role a
+        # ``systemInstruction`` Content published; Chat Completions has no
+        # equivalent, so the translation drops it and the reader's positive
+        # value meets the upstream's absence at this path. §3.3.1a's
+        # path-table cell used to name M2 as the claiming row; it names
+        # this row since KBR-195 — M2 takes the escape and is never
+        # path-matched.
+        paths=(c.SYSTEM_ROLE_PATH,),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M21",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's NON_BLOCKING calling toggle on a function declaration
+        # (KBR-194) has no Chat Completions equivalent, so
+        # ``_translate_tools`` drops it. Anchored at the field, not the
+        # whole tool — a coarser anchor would claim a deleted tool
+        # description, one of §3.3.1's own falsification cases (§3.3.1a).
+        paths=(c.tool_path(c.WILDCARD, "behavior"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M22",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's ``thoughtSignature`` on a ``functionCall`` part
+        # (KBR-194) has no Chat Completions equivalent, so the translation
+        # drops it. M8 also produces a delta at this path, but with a
+        # RESPONSE trigger (a thinking round-trip rejection) — the two are
+        # distinguishable by trigger, site and the narrower field anchor
+        # here, and on a plain Gemini→CC request M8's trigger is not met.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "signature"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M23",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini's ``functionResponse.scheduling`` — the NON_BLOCKING
+        # response-side toggle (KBR-194) — has no Chat Completions
+        # equivalent, so the translation drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "scheduling"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M24",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Gemini part-level ``videoMetadata`` (KBR-194) has no Chat
+        # Completions equivalent, so the translation drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "video_metadata"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M25",
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # The blob/file ``displayName`` named to the model on an image part
+        # (KBR-194) has no Chat Completions equivalent, so the translation
+        # drops it.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1a",
+    ),
+    MutationRow(
+        id="M26",
+        # KBR-184 (G31). The Messages→CC carry mints Anthropic ``metadata`` on
+        # the internal key ``_metadata`` (so the Anthropic family can restore
+        # it); the other seventeen routes omit it because Chat Completions' own
+        # ``metadata`` is a stored-completions tag map and a bare mapping would
+        # either put a new field on every request to sixteen third-party
+        # providers or reject every turn (product owner's decision, 2026-09-13).
+        # The eighteenth route, ``openai_subscription``, also drops it: G26 /
+        # P24 claims that one at the provider level.
+        #
+        # ⚠️ The CC reader (T-A2 / KBR-34) projects CC's own ``metadata`` onto
+        # ``envelope.extra[metadata]`` — the **same** address this row claims.
+        # A reader or oracle that conflated the two meanings would mis-classify
+        # any future corpus entry: the Anthropic user-id object and the CC tag
+        # map are different fields. ``envelope.extra`` is keyed by wire key
+        # (§3.3.1b), so the address is shared and the meanings are not.
+        #
+        # Site = the policy point: ``carry_tool_choice_and_metadata`` mints the
+        # internal key; the restore is per-adapter. The 17-route omission is
+        # the bridge's design decision and is named once here rather than as 17
+        # per-adapter rows (the same shape as G28's parallel ``top_k`` gap).
+        site=("kitty/bridge/messages/translator.py:carry_tool_choice_and_metadata",),
+        trigger=_ALWAYS,
+        paths=(c.extra_path("metadata"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1b · §9.2 G31",
     ),
 )
 
@@ -667,6 +990,35 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("thinking"), c.extra_path("effort")),
         conditional=True,
         design_ref="§3.2.2",
+        # KBR-44 (2026-09-14): the `envelope.extra[output_config]` address,
+        # deferred here since KBR-224, landed on the row below (P5f) under its
+        # own trigger, because the translator emits `_output_config`
+        # independently of `_effort` and of thinking (translator.py:425-426
+        # vs :438-439) — extending this row under its existing trigger would
+        # have left the output_config-only case unclaimed (the false I1
+        # breach §3.3.1a warns about). P5d's trigger is now thinking/effort
+        # only; see P5f for the output_config restore.
+    ),
+    MutationRow(
+        id="P5f",
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.OUTPUT_CONFIG_PRESENT,
+        # KBR-224 / KBR-44: restore the agent's `output_config` (Anthropic's
+        # documented spelling of the effort control) where the upstream
+        # documents the field. Separate row and trigger, because the
+        # translator's `output_config` and `effort` emissions are two
+        # independent `if`s — the co-occurrence this row once assumed
+        # (its KBR-186 deferred comment) is an observation about Claude Code's
+        # behaviour, not a register invariant.
+        paths=(c.extra_path("output_config"),),
+        conditional=True,
+        design_ref="§3.2.2",
+        # First corpus entry carrying `output_config`: KBR-44's
+        # `effort_configured` capture (T-C1). Until a corpus entry carries the
+        # field, no oracle run can see the withhold — the pairing rule
+        # (§3.3.1a: a row whose conditional trigger is met but unclaimed
+        # manufactures a false I1 breach) is what this row and the entry land
+        # together.
     ),
     MutationRow(
         id="P5e",
@@ -777,10 +1129,15 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # when the token fails to parse (`except Exception`); an empty claim
         # survives extraction and is dropped by `if account_id:` in
         # `_build_codex_headers`. So the header's absence is also the
-        # unparseable-token signature. §3.3.2 assertion 2 therefore owes a
-        # complement — a corpus entry whose `id_token` carries no claim. The L1
-        # pins live in `tests/providers/test_openai_subscription.py`; the
-        # corpus fixture arrives with T-D5.
+        # unparseable-token signature. The trigger is PROFILE under KBR-186's
+        # classification — the resolved profile's OAuth `id_token` decides
+        # it, not the inbound request — so the loader refuses it in both
+        # manifest lists and §3.3.2 assertion 2 cannot find a corpus
+        # complement. The complement is discharged by the L1 pins in
+        # `tests/providers/test_openai_subscription.py`; `conditional=True`
+        # here records that the row still needs a "mutant is absent" check
+        # somewhere, just not via the corpus. T-D5's "corpus fixture arrives
+        # with…" promise therefore does not apply for this row.
         paths=(c.header_path("chatgpt-account-id"),),
         conditional=True,
         design_ref="§3.2.2 · §4.3 C1",
@@ -834,8 +1191,10 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `Authorization: Bearer`, which is why the trigger is named rather
         # than ALWAYS. The credential is profile config, not request content,
         # so no corpus entry can vary it — the row is unconditional in
-        # §3.3.2's sense, M16's shape: a named trigger that is a property of
-        # the route, not of the request.
+        # §3.3.2's sense. Under KBR-186's four kinds that makes the trigger
+        # PROFILE (decided by the resolved profile), not ROUTE: the adapter's
+        # dispatch is the same hook on both branches; what differs is the
+        # profile's configured credential.
         paths=(c.header_path("authorization"), c.header_path("api-key")),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
@@ -1036,8 +1395,12 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
     MutationRow(
         id="P18",
         site=(
-            "kitty/providers/bedrock.py:BedrockAdapter.make_request",
-            "kitty/providers/bedrock.py:BedrockAdapter.stream_request",
+            # KBR-89 (T-H2) extracted the body's modelId/stream pops from
+            # the two transport methods into this pure builder. Both
+            # transports now call `_bedrock_body`, so the pops' load-bearing
+            # site is here — `make_request` and `stream_request` splat the
+            # returned body verbatim and add no further mutations.
+            "kitty/providers/bedrock.py:BedrockAdapter._bedrock_body",
         ),
         trigger=_ALWAYS,
         # §3.3.1b normalises Converse's `modelId` onto `envelope.model`, so the
@@ -1057,6 +1420,366 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ENVELOPE_STREAM,),
         conditional=False,
         design_ref="§3.2.2 · §3.2.3",
+    ),
+    # KBR-258 — the Anthropic adapter family drops a Chat Completions request's
+    # cache breakpoints at five sites on the translated route, measured identical
+    # on `anthropic`, `minimax_token`, `zai_coding` and `custom_anthropic`. These
+    # five rows are P26..P30 — the CC-origin half of G37's "still owed" set.
+    # `minimax_token` and `custom_anthropic` short-circuit on
+    # `_native_messages_request` and otherwise delegate to
+    # `super().translate_to_upstream`; `zai_anthropic.ZaiAnthropicAdapter` is no
+    # exception (`zai_anthropic.py:85-91`). The drops KBR-199 measured happen on
+    # the translated (non-native) branch only.
+    #
+    # `conditional=False` is forced by three independent guards: KBR-186 makes
+    # `NON_NATIVE_UPSTREAM_WIRE` (ArrangingBy.ROUTE) non-corpus-variable; M16's
+    # comment records the same reasoning for the Messages twin; and
+    # `test_register.py::test_rows_sharing_a_trigger_agree_on_whether_it_is_conditional`
+    # is the structural guard — any `conditional=True` here would conflict with
+    # M2/M16/M20-M25 already `conditional=False` on this trigger. The native
+    # passthrough carrying the breakpoint is the observational complement,
+    # proven as product behaviour in epic KBR-197, not a corpus entry. The
+    # ticket's loose "each row owes a complement corpus entry" prose is
+    # reconciled in KBR-258's Jira comment.
+    MutationRow(
+        id="P26",
+        # The `translate_to_upstream` body is read whole for keys the
+        # Anthropic wire defines; the root-level `cache_control` is never read,
+        # so on the translated route this `envelope.extra[cache_control]` is
+        # dropped by omission. M16's note on §3.3.1's "carried whole, not
+        # reduced" rule does not apply — the reader does not currently
+        # consume the key into this address; the row claims the address the
+        # moment the reader grows the slot (the G38 precedent on the Messages
+        # twin). Today such a body residualises, which is the honest named
+        # failure: the field is present, nobody claims it.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Keyed literal — no wildcard, so the `_SHAPES` test excludes it by
+        # construction. The path stays narrow so an over-claim cannot swallow
+        # a sibling row's `envelope.extra[<other>]` delta (the §3.3.1a
+        # prohibition on the bare `envelope.extra` anchor).
+        paths=(c.extra_path("cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P27",
+        # The system-extraction loop joins system blocks into one string; a
+        # `cache_control` on a system content part does not survive the join
+        # (P5b's twin on this route — the join is the cause; the cache drop is
+        # the side-effect we register). The CC reader projects a system
+        # content-part breakpoint onto `conversation.system[*].cache_control`
+        # today, so this row is **claimable now**, not anticipatory.
+        # `forwards_thinking_signature` does not change this: the carriage
+        # `_anthropic_system` is a Messages-ingress concern, set by
+        # `MessagesTranslator`, stripped on the CC route by P1 — the join
+        # stands.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.system_path(c.WILDCARD, "cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P28",
+        # The outer message loop reads each `{"role": …, "content": …}` for
+        # role and content only; a `cache_control` on the message dict itself
+        # is dropped by omission. This site covers the *user-message* and
+        # *tool-message* object case; the assistant-message object case
+        # (which rebuilds inside `_translate_assistant_msg`) rides P29's
+        # site — the oracle matches paths, not sites, so the address is
+        # claimed either way.
+        #
+        # The kept half of G37's measurement — a breakpoint on a user content
+        # part and on tool-message content (moved inside the `tool_result`) —
+        # is NOT this row's and carries no row in this set: the adapter family
+        # preserves both on the CC route, the same boundary M16 draws on the
+        # Messages twin.
+        #
+        # Anticipatory today: the CC reader residualises a message-dict-level
+        # `cache_control` (`_read_one_message`'s `_residualise` sets name no
+        # cache key), so such a body fails the run on residual first — the
+        # honest named failure. The row lands now, before the reader grows
+        # the slot, on the G38 precedent.
+        #
+        # Anchor contingency: the §3.3.1a path vocabulary names
+        # `conversation.turns[*].parts[*].cache_control` (the field-level
+        # address), and this row's narrowest path assumes the reader will
+        # project the message-object `cache_control` onto a Part rather than
+        # onto Turn itself (`conversation.turns[*].cache_control`, not in the
+        # vocabulary today). If a future reader lands the slot on Turn, the
+        # row's anchor must move to match — the comment records it.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P29",
+        # `_translate_assistant_msg` rebuilds every `tool_calls` block into
+        # an Anthropic `tool_use` block (`{"type": "tool_use", "id": …,
+        # "name": …, "input": …}`); a `cache_control` on the tool_call dict
+        # is dropped by omission. This site also owns the assistant-message
+        # object case for the same reason — the assistant message is rebuilt
+        # here, not in the outer loop.
+        #
+        # Anchored at the same path as P28 because both project to a Part
+        # (the tool_use is a Part); distinguishable by site, the axis
+        # `test_no_two_rows_are_indistinguishable` explicitly allows (P3/P4
+        # precedent). Same anchor contingency as P28; anticipatory today for
+        # the same reason — the CC reader residualises a tool_call-level
+        # `cache_control` (`_read_tool_calls`'s `_residualise` set names no
+        # cache key), so such a body fails the run on residual first, the
+        # G38 precedent.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter._translate_assistant_msg",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P30",
+        # `_translate_tools` rebuilds every tool declaration as
+        # `{name, description, input_schema}`; a `cache_control` on the
+        # CC tool's `function` member is dropped by omission. The CC reader
+        # projects a tool-decl breakpoint onto
+        # `conversation.tools[<name>].cache_control` today, so this row is
+        # **claimable now** — like P27, not anticipatory. The Messages-route
+        # twin of this drop is M16's tool-decl path.
+        site=("kitty/providers/anthropic.py:AnthropicAdapter._translate_tools",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.tool_path(c.WILDCARD, "cache_control"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+    ),
+    MutationRow(
+        id="P24",
+        site=(f"{_SUBSCRIPTION}:OpenAISubscriptionAdapter._cc_to_responses",),
+        trigger=Trigger.CC_ORIGIN_PATH,
+        # KBR-184 (G26). P13's CC-origin twin for the **non-sampling** half:
+        # ``_cc_to_responses`` builds the Responses body from scratch and ships
+        # ``model``, ``messages``→``input``, ``stream``, ``store``, ``tools``,
+        # ``tool_choice``, ``parallel_tool_calls`` and an injected ``reasoning``.
+        # Every other declared Chat Completions control field (T-A2's
+        # ``_PUBLISHED_EXTRA_KEYS``) is dropped. P13 is anchored at the bare
+        # ``conversation.sampling`` and reaches none of these, so T-D5 would
+        # report a false I1 breach on the CC-origin route exactly as it would
+        # have on the Responses-origin one.
+        #
+        # ⚠️ Enumerated, NOT anchored at a bare ``envelope.extra`` — the bare
+        # form matches and would over-claim ``extra[reasoning]`` (P22),
+        # ``extra[store]`` (P17 rewrites it), and ``extra[parallel_tool_calls]``
+        # (G36 / KBR-205 unified the knob address, and ``_cc_to_responses``
+        # carries the field since KBR-214). The ``_CC_DROPPED_CONTROL_FIELDS``
+        # constant is the reader's ``_PUBLISHED_EXTRA_KEYS`` minus what the
+        # builder carries; the derivation guard
+        # ``TestP24ClaimsTheDroppedNonSamplingControlFields`` recomputes it from
+        # the AST, so widening the reader table or the builder literal both
+        # turn the row red.
+        #
+        # The 13 keys are the reader's table minus the builder's carries,
+        # which is ``_PUBLISHED_EXTRA_KEYS − {store}`` today (store is rewritten
+        # to ``False``, not dropped — P17's territory).
+        paths=tuple(c.extra_path(key) for key in _CC_DROPPED_CONTROL_FIELDS),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1a · §3.3.1b · §9.2 G26",
+    ),
+    MutationRow(
+        id="P31",
+        # KBR-184 (G32). Ollama ``/api/chat`` defines neither a tool choice
+        # nor a parallel-tool-use knob, so ``OllamaCloudAdapter.translate_to_upstream``
+        # writes neither. Each is an unclaimed ``envelope.extra[...]`` delta
+        # on the ``ollama_cloud`` route — the same class as G26 / P13 / P23.
+        #
+        # ⚠️ ``paths`` must be true of every site (P9e/P9f rule), so this row
+        # names only ``ollama_cloud`` — the bedrock parallel-knob twin gets
+        # its own row (P32). The shared knob address
+        # ``envelope.extra[parallel_tool_calls]`` is the G36 / KBR-205
+        # canonical form; P31 does not need a parallel-knob reader side to
+        # ship the wire key.
+        site=(f"{_OLLAMA_CLOUD}:OllamaCloudAdapter.translate_to_upstream",),
+        trigger=_ALWAYS,
+        paths=(c.extra_path("tool_choice"), c.extra_path("parallel_tool_calls")),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G32",
+    ),
+    MutationRow(
+        id="P32",
+        # KBR-184 (G32). Bedrock Converse's ``ToolConfiguration`` has no
+        # parallel-tool-use knob (botocore ``bedrock-runtime``), so the
+        # bedrock hook writes no ``parallelToolCalls``. The G36 / KBR-205
+        # canonical knob address (``envelope.extra[parallel_tool_calls]``) is
+        # unclaimed on this route without this row. Site is
+        # ``translate_to_upstream`` rather than the boto3 transport because
+        # that is where the hook-level decision to omit the field lives (the
+        # transport mutates ``modelId`` / ``stream``, P18).
+        site=(f"{_BEDROCK}:BedrockAdapter.translate_to_upstream",),
+        trigger=_ALWAYS,
+        paths=(c.extra_path("parallel_tool_calls"),),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G32",
+    ),
+    MutationRow(
+        id="P33",
+        # KBR-184 (G33). ``BedrockAdapter.translate_to_upstream`` has always
+        # written ``toolChoice: {"auto": {}}`` whenever tools are present;
+        # KBR-214 maps only ``required`` and the named form onto Converse
+        # ``any`` / ``tool``. Converse's ``ToolChoice`` union has no ``none``,
+        # and dropping ``toolConfig`` is unavailable once a transcript carries
+        # ``toolUse`` / ``toolResult`` (``toolConfig must be defined...``).
+        # The rewrite is conditional on the value: any CC choice that isn't
+        # ``required`` and isn't a named choice to an ordinary tool is
+        # rewritten to ``auto``.
+        #
+        # Shares ``envelope.extra[tool_choice]`` with P35; the two are
+        # distinguishable by site (the P3/P4 precedent
+        # ``test_no_two_rows_are_indistinguishable`` explicitly allows it).
+        # Both are conditional, so the two rows cannot disagree about
+        # whether the address owes a complement. The trigger case and §3.3.2
+        # assertion-2 complement arrive with the T-D5 corpus entries, as for
+        # P22 / P25.
+        site=(f"{_BEDROCK}:BedrockAdapter.translate_to_upstream",),
+        trigger=Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE,
+        paths=(c.extra_path("tool_choice"),),
+        conditional=True,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G33",
+    ),
+    MutationRow(
+        id="P34",
+        # KBR-184 (G34). KBR-214 maps ``disable_parallel_tool_use: true`` onto
+        # ``parallel_tool_calls: false``; ``false`` is omitted because it is
+        # the default on both Anthropic and Chat Completions, and writing it
+        # would add a second field some providers reject (D2). The Anthropic
+        # reader can nonetheless tell them apart, so an explicit ``false``
+        # is a delta — the omission is **correct** and must not be "fixed" by
+        # forwarding it, G29's exact shape.
+        #
+        # Conditional on the value: trigger met when the inbound Anthropic
+        # body carries ``disable_parallel_tool_use: false``. The address
+        # ``envelope.extra[parallel_tool_calls]`` exists as of KBR-205
+        # (§3.3.1b); the row registers the omission now, with the trigger
+        # case + §3.3.2 complement (a body where the flag is ``true`` and
+        # carried) arriving with the T-D5 corpus, as for P25.
+        site=("kitty/bridge/messages/translator.py:carry_tool_choice_and_metadata",),
+        trigger=Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED,
+        paths=(c.extra_path("parallel_tool_calls"),),
+        conditional=True,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G34",
+    ),
+    MutationRow(
+        id="P35",
+        # KBR-184 (G35). KBR-214 omits a legal ``tool_choice`` only where
+        # carrying it would create a failure the agent did not cause: (1) a
+        # choice over no tools — legal on Anthropic and ``'tool_choice' is
+        # only allowed when 'tools' are specified`` on OpenAI; (2) a forced
+        # call to an **Anthropic-defined** tool (declared ``type`` other than
+        # absent / ``null`` / ``"custom"``, e.g. Claude Code's
+        # ``web_search_20250305``) — Anthropic flattens it into a schema-less
+        # function nothing on the route can execute
+        # (anthropics/claude-code#56984; omitted on the product owner's
+        # decision, 2026-09-13). ``{"type": "any"}`` over only Anthropic-defined
+        # tools is carried: guarding it would reason over the whole tool
+        # list rather than one name. Forced calls to **undeclared** tools are
+        # not omitted — that is the agent's mistake and the provider's error
+        # names it.
+        #
+        # Shares ``envelope.extra[tool_choice]`` with P33; distinguishable by
+        # site (bedrock auto-rewrite vs Messages-route omission). Case (2)'s
+        # trigger is authorable now that the Anthropic reader carries
+        # ``ToolDecl.type`` (KBR-205, closing G36); the corpus trigger case +
+        # §3.3.2 complement arrive with T-D5.
+        site=("kitty/bridge/messages/translator.py:carry_tool_choice_and_metadata",),
+        trigger=Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED,
+        paths=(c.extra_path("tool_choice"),),
+        conditional=True,
+        design_ref="§3.2.2 · §3.3.1b · §9.2 G35",
+    ),
+    # KBR-137 — OpenCode Go's four `/v1/responses` models are now servable.
+    # The whole-protocol translate, the eight CC-only drops, the
+    # max_tokens→max_output_tokens rename, and the reasoning injection are
+    # the four mutations the Responses route performs; P39–P41 (tools
+    # envelope unwrap, tool_choice envelope unwrap, response_format → text.format
+    # nesting move) are part of P36's whole-protocol claim, like P22 was
+    # part of the Codex P13–P17 set rather than a row of its own. The
+    # projection has no path vocabulary for an envelope unwrap, and the L1
+    # tests in ``tests/test_provider_opencode_responses.py`` pin each
+    # mutation directly. ``UNCONDITIONAL`` per the test gate (§3.2.2 footer):
+    # every request on the route meets the trigger.
+    MutationRow(
+        id="P36",
+        site=("kitty/providers/opencode.py:OpenCodeGoAdapter._cc_to_responses",),
+        trigger=Trigger.CC_ORIGIN_PATH,
+        # Whole-body translation into OpenAI Responses — a fifth wire format
+        # M2 does not name. Same reason as P11/P12: the projection is what
+        # makes the formats comparable, so the translation itself names no
+        # field. The per-message parts (system → instructions, user →
+        # input_text, assistant → output_text, tool → function_call_output)
+        # are part of this single claim, as the P22 message-level translation
+        # was on the Responses-origin twin.
+        paths=(c.NOT_PROJECTABLE,),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.4 · KBR-137",
+        not_projectable_reason=(
+            "KBR-137 adds a fifth wire format — OpenAI Responses — that M2 does "
+            "not name. Like P11/P12, the projection is what makes the formats "
+            "comparable, so the whole-protocol translate names no field. The "
+            "per-message renames (system→instructions, user→input_text, "
+            "assistant→output_text, tool→function_call_output), the tools and "
+            "tool_choice envelope unwraps, and the response_format nesting move "
+            "are all part of this single claim; they are pinned by the L1 tests "
+            "in ``tests/test_provider_opencode_responses.py`` and not by §3.3.1, "
+            "because no path vocabulary names an envelope unwrap."
+        ),
+    ),
+    MutationRow(
+        id="P37",
+        site=("kitty/providers/opencode.py:OpenCodeGoAdapter._cc_to_responses",),
+        trigger=Trigger.CC_ORIGIN_PATH,
+        # The eight CC sampling / control fields absent from the OpenAI
+        # Responses create-request schema (verified 2026-09-16 against
+        # ``openai/openai-openapi`` master). Verified at the spec, not from
+        # the builder's source — a future spec addition turns this row red.
+        # ``stream_options`` is included because Responses' ``stream_options``
+        # has different semantics (``include_obfuscation``, not
+        # ``include_usage``); the CC value is silently dropped, not translated.
+        paths=tuple(c.extra_path(key) for key in (
+            "frequency_penalty",
+            "presence_penalty",
+            "seed",
+            "logit_bias",
+            "n",
+            "stop",
+            "logprobs",
+            "stream_options",
+        )),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
+    ),
+    MutationRow(
+        id="P38",
+        site=("kitty/providers/opencode.py:OpenCodeGoAdapter._cc_to_responses",),
+        trigger=Trigger.CC_ORIGIN_PATH,
+        # Rename the CC token-budget spellings to the Responses spelling.
+        # Precedence (max_output_tokens > max_completion_tokens > max_tokens)
+        # lives in the builder; the row claims the two CC addresses that
+        # disappear, not the Responses address that already lives at its
+        # own name.
+        paths=(c.extra_path("max_tokens"), c.extra_path("max_completion_tokens")),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
+    ),
+    MutationRow(
+        id="P42",
+        site=("kitty/providers/opencode.py:OpenCodeGoAdapter._cc_to_responses",),
+        trigger=Trigger.REASONING_EFFORT_PRESENT,
+        # Passthrough of an agent signal in the target's own spelling, P3/P4
+        # class. The CC value rides on ``_reasoning_effort`` (an internal key,
+        # stripped by P1's ``_INTERNAL_KEYS``); the Responses address
+        # ``envelope.extra[reasoning]`` is created here.
+        paths=(c.extra_path("reasoning"),),
+        conditional=True,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
     ),
 )
 

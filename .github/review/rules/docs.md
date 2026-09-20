@@ -1,4 +1,14 @@
-# Rule: documentation (`README.md`, `assets/**`, and the design documents)
+# Rule: documentation (`README.md`, `openapi/**`, `assets/**`, and the design documents)
+
+## `openapi/kitty-bridge.yaml` is the machine-readable external contract
+
+KBR-82. It is the artifact the agents integrate against and the schemathesis
+conformance run drives; `tests/test_openapi_schema.py` and
+`tests/test_route_registration_matrix.py` hold it against
+`BridgeServer._register_routes` mechanically. When a diff touches this
+schema, check that a status or envelope documented here is one the handler
+actually writes, and that a route dropped from `paths` is deliberately
+removed and not lost.
 
 ## README.md is the user-facing specification
 

@@ -333,14 +333,16 @@ Point your tool at `http://localhost:<port>` and it just works.
 
 **Available endpoints:**
 
-| Endpoint                          | Protocol           | Used by         |
-|-----------------------------------|--------------------|-----------------|
-| `POST /v1/chat/completions`       | Chat Completions   | General purpose |
-| `POST /v1/messages`               | Anthropic Messages | Claude Code     |
-| `POST /v1/responses`              | OpenAI Responses   | Codex           |
-| `POST /v1/gemini/generateContent` | Gemini             | Gemini CLI      |
-| `GET /healthz`                    | Health check       | Monitoring      |
-| `GET /stats`                      | Session record     | Attribution     |
+| Endpoint                                               | Protocol           | Used by          |
+|--------------------------------------------------------|--------------------|------------------|
+| `POST /v1/chat/completions`                            | Chat Completions   | General purpose  |
+| `POST /v1/messages`                                    | Anthropic Messages | Claude Code      |
+| `POST /v1/responses`                                   | OpenAI Responses   | Codex            |
+| `POST /v1beta/models/{model:.*}:generateContent`       | Gemini             | Gemini CLI       |
+| `POST /v1beta/models/{model:.*}:streamGenerateContent` | Gemini             | Gemini CLI       |
+| `GET /v1/models`                                       | OpenAI Models      | Tool integration |
+| `GET /healthz`                                         | Health check       | Monitoring       |
+| `GET /stats`                                           | Session record     | Attribution      |
 
 **Background bridges:** `kitty bridge start`, `stop`, `restart`, and `status` manage a bridge running in the background,
 tracked in `bridge_state.json`.
@@ -433,7 +435,7 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 |------------------|-------------------|------------------------------------------------------------------------------------------|
 | Anthropic        | `anthropic`       | Direct API only (pay per token). Subscription plans (Claude Pro/Team) are not supported. |
 | AWS Bedrock      | `bedrock`         | Uses boto3 SigV4 auth                                                                    |
-| MS Azure         | `azure`           | Requires deployment name                                                                 |
+| MS Azure         | `azure`           | Requires base URL (the resource root) + deployment name as the model                     |
 | BytePlus         | `byteplus`        |                                                                                          |
 | Google AI Studio | `google_aistudio` | Gemini models via OpenAI-compatible endpoint                                             |
 | Google Vertex AI | `vertex`          | Requires project and location                                                            |
@@ -451,7 +453,7 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 | Novita AI           | `novita`              |                                                   |
 | Ollama Cloud        | `ollama_cloud`        | Hosted models via ollama.com API                  |
 | OpenAI ChatGPT Plan | `openai_subscription` | Uses your ChatGPT Plus/Pro subscription via OAuth |
-| OpenCode Go         | `opencode_go`         | Picks the right endpoint from the model name. Four models are **not servable yet** — `grok-4.6`, `gpt-5.6-luna`, `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`: the provider serves these on the OpenAI Responses API, which kitty does not speak. Selecting one fails with a message saying so, rather than failing obscurely. |
+| OpenCode Go         | `opencode_go`         | Picks the right endpoint from the model name. Serves all three routes — `/v1/messages`, `/v1/chat/completions`, and `/v1/responses` (the four `/v1/responses` models: `grok-4.6`, `gpt-5.6-luna`, `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`). |
 | Xiaomi MiMo         | `mimo`                |                                                   |
 | Z.AI Coding Plan    | `zai_coding`          | Coding-optimized endpoint                         |
 
@@ -463,9 +465,10 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 
 **Generic:**
 
-| Provider                     | Type ID         | Notes                                                          |
-|------------------------------|-----------------|----------------------------------------------------------------|
-| **Custom OpenAI-Compatible** | `custom_openai` | Any service with a `/v1/chat/completions` endpoint — see below |
+| Provider                        | Type ID            | Notes                                                          |
+|---------------------------------|--------------------|----------------------------------------------------------------|
+| **Custom OpenAI-Compatible**    | `custom_openai`    | Any service with a `/v1/chat/completions` endpoint — see below |
+| **Custom Anthropic-Compatible** | `custom_anthropic` | Any service with an `/v1/messages` endpoint — see below        |
 
 ### Custom OpenAI-Compatible Provider
 
@@ -510,6 +513,18 @@ $ kitty claude
 | LM Studio    | `http://localhost:1234/v1`              |
 
 Both HTTPS and HTTP (local) endpoints are supported.
+
+### Custom Anthropic-Compatible Provider
+
+Use the `custom_anthropic` provider to connect to **any** service that exposes an Anthropic-compatible Messages API.
+This works with self-hosted front-ends for Anthropic-format models and any other service that accepts
+`POST /v1/messages` with `x-api-key` auth and SSE streaming.
+
+**The base URL ends at the API root** — Kitty appends `/v1/messages` itself. Give it
+`https://api.anthropic.com`, not `https://api.anthropic.com/v1/messages`.
+
+Pasting the full endpoint works anyway: Kitty drops the duplicate `/v1/messages` instead of failing.
+That holds for an endpoint carrying a query string too, and the query is kept and sent with every request.
 
 ## Commands
 
@@ -604,7 +619,7 @@ kitty --logging claude
 kitty --log-file /tmp/my-usage.log claude
 ```
 
-**Debug logs** — verbose tracing of requests, responses, and protocol translation:
+**Debug logs** — verbose tracing of requests, responses, and protocol translation; budget-resolution lines for the compaction budget (catalog override, default fallback when no model knows the model):
 
 ```bash
 # Default location: ~/.cache/kitty/bridge.log
@@ -621,18 +636,19 @@ kitty --debug --log-file /tmp/usage.log my-profile bridge
 kitty --debug-file /tmp/debug.log --logging my-profile codex
 ```
 
-| Flag        | What it logs             | Default path                | Custom path flag    |
-|-------------|--------------------------|-----------------------------|---------------------|
-| `--logging` | Token usage              | `~/.cache/kitty/usage.log`  | `--log-file PATH`   |
-| `--debug`   | Request/response tracing | `~/.cache/kitty/bridge.log` | `--debug-file PATH` |
+| Flag        | What it logs                                                       | Default path                | Custom path flag    |
+|-------------|--------------------------------------------------------------------|-----------------------------|---------------------|
+| `--logging` | Token usage                                                        | `~/.cache/kitty/usage.log`  | `--log-file PATH`   |
+| `--debug`   | Request/response tracing and the compaction-budget resolution lines (logger `kitty.providers.model_context`) | `~/.cache/kitty/bridge.log` | `--debug-file PATH` |
 
 ### Cleanup
 
-kitty restores agent config files after the agent exits. Three layers of cleanup:
+kitty restores agent config files after the agent exits. Three automatic cleanup layers, plus manual recovery:
 
 1. **Normal exit** — `finally` block
-2. **Crash / `SIGTERM`** — `atexit` handler
-3. **`SIGKILL` / kernel OOM** — run `kitty cleanup` manually
+2. **Crash** — `atexit` handler
+3. **`SIGTERM`** — forwarded to the agent; the same `finally` block runs when the agent dies from it
+4. **`SIGKILL` / kernel OOM** — manual recovery via `kitty cleanup`
 
 If your agent shows connection errors after a crash, run `kitty cleanup` to restore its configuration files.
 
@@ -712,15 +728,48 @@ distinguishable in logs from the ordinary "request too large" rejection.
 ### "Kitty Bridge received an empty reply from the upstream provider on every attempt"
 
 Applies to providers kitty talks to in Anthropic's own format: `anthropic`, `custom_anthropic`, `zai_coding`,
-`minimax_token`, and `opencode_go` for the models it serves on Anthropic's format — and to every provider kitty
-converts to Chat Completions. On the Anthropic-format side kitty holds back the start of each streamed reply until it
-carries text or a tool call, so a reply with nothing in it — or only thinking, up to 10 MiB of it — can be retried
-before your agent sees it; on the translated side a streamed reply that carries no content and no completion marker
-takes the same ladder. This error means every attempt kitty made came back empty. Nothing reached the agent, so simply
-resend; if it persists, the provider or model is misbehaving.
+`minimax_token`, and `opencode_go` for the models it serves on Anthropic's format; to every provider kitty
+converts to Chat Completions; and to the custom-transport backends on `/v1/chat/completions` — Bedrock, Ollama
+Cloud, and the Codex/OpenAI subscription — whose native transport kitty drives itself. On the Anthropic-format side
+kitty holds back the start of each streamed reply until it carries text or a tool call, so a reply with nothing in
+it — or only thinking, up to 10 MiB of it — can be retried before your agent sees it; on the translated side —
+Chat Completions, Responses, and Gemini clients over a Messages-wire upstream — a streamed reply that carries no
+text, tool call, reasoning, refusal, legacy function call, or multimodal content parts takes the same ladder —
+whether or not it ends with a completion marker — with the same release rule on the first content-bearing delta. On
+the custom-transport side the branch synthesises the provider's translated Chat Completions reply and judges it
+through the same predicate, so a synthesised reply that carries no text, tool call, or reasoning takes the same
+ladder — a completion the branch's translation projects only `content` and `tool_calls` and whose parsers surface no
+reasoning cannot release the hold. Both streaming and non-streaming routes treat a reasoning-only reply as a
+successful turn when the reasoning reaches the client: the streamed hold releases on the first `reasoning_content`
+delta on the plain-POST side, and the non-streaming detector counts `message.reasoning_content` as content. A
+reasoning-only Chat Completions reply succeeds on the first attempt on the plain-POST route; over a custom-transport
+backend the reasoning is not projected by the translation and the reply synthesises as empty, taking the same
+ladder. A reply whose only payload is the model's refusal succeeds on the first attempt wherever the refusal
+reaches the client — on the plain-POST route and on the translated routes, whose translators carry it as text. The
+exhaustion terminal itself is route-wide: a plain-POST Chat Completions-wire provider (OpenAI, OpenRouter, DeepSeek,
+or any other Chat Completions backend) whose every attempt comes back content-less lands on the same
+`type: "empty_response"` D4 event, and the same terminal fires for the three custom-transport backends when every
+attempt on a custom-transport route comes back content-less. Both flavours use the empty ladder — the terminal is
+what the ladder serves. This error means every attempt kitty made came back empty. Nothing reached the agent, so
+simply resend; if it persists, the provider or model is misbehaving.
 
-The response is a `502` carrying `"reason": "empty_response"`. One visible cost of the hold, on the Anthropic-format
-side: on reasoning models the agent shows its spinner, not live thinking, until the first text or tool call arrives.
+The response is a `502` carrying `"reason": "empty_response"` for clients that expect JSON
+(`/v1/messages` non-stream and streamed). For streaming clients that expect SSE
+(`/v1/responses` to Codex CLI; `/v1beta/...:streamGenerateContent` to Gemini CLI;
+`/v1/chat/completions` to Kilo, OpenCode, and any Chat Completions client) the
+exhaustion is delivered inside the open stream as an SSE error event carrying the
+route-specific D4 discriminator — `code: "empty_response"` on the Responses wire,
+`reason: "empty_response"` inside the nested `error` object on the Gemini wire
+(where the integer `code: 502` matches the messages branch's exhaustion status,
+mirroring its timeout/exception `code: 504`/`code: 500` precedent),
+`type: "empty_response"` inside the nested `error` object on the Chat Completions wire —
+followed by the stream's normal lifecycle closer (`response.completed(incomplete)` on the Responses wire,
+`write_eof` on the Gemini wire, `[DONE]` on the Chat Completions wire). The HTTP status stays
+`200 text/event-stream` throughout; the discriminator inside the payload marks the
+stream as an exhausted-empty one, distinguishable from any other terminal event.
+
+One visible cost of the hold, on the Anthropic-format side: on reasoning models the
+agent shows its spinner, not live thinking, until the first text or tool call arrives.
 
 ### "Kitty Bridge received an empty response from the upstream provider after content had already been sent"
 
@@ -737,6 +786,30 @@ the agent; the error shown is the provider's own, with kitty's `"reason": "upstr
 it apart — or, if the provider's error payload was too malformed to deliver, kitty's own message saying so, with
 the same `"reason": "upstream_error"`. Either way an errored ladder is never reported as an empty one. Simply
 resend; if it persists, the provider is failing outright — switch backend or wait it out.
+
+### A cap-hit error carrying `"cross_class_exhaustion"`
+
+Balanced profiles only, all four streaming routes (`/v1/messages`,
+`/v1/responses`, `/v1beta/.../streamGenerateContent`,
+`/v1/chat/completions`). Every backend in the pool failed and the
+bridge could not find a usable one — including backends it tried but
+could not drive because the two halves of the pool speak different
+protocols. The terminal event is route-specific:
+
+- `/v1/messages` returns a bare JSON `502` with the message body.
+- The three other routes keep their SSE response stream open and emit
+  the route's D4-family error event in-stream — the client sees a
+  `200` with an `error` event whose `code` (Responses) / `reason`
+  (Gemini) / `type` (Chat Completions) field reads
+  `"cross_class_exhaustion"`, plus the standard message wording
+  *"Upstream backends exhausted (the bridge could not land on a usable
+  backend on this request)"*. The status line on the wire stays `200`
+  because those routes prepare their SSE response eagerly at handler
+  entry and cannot rewrite the status after the fact.
+
+Nothing reached the agent; simply resend. If it persists, the pool
+is failing outright — check the backends' own health or add a backend
+of the protocol that is not represented.
 
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 

@@ -29,7 +29,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from harness import contract as c
@@ -85,12 +85,15 @@ _SAMPLING_KEYS = {
     "stop_sequences": "stop",
 }
 
-#: Tool-declaration keys the grammar carries.  Anything else on a tool entry
-#: residualises — ``type`` on a server tool is the one that occurs.
+#: Tool-declaration keys the grammar carries.  ``type`` joined this set with
+#: KBR-205: a tool's discriminator decides whether a forced call is to a
+#: client-declared or an Anthropic-defined tool (KBR-214 D10), and G35's
+#: register row anchors its conditional on it — residualising it would
+#: fail the run before that row could match.
 #: ``cache_control`` joined this set with KBR-167: Anthropic caches tool
 #: definitions, and Claude Code marks the last declaration on nearly every
 #: request, so residualising it failed the run on every real body.
-_TOOL_KEYS = frozenset({"name", "description", "input_schema", "cache_control"})
+_TOOL_KEYS = frozenset({"name", "description", "input_schema", "type", "cache_control"})
 
 #: ``tool_choice.type`` values that map straight onto the canonical value.
 #: ``tool`` is handled separately because it carries a name.
@@ -144,6 +147,186 @@ class AnthropicMessagesProjection:
             raise c.UnreadableBodyError(f"unreadable Anthropic Messages body: {exc!r}") from exc
 
 
+class AnthropicMessagesReplyProjection:
+    """Reads an Anthropic Messages reply into :class:`~harness.contract.Reply`.
+
+    Implements :class:`~harness.contract.ReplyProjection` for
+    :attr:`~harness.contract.WireFormat.ANTHROPIC_MESSAGES`. The reply direction
+    reuses the per-block vocabulary the request reader built: a reply's
+    ``content`` array is a sequence of the same blocks (``text``, ``thinking``,
+    ``redacted_thinking``, ``tool_use``, plus any unmodelled type), so
+    :func:`_read_block` is reused without modification. ``stop_reason`` is mapped
+    onto :data:`~harness.contract.STOP_REASONS`; the published values the canonical
+    set does not list (``pause_turn``, ``refusal``,
+    ``model_context_window_exceeded``) project as ``other`` with the wire value in
+    :attr:`~harness.contract.Reply.stop_reason_raw`, so T-D10's register match has a
+    stable canonical anchor and the wire string to name the delta.
+
+    Attributes:
+        wire_format: Always :attr:`~harness.contract.WireFormat.ANTHROPIC_MESSAGES`.
+    """
+
+    wire_format = c.WireFormat.ANTHROPIC_MESSAGES
+
+    #: ``stop_reason`` values the published schema lists that map straight onto a
+    #: member of :data:`~harness.contract.STOP_REASONS`. Sourced from
+    #: ``docs.claude.com/en/api/messages.md`` (*Stop reason* section, retrieved
+    #: 2026-09-16): ``end_turn``, ``max_tokens``, ``stop_sequence``, ``tool_use``.
+    #: The three remaining published values — ``pause_turn``, ``refusal``,
+    #: ``model_context_window_exceeded`` — project as ``other`` so
+    #: :attr:`~harness.contract.Reply.stop_reason_raw` keeps them distinct for
+    #: T-D10's register match.
+    _CANONICAL_STOP_REASONS = frozenset({"end_turn", "max_tokens", "stop_sequence", "tool_use"})
+
+    #: Top-level keys a reply body carries. Every one is consumed — the bridge
+    #: may legitimately rewrite or regenerate them (``id`` is request-bound;
+    #: ``model`` may differ from the agent's request when M1 fires;
+    #: ``stop_sequence`` only matches when the request named one), so they are
+    #: not I1-carrying and project nowhere on :class:`~harness.contract.Reply`.
+    #: ``container`` and ``stop_details`` joined with the 2026-09-16 schema
+    #: retrieval (the published response example carries both; ``stop_details``
+    #: is the refusal breakdown whose category lives behind
+    #: ``stop_reason = "refusal"``, which the canonical mapping already carries).
+    #: Listing them here is what keeps them out of the residual while letting
+    #: :func:`~harness.contract.verify_total` see them as accounted.
+    _PROJECTION_KEYS = frozenset(
+        {
+            "id",
+            "type",
+            "role",
+            "model",
+            "container",
+            "stop_reason",
+            "stop_details",
+            "stop_sequence",
+            "usage",
+            "content",
+        }
+    )
+
+    def read_reply(self, captured: c.CapturedReply) -> c.Reply:
+        """Project a captured Messages reply.
+
+        Args:
+            captured: The reply as observed on the wire. SSE reassembly is the
+                caller's responsibility — this reader takes a complete body, per
+                the ``ReplyProjection`` protocol's boundary statement (§7.4).
+
+        Returns:
+            The wire-independent projection, total over the body.
+
+        Raises:
+            UnreadableBodyError: When the body is not a readable Messages reply
+                (malformed JSON, ``content`` not an array, a content block the
+                reader cannot structurally project). ``ValueError`` from
+                :meth:`~harness.contract.Reply.__post_init__` is deliberately
+                not caught: it means a reader mis-mapped the stop reason and is
+                a reader bug rather than a transport failure.
+        """
+        body = _parse_body(captured.body)
+
+        residual: dict[str, Any] = {}
+        consumed: set[str] = set()
+
+        # Every key the body lists must be accounted for — either consumed (the
+        # reader handled the value, even if it projects nowhere on ``Reply``) or
+        # residualised at its bare top-level path (the reader did not recognise
+        # it). Bare key per §7.4.1 rule 1: a wholly-unclassified top-level key
+        # is keyed by its own name, never ``residual[x]`` — ``verify_total``
+        # compares ``set(consumed) | set(residual)`` against ``set(source)``.
+        for key, value in body.items():
+            if key in self._PROJECTION_KEYS:
+                consumed.add(key)
+            else:
+                residual[c.residual_key(key)] = value
+
+        stop_reason, stop_reason_raw = self._map_stop_reason(body.get("stop_reason"), residual)
+
+        parts = _read_reply_content(body.get("content"), residual)
+
+        usage_raw = body.get("usage")
+        # ``usage`` is in ``_PROJECTION_KEYS``, so the top-level loop has
+        # already consumed it; this branch only decides whether the value is
+        # carryable or malformed.
+        if isinstance(usage_raw, dict):
+            usage: Mapping[str, Any] = dict(usage_raw)
+        elif usage_raw is None:
+            usage = {}
+        else:
+            # A non-dict ``usage`` is malformed; residualise so the run names it.
+            residual[c.residual_key("usage")] = usage_raw
+            usage = {}
+
+        return c.Reply(
+            parts=parts,
+            stop_reason=stop_reason,
+            stop_reason_raw=stop_reason_raw,
+            usage=usage,
+            residual=residual,
+            consumed=frozenset(consumed),
+            source=body,
+        )
+
+    @classmethod
+    def _map_stop_reason(
+        cls, value: Any, residual: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        """Map the wire ``stop_reason`` onto :data:`~harness.contract.STOP_REASONS`.
+
+        Args:
+            value: The wire value (``str`` or ``None``). A non-string value
+                residualises at the body's top-level ``stop_reason`` path — a
+                wrongly-typed value would otherwise coerce through ``str()``
+                and invent a reason the body never sent.
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            ``(stop_reason, stop_reason_raw)`` — the canonical mapped value (or
+            ``None`` when the wire value is absent or wrongly-typed) and the
+            wire's own string when the canonical value is ``other`` (otherwise
+            ``None``).
+        """
+        if value is None:
+            return None, None
+        if not isinstance(value, str):
+            residual[c.residual_key("stop_reason")] = value
+            return None, None
+        if value in cls._CANONICAL_STOP_REASONS:
+            return value, None
+        # The three published values the canonical set does not list (and any
+        # future addition) project as ``other`` so T-D10's register rows can
+        # name the wire value at a stable canonical anchor.
+        return "other", value
+
+
+def _read_reply_content(value: Any, residual: dict[str, Any]) -> tuple[c.Part, ...]:
+    """Read the reply's ``content`` array into :class:`~harness.contract.Part` values.
+
+    Reuses :func:`_read_block` — the per-block vocabulary is identical between
+    request and reply directions (a reply's ``content`` is a sequence of the
+    same blocks the request direction places inside messages). The path prefix
+    is ``content[<i>]``; the block reader builds its own residual keys at that
+    path.
+
+    Args:
+        value: The wire value (array of blocks, or ``None`` when absent).
+        residual: The residual mapping, extended in place.
+
+    Returns:
+        The projected parts, in wire order. An absent or non-array ``content``
+        returns ``()`` and residualises at the body's top-level ``content``
+        path so the run names the structural break (Anthropic's schema
+        requires the array).
+    """
+    if value is None:
+        residual[c.residual_key("content")] = None
+        return ()
+    if not isinstance(value, list):
+        residual[c.residual_key("content")] = value
+        return ()
+    return tuple(_read_block(block, f"content[{index}]", residual) for index, block in enumerate(value))
+
+
 def _parse_body(raw: bytes) -> Mapping[str, Any]:
     """Decode the request body into a JSON object.
 
@@ -194,7 +377,7 @@ def _project(body: Mapping[str, Any]) -> c.Request:
             sampling[_SAMPLING_KEYS[key]] = value
             consumed.add(key)
         elif key == "tool_choice":
-            extra[c.TOOL_CHOICE_KEY] = _read_tool_choice(value, residual)
+            extra[c.TOOL_CHOICE_KEY] = _read_tool_choice(value, residual, extra)
             consumed.add(key)
         elif key in _PUBLISHED_EXTRA_KEYS or key in _CLIENT_SENT_EXTRA_KEYS:
             # Keyed by the wire key, never nested (§3.3.1a). The two key sets are
@@ -228,16 +411,28 @@ def _project(body: Mapping[str, Any]) -> c.Request:
     )
 
 
-def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
-    """Normalise a ``tool_choice`` onto its canonical value.
+def _read_tool_choice(
+    value: Any, residual: dict[str, Any], extra: dict[str, Any]
+) -> str:
+    """Normalise a ``tool_choice`` onto its canonical value, and map the parallel knob.
 
     Four wire keys across the formats name one concept, so §3.3.1b makes the
     *value* canonical too — ``auto``, ``any``, ``none`` or ``tool:<name>``.
+    Anthropic's nested, inverted ``disable_parallel_tool_use`` flag maps
+    onto ``envelope.extra["parallel_tool_calls"]`` (the Chat Completions
+    spelling and polarity, fixed in §3.3.1b), and the entry is written only
+    when the wire carries a non-default value — mirroring KBR-214's
+    forwarding rule, which forwards only ``disable_parallel_tool_use: true``
+    as ``parallel_tool_calls: false``. An absent flag and an explicit
+    ``false`` are one request on both wires, so writing both would invent a
+    second field some providers reject and every comparison would carry.
 
     Args:
         value: The wire value.
         residual: The residual mapping, extended with any key the canonical
             value does not carry.
+        extra: The envelope's ``extra`` mapping, extended in place when the
+            parallel knob carries a non-default value.
 
     Returns:
         The canonical value.
@@ -265,12 +460,41 @@ def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
     else:
         raise c.UnreadableBodyError(f"unrecognised tool_choice type {kind!r}")
 
+    # Parallel knob — Anthropic's flag, Chat Completions' polarity (§3.3.1b).
+    # `True` is the only non-default value: it inverts to `False` on the
+    # canonical address. Absent and `false` are both the default and produce
+    # no entry, so neither side carries a delta. Writing on the absent case
+    # would force the CC reader to compare a default the wire never wrote.
+    # A wrongly-typed value (not a bool, not null) is *not* added to the
+    # mapped set, so `_residualise` puts it in the residual — §7.4.1's
+    # wrongly-typed-leaf rule, applied here because the registry is not the
+    # right home for a mapped field. ``null`` is treated as absent (the
+    # cache_control precedent), matching the CC reader's
+    # ``parallel_tool_calls: null`` branch — six readers cannot quietly
+    # disagree about what a null flag means, and a cross-format corpus
+    # entry carrying one would otherwise fail on the Anthropic wire while
+    # projecting green on the CC wire.
+    flag = value.get("disable_parallel_tool_use")
+    mapped_disable: set[str] = set()
+    if flag is None or isinstance(flag, bool):
+        mapped_disable = {"disable_parallel_tool_use"}
+        if flag is True:
+            extra[c.PARALLEL_TOOL_CALLS_KEY] = False
+
     # `name` is accounted for only on the branch that read it: a stale `name`
     # beside `type: "auto"` is exactly the mutation the oracle should report, and
-    # excluding it unconditionally would drop it silently. `disable_parallel_tool_use`
-    # is a separate knob, not part of the concept four formats share, so folding
-    # it into the value would make that value match nothing.
-    _residualise(value, {"type", "name"} if kind == "tool" else {"type"}, "tool_choice", residual)
+    # excluding it unconditionally would drop it silently.
+    # `disable_parallel_tool_use` joins the mapped set when its value is a
+    # bool (read, either mapped onto `extra[parallel_tool_calls]` or silently
+    # the default) or null (treated as absent, for totality) — a typo'd
+    # sibling (``disable_parallel_tool_usee: true``) is not in the set and
+    # residualises, the unregistered-mutation guard §3.3.1 names.
+    _residualise(
+        value,
+        {"type", "name", *mapped_disable} if kind == "tool" else {"type", *mapped_disable},
+        "tool_choice",
+        residual,
+    )
 
     return canonical
 
@@ -325,8 +549,10 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
     Args:
         value: The ``tools`` field, absent or a list of declarations.
         residual: The residual mapping, extended with any entry key the grammar
-            cannot carry, such as ``type`` on a server tool. ``cache_control``
-            is carried rather than residualised, since KBR-167.
+            cannot carry, such as an unknown tool key. ``cache_control`` is
+            carried rather than residualised, since KBR-167; ``type`` is
+            carried on :attr:`ToolDecl.type` rather than residualised, since
+            KBR-205 — G35's register row anchors on it.
 
     Returns:
         The declarations, in order.
@@ -367,6 +593,12 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
                 # Absent, not False: the Messages format defines no `strict`,
                 # and P15's presence and absence must stay distinguishable.
                 strict=None,
+                # `"custom"` on a client tool, a dated vendor spelling on a
+                # server tool — carried whole, never canonicalised, because a
+                # vendor spelling on a ToolDecl is the deliberate exception
+                # §7.4.1 makes for `Opaque.kind` and for the same reason: the
+                # type's identity *is* its wire spelling.
+                type=_typed_leaf(tool, "type", str, c.residual_key("tools", index=index), residual),
                 cache_control=_read_cache_control(tool, c.residual_key("tools", index=index), residual),
             )
         )
@@ -491,7 +723,12 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
         text = block["text"]
         if not isinstance(text, str):
             raise c.UnreadableBodyError(f"{path} text must be a string, got {type(text).__name__}")
-        _residualise(block, {"type", "text", "cache_control"}, path, residual)
+        # Declared-ignored fields are consumed before `_residualise` runs, so
+        # they do not land in the residual as if unknown (§3.3.1, KBR-205). A
+        # wrong-typed value still residualises at its own path — the
+        # registry declares the field ignorable, not the value well-formed.
+        ignored = c.consumed_ignored_fields(block, kind, path, residual)
+        _residualise(block, {"type", "text", "cache_control", *ignored}, path, residual)
         return c.Text(text, cache_control=_read_cache_control(block, path, residual, permitted=not nested))
 
     if kind == "thinking":
@@ -510,8 +747,13 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
         return _read_image(block, path, residual, nested=nested)
 
     if kind == "tool_use":
-        if not isinstance(block.get("name"), str):
-            raise c.UnreadableBodyError(f"{path} tool_use carries no name")
+        # KBR-281: `""` for a name is not a lossless projection
+        # (`contract.py:935-941`) — a call nobody can name cannot be paired
+        # with its result or addressed by a register row. Same rule the Ollama
+        # readers landed in KBR-267/KBR-279.
+        name = block.get("name")
+        if not isinstance(name, str) or not name:
+            raise c.UnreadableBodyError(f"{path} tool_use must carry a non-empty string name")
 
         # As for `input_schema`: Chat Completions encodes arguments as a JSON
         # *string*, so an upstream body that failed to parse one back lands here
@@ -522,7 +764,8 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
             residual[c.residual_key(path, "input")] = arguments
             arguments = None
 
-        _residualise(block, {"type", "name", "input", "id", "cache_control"}, path, residual)
+        ignored = c.consumed_ignored_fields(block, kind, path, residual)
+        _residualise(block, {"type", "name", "input", "id", "cache_control", *ignored}, path, residual)
         return c.ToolUse(
             name=block["name"],
             arguments=arguments or {},
@@ -540,8 +783,9 @@ def _read_block(block: Any, path: str, residual: dict[str, Any], *, nested: bool
             residual[c.residual_key(path, "is_error")] = is_error
             is_error = False
 
+        ignored = c.consumed_ignored_fields(block, kind, path, residual)
         _residualise(
-            block, {"type", "tool_use_id", "content", "is_error", "cache_control"}, path, residual
+            block, {"type", "tool_use_id", "content", "is_error", "cache_control", *ignored}, path, residual
         )
         return c.ToolResult(
             content=_read_result_content(block.get("content"), path, residual),
@@ -578,15 +822,17 @@ def _read_image(
 
     Raises:
         UnreadableBodyError: When the block carries no source, the source is not
-            an object, its type is none of ``base64``/``url``/``file``, or its
-            base64 payload does not decode.
+            an object, or its type is none of ``base64``/``url``/``file``. A
+            base64 payload that does not decode residualises instead — §7.4
+            rule 7 row 3 (KBR-251).
     """
     source = block.get("source")
     if not isinstance(source, dict):
         raise c.UnreadableBodyError(f"{path} image carries no source object")
 
     kind = source.get("type")
-    _residualise(block, {"type", "source", "cache_control"}, path, residual)
+    ignored = c.consumed_ignored_fields(block, "image", path, residual)
+    _residualise(block, {"type", "source", "cache_control", *ignored}, path, residual)
 
     # The breakpoint sits on the *block*, not on its source, so it is read once
     # here and handed to whichever of the three source kinds builds the part.
@@ -595,15 +841,30 @@ def _read_image(
     if kind == "base64":
         try:
             decoded = base64.b64decode(source["data"], validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise c.UnreadableBodyError(f"{path} image data is not valid base64: {exc}") from exc
+        except (binascii.Error, ValueError):
+            # Residualised, not raised on, and the part is not dropped: §7.4
+            # rule 7 row 3 is explicit that "raising is the other wrong
+            # answer: it blinds the oracle to everything else in a request it
+            # could otherwise diff" — and the case is real rather than
+            # hypothetical, since `validate=True` rejects every RFC 2045 line
+            # break and Google's own image-understanding sample passes `-w0`
+            # to `base64(1)` precisely because its default output is wrapped.
+            # The part keeps its position with identity from the wire's own
+            # bytes — the second of `image_digest`'s recipes (KBR-192) —
+            # rather than a bare ``None`` that would defeat
+            # ``Image.__post_init__``'s XOR check.
+            raw = source["data"]
+            residual[c.residual_key(c.residual_key(path, "source"), "data")] = raw
+            digest = c.image_digest(raw.encode("utf-8"))
+        else:
+            digest = c.image_digest(decoded)
 
         _residualise(source, {"type", "data", "media_type"}, c.residual_key(path, "source"), residual)
         # The media type is excluded from the digest and carried separately, so
         # a changed media type is its own delta rather than an unexplained
         # digest change.
         return c.Image(
-            digest=c.image_digest(decoded),
+            digest=digest,
             media_type=_typed_leaf(source, "media_type", str, c.residual_key(path, "source"), residual),
             cache_control=cache_control,
         )
@@ -826,7 +1087,7 @@ def _read_cache_control(
 
 
 def _residualise(
-    source: Mapping[str, Any], mapped: set[str], prefix: str, residual: dict[str, Any]
+    source: Mapping[str, Any], mapped: Collection[str], prefix: str, residual: dict[str, Any]
 ) -> None:
     """Record every key of ``source`` the reader did not map.
 
@@ -835,7 +1096,10 @@ def _residualise(
 
     Args:
         source: The object being read.
-        mapped: The keys the caller accounted for.
+        mapped: The keys the caller accounted for. Accepts a ``set`` or a
+            ``frozenset`` — the per-block call sites build a fresh ``set``
+            from a literal, while :data:`_TOOL_KEYS` is a ``frozenset`` so a
+            reader cannot quietly grow it mid-request.
         prefix: The object's path from the body root, to which each unmapped
             key is appended.
         residual: The residual mapping, extended in place.

@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from harness.contract import REDACTED_HEADERS, REDACTED_QUERY_KEYS, CapturedRequest, WireFormat
-from harness.register import Trigger
+from harness.register import ArrangingBy, Trigger
 
 # --------------------------------------------------------------------------
 # Errors
@@ -814,39 +814,33 @@ def _checked_id(entry_id: str) -> str:
 
 #: Triggers a corpus entry may not declare in either direction.
 #:
-#: :mod:`harness.register` states the model as a binary — "a trigger is a *route*
-#: property or a *request* property, and only the second can be varied by a
-#: corpus entry" — but its own docstring names a **third** kind twenty lines
-#: earlier: "M6 fires on *an upstream 400*, M8 on *a rejected thinking
-#: round-trip*, M9 on *an upstream tool-use format error*, M12 on *an empty
-#: upstream response*."  Those are properties of the **upstream response**,
-#: arranged by a scripted recorder.  An entry that claimed one would be claiming
-#: something it is not the thing that decides — precisely the over-declaration
-#: §9.2's gap **G21** warns about, where "assertion 1 claims every delta and the
-#: oracle passes over a broken bridge", with the aggravation that "the same
-#: author writes the entry and its trigger index, so the mechanism has no second
-#: reader".  This is that second reader.
+#: KBR-186. Derived from :class:`~harness.register.ArrangingBy` rather than
+#: hand-listed: ``ALWAYS`` (the absence of a condition, not a condition — every
+#: request meets it, so declaring it met is noise and declaring it absent is
+#: false) plus every trigger whose ``arranged_by`` is not
+#: :attr:`~ArrangingBy.REQUEST`. Only REQUEST triggers are corpus-decidable; a
+#: ROUTE trigger is met by every request on its route (or none is), a RESPONSE
+#: trigger is arranged by the scripted recorder, and a PROFILE trigger is
+#: declared at the call site that resolves the profile — a manifest claiming
+#: any of them would be claiming something it is not the thing that decides,
+#: the over-declaration §9.2's gap **G21** warns about. This derivation is the
+#: second reader that mechanism has.
 #:
-#: :attr:`~harness.register.Trigger.ALWAYS` is here because the register calls it
-#: "the absence of a condition, not a condition": every request meets it, so
-#: declaring it met is noise and declaring it absent is false.
-#:
-#: **This set is the subset that is *provable* from text already in the
-#: repository, not a classification of the whole vocabulary.**  Classifying all
-#: 28 triggers is `KBR-186`, filed rather than guessed, for the reason T-W3 gave
-#: for deferring trigger predicates: data nothing in this change could prove
-#: wrong is what plan §1.4 forbids.  Until it lands, T-D8 cannot read corpus
-#: coverage for M6, M8, M9, M12 and M17 — they are discharged by a scripted-recorder
-#: test, not by an entry.
+#: The derived set replaced a hand list of six members (ALWAYS plus the five
+#: RESPONSE triggers) which the register's classification could outgrow
+#: silently; the test ``TestNotCorpusDecidableIsDerivedFromArrangingBy`` in
+#: :mod:`tests.harness.test_corpus` pins the derivation (F2 of the ticket), so
+#: a reclassification updates the refusal set automatically and a hand-edited
+#: second copy cannot come back.
 NOT_CORPUS_DECIDABLE: frozenset[Trigger] = frozenset(
-    {
+    (
         Trigger.ALWAYS,
-        Trigger.UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING,
-        Trigger.THINKING_ROUNDTRIP_REJECTED,
-        Trigger.THINKING_SIGNATURE_REJECTED,
-        Trigger.NATIVE_TOOL_USE_FORMAT_ERROR,
-        Trigger.UPSTREAM_EMPTY_RESPONSE,
-    }
+        *(
+            t
+            for t in Trigger
+            if t is not Trigger.ALWAYS and getattr(t, "arranged_by", None) is not ArrangingBy.REQUEST
+        ),
+    )
 )
 
 
@@ -944,10 +938,28 @@ def _triggers(names: object, field_name: str, entry_id: str) -> frozenset[Trigge
         if not isinstance(name, str) or name not in known:
             raise CorpusEntryError(f"{entry_id}: {field_name} names unknown trigger {name!r}")
         if known[name] in NOT_CORPUS_DECIDABLE:
+            # The reason is per-kind, because the reader who tripped this needs
+            # the *right* pointer: a RESPONSE trigger belongs to the test that
+            # scripts the recorder, a ROUTE trigger is decided by the adapter's
+            # dispatch (no complement exists on-route), and a PROFILE trigger is
+            # declared at the call site that resolves the profile.  The older
+            # message pointed every refusal at the scripted-recorder test,
+            # which is the right advice only for the RESPONSE kind.
+            reason = {
+                ArrangingBy.ROUTE: "the adapter's dispatch decides it — every "
+                "request on that route meets it (or none does), so no corpus "
+                "entry can vary it",
+                ArrangingBy.RESPONSE: "the upstream response decides it — "
+                "declare it at the test that scripts the recorder",
+                ArrangingBy.PROFILE: "the resolved profile decides it — "
+                "declare it at the call site that resolves the profile",
+            }.get(
+                getattr(known[name], "arranged_by", None),
+                "it is the absence of a condition, not a condition",
+            )
             raise CorpusEntryError(
                 f"{entry_id}: {field_name} names {name!r}, which an inbound request cannot "
-                "arrange — it is decided by the upstream response or by nothing at all. "
-                "Declare it at the test that scripts the recorder, not in the manifest."
+                f"arrange — {reason}."
             )
         resolved.add(known[name])
     return frozenset(resolved)
@@ -1291,7 +1303,16 @@ def write_entry(root: Path, entry: CorpusEntry, *, extra: Sequence[str] = ()) ->
     root.mkdir(parents=True, exist_ok=True)
     (root / body_file).write_bytes(scrubbed.body)
     path = root / f"{entry.id}.json"
-    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # `newline="\n"` forces LF on every platform (KBR-261): without it, the
+    # default text-mode translation rewrites every `\n` to `\r\n` on Windows
+    # regardless of `.gitattributes`, so a Windows regen commits a CRLF
+    # manifest and CI's L1 roundtrip test then reports the resulting
+    # LF-vs-committed byte diff as pure line-ending drift.
+    path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     return path
 
 
@@ -1334,6 +1355,68 @@ def entries_without(entries: Iterable[CorpusEntry], trigger: Trigger) -> tuple[C
 # --------------------------------------------------------------------------
 # The lint
 # --------------------------------------------------------------------------
+
+
+#: The exact form a captured ``captured_from`` must take.
+#:
+#: Anchored on both ends so a bare ``2.1.238`` (the workflow's spelling) or a
+#: ``v``-prefixed form (a tag operator reflex) fail the parse, not silently
+#: mismatch. A substring comparison against the pin would wave both through and
+#: the README's documented form would drift one letter at a time.
+CAPTURED_FROM_PATTERN = re.compile(r"claude-code/(\d+)\.(\d+)\.(\d+)\Z")
+
+
+#: A bare ``X.Y.Z`` triple — the form the workflow install line spells.
+_PIN_PATTERN = re.compile(r"(\d+)\.(\d+)\.(\d+)\Z")
+
+
+def _version_triple(text: str, *, label: str) -> tuple[int, int, int]:
+    """Return ``(major, minor, patch)`` from ``text``.
+
+    Args:
+        text: A bare ``"2.1.238"`` string — what the workflow install line
+            spells. Not the ``claude-code/2.1.238`` form; that is parsed by
+            :func:`captured_from_version`.
+        label: What to name the value in a malformed-input refusal, so the
+            message points the operator at the right artifact (the pin, or
+            the captured ``captured_from``).
+
+    Returns:
+        The version triple.
+
+    Raises:
+        CorpusEntryError: When ``text`` is not a strict ``X.Y.Z`` triple.
+    """
+    match = _PIN_PATTERN.match(text)
+    if match is None:
+        raise CorpusEntryError(
+            f"{label} {text!r} is not a bare X.Y.Z triple (the form the workflow install line spells)"
+        )
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def captured_from_version(entry: CorpusEntry) -> tuple[int, int, int]:
+    """Return the version triple named by ``entry.captured_from``.
+
+    Args:
+        entry: The corpus entry.
+
+    Returns:
+        The parsed version triple.
+
+    Raises:
+        CorpusEntryError: When ``captured_from`` is not the canonical
+            ``claude-code/X.Y.Z`` form. A bare version or a ``v``-prefix would
+            satisfy a substring compare against the pin, so the canonical
+            form is enforced rather than assumed.
+    """
+    match = CAPTURED_FROM_PATTERN.match(entry.captured_from)
+    if match is None:
+        raise CorpusEntryError(
+            f"{entry.id}: captured_from is {entry.captured_from!r}; it must be exactly "
+            "'claude-code/<X.Y.Z>' (e.g. 'claude-code/2.1.238') — see tests/corpus/README.md"
+        )
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
 def captured_only(entries: Iterable[CorpusEntry]) -> tuple[CorpusEntry, ...]:
@@ -1418,3 +1501,57 @@ def assert_corpus_clean(entries: Sequence[CorpusEntry]) -> None:
             "corpus-lint: committed entries carry credentials, identifiers or stale "
             "exemptions:\n  " + "\n  ".join(problems)
         )
+
+
+def assert_captured_from_matches_pin(entries: Sequence[CorpusEntry], pin: str) -> None:
+    """Fail unless every captured entry names the pinned Claude Code version.
+
+    The refresh cadence — re-capture when the pinned Claude Code version
+    changes, owner decision 2026-09-12 — is unactionable if nothing fails
+    when the pin moves. This guard is the *enforcement* the cadence lacked:
+    a bump in either of the two workflows that install Claude Code (the
+    reviewer's and the tmux-disconnect's, both pinning the same ``X.Y.Z``)
+    fails the gate until the corpus is re-captured.
+
+    The comparison parses both sides to a ``(major, minor, patch)`` triple
+    rather than string-matching ``f"claude-code/{pin}"`` against
+    ``entry.captured_from`` — the latter would let ``2.1.238`` and
+    ``claude-code/2.1.238`` disagree (the README's documented form vs the
+    workflow's spelling), and a substring compare would let ``v2.1.238``
+    pass against the pin (the ``2.1.23`` substring trap the CI pin-inventory
+    test documents at ``tests/test_ci_capability_inventory.py:838-843``).
+    The canonical form is enforced, not assumed.
+
+    Args:
+        entries: The corpus, normally :func:`load_corpus`'s output.
+        pin: The Claude Code version the workflows pin, as a bare ``"X.Y.Z"``
+            string (the form ``bash -s -- X.Y.Z`` spells).
+
+    Raises:
+        CorpusEntryError: When ``captured_only(entries)`` is empty (the
+            vacuous-pass refusal — a guard over nothing cannot pass by
+            looking); when ``pin`` is not a strict ``X.Y.Z`` triple; when any
+            captured entry's ``captured_from`` is not the canonical
+            ``claude-code/X.Y.Z`` form; or when any captured entry's version
+            does not equal the pin.
+    """
+    captured = captured_only(entries)
+    if not captured:
+        raise CorpusEntryError(
+            "no captured entries in the corpus: the freshness guard cannot pass by having "
+            "nothing to check (see tests/corpus/README.md — refresh cadence is unactionable "
+            "without evidence)"
+        )
+
+    pinned = _version_triple(pin, label="pin")
+    pinned_str = ".".join(str(p) for p in pinned)
+
+    for corpus_entry in captured:
+        entry_triple = captured_from_version(corpus_entry)
+        entry_str = ".".join(str(p) for p in entry_triple)
+        if entry_triple != pinned:
+            raise CorpusEntryError(
+                f"{corpus_entry.id}: captured_from {corpus_entry.captured_from!r} names "
+                f"version {entry_str!r}; the pin is {pinned_str!r} — re-capture against "
+                "the pinned Claude Code (see tests/corpus/README.md)"
+            )

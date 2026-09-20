@@ -2,10 +2,13 @@
 
 The token endpoint is reached through a :class:`~kitty.auth.token_transport.TokenTransport`
 rather than an ``aiohttp`` session (KBR-161).  The OpenAI subscription provider
-supplies the same impersonating ``curl_cffi`` session it uses for the API leg,
-so a provider sees one client for one account instead of two -- an impersonated
-Codex CLI for prompts and an anonymous Python client, on a different TLS
-fingerprint, for the token refreshes interleaved with them.
+supplies a ``curl_cffi`` session built by the same builder as the API leg's — a
+second session by design (see
+:attr:`~kitty.providers.openai_subscription.OpenAISubscriptionAdapter._oauth_curl_session`),
+identical in impersonation, CA bundle and egress mapping, so a provider still sees
+one client for one account.  The interactive login leg in
+:mod:`kitty.auth.openai_oauth` still uses aiohttp — it has no adapter to borrow
+a session from.
 """
 
 from __future__ import annotations
@@ -57,10 +60,25 @@ def token_request_headers() -> dict[str, str]:
     its token with the client it uses for the API; two clients for one account
     is a shape no real installation produces.
 
+    ``originator: codex_cli_rs`` is sent for the same reason.  The genuine
+    Codex CLI carries it on every token POST
+    (``codex-rs/login/src/auth/default_client.rs``, posted by ``server.rs``);
+    omitting it was the one header that distinguished every kitty auth POST
+    from a real one.  A live probe against ``auth.openai.com`` on 2026-09-15
+    (four POST variants, no credentials) confirmed the auth host is
+    indifferent -- ``originator`` triggers no rejection on its error path --
+    so the legacy "do NOT set originator" warning in
+    :meth:`~kitty.providers.openai_subscription.OpenAISubscriptionAdapter._build_codex_headers`,
+    which was written for the **Codex backend** (strict tool validation),
+    does not apply here.
+
     Returns:
         Headers to merge into a token-endpoint POST.
     """
-    return {"User-Agent": build_codex_user_agent()}
+    return {
+        "User-Agent": build_codex_user_agent(),
+        "originator": "codex_cli_rs",
+    }
 
 
 class OAuthError(Exception):

@@ -1,0 +1,119 @@
+{
+  "id": "effort_configured",
+  "description": "Body carries `output_config.effort: medium` (vs `high` in plain_turn) — the `--effort medium` flag changes only the value inside output_config, not its presence (verified empirically on CC 2.1.238: every body carries output_config). Together with plain_turn, establishes the range of output_config.effort values the agent can emit. C5 verified: output_config + thinking co-occur.",
+  "origin": "captured",
+  "origin_note": "",
+  "captured_from": "claude-code/2.1.238",
+  "captured_at": "2026-09-14",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "beta=true",
+  "headers": [
+    [
+      "Accept",
+      "application/json"
+    ],
+    [
+      "Authorization",
+      "<redacted:credential_header>"
+    ],
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "User-Agent",
+      "claude-cli/2.1.238 (external, sdk-cli)"
+    ],
+    [
+      "X-Claude-Code-Session-Id",
+      "89df1915-c545-4a59-a64d-648a2558b748"
+    ],
+    [
+      "X-Stainless-Arch",
+      "x64"
+    ],
+    [
+      "X-Stainless-Lang",
+      "js"
+    ],
+    [
+      "X-Stainless-OS",
+      "Linux"
+    ],
+    [
+      "X-Stainless-Package-Version",
+      "0.112.1"
+    ],
+    [
+      "X-Stainless-Retry-Count",
+      "0"
+    ],
+    [
+      "X-Stainless-Runtime",
+      "node"
+    ],
+    [
+      "X-Stainless-Runtime-Version",
+      "v26.3.0"
+    ],
+    [
+      "X-Stainless-Timeout",
+      "600"
+    ],
+    [
+      "anthropic-beta",
+      "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24"
+    ],
+    [
+      "anthropic-dangerous-direct-browser-access",
+      "true"
+    ],
+    [
+      "anthropic-version",
+      "2023-06-01"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ],
+    [
+      "x-app",
+      "cli"
+    ],
+    [
+      "Connection",
+      "keep-alive"
+    ],
+    [
+      "Host",
+      "127.0.0.1:38683"
+    ],
+    [
+      "Accept-Encoding",
+      "gzip, deflate, br, zstd"
+    ],
+    [
+      "Content-Length",
+      "4971"
+    ]
+  ],
+  "body_file": "effort_configured.body",
+  "body_sha256": "7753a1f12d5bba073a8856f99c49f2134948299f153a4c406559032408e43aaa",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "adaptive_thinking_keys_present",
+    "multiple_system_blocks",
+    "output_config_present"
+  ],
+  "triggers_absent": [
+    "max_tokens_absent",
+    "non_streaming_max_tokens_over_4096",
+    "orphan_tool_result",
+    "responses_origin_path",
+    "tool_result_over_limit"
+  ]
+}

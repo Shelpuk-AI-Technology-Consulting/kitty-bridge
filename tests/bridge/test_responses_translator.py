@@ -3,6 +3,8 @@
 import json
 import uuid
 
+import pytest
+
 from kitty.bridge.responses.translator import ResponsesTranslator
 
 
@@ -529,6 +531,230 @@ class TestTranslateResponse:
         result = self.t.translate_response(cc_response)
         reasoning_items = [o for o in result["output"] if o.get("type") == "reasoning"]
         assert len(reasoning_items) == 1
+
+
+class TestKBR285WidenedShapes:
+    """KBR-285 — refusal / list ``content`` / legacy ``function_call`` on /v1/responses."""
+
+    def setup_method(self):
+        self.t = ResponsesTranslator()
+
+    @staticmethod
+    def _function_call_items(output: list[dict]) -> list[dict]:
+        return [o for o in output if o.get("type") == "function_call"]
+
+    @staticmethod
+    def _message_items(output: list[dict]) -> list[dict]:
+        return [o for o in output if o.get("type") == "message"]
+
+    # ── translate_response ──────────────────────────────────────────────
+
+    def test_refusal_only_response_becomes_the_refusal_text(self):
+        """Refusal-only CC reply renders the refusal text in an output_text part."""
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-refusal",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"content": None, "refusal": "I can't help with that."},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        msg_items = self._message_items(result["output"])
+        assert len(msg_items) == 1
+        assert any(
+            block.get("text") == "I can't help with that."
+            for block in msg_items[0].get("content", [])
+        )
+
+    def test_list_content_response_joins_text_parts(self):
+        """List ``content`` joins to one output_text — no raw list on the wire."""
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-mm",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "here is the chart"},
+                                {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                            ]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        msg_items = self._message_items(result["output"])
+        assert len(msg_items) == 1
+        texts = [
+            block["text"]
+            for block in msg_items[0].get("content", [])
+            if block.get("type") == "output_text"
+        ]
+        assert texts == ["here is the chart"]
+        assert all(isinstance(t, str) for t in texts)
+
+    def test_legacy_function_call_response_becomes_one_function_call_item(self):
+        """Legacy dict ``function_call`` becomes one function_call output item."""
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-legacy",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": None,
+                            "function_call": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "London"}',
+                            },
+                        },
+                        "finish_reason": "function_call",
+                    }
+                ],
+            }
+        )
+        fc_items = self._function_call_items(result["output"])
+        assert len(fc_items) == 1
+        fc = fc_items[0]
+        assert fc["name"] == "get_weather"
+        assert fc["arguments"] == '{"city": "London"}'
+        assert fc["status"] == "completed"
+
+    def test_legacy_function_call_non_string_arguments_serialise_as_json(self):
+        """A non-string ``arguments`` value ships as JSON, never a Python repr.
+
+        The detector widening makes any truthy dict ``function_call`` count
+        as content, so a reply like ``{"name": "x", "arguments": {"city": 1}}``
+        is reachable; ``str()`` of the dict would put single-quoted
+        non-JSON text on a wire typed ``arguments: string``.
+        """
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-nonstr",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": None,
+                            "function_call": {"name": "x", "arguments": {"city": 1}},
+                        },
+                        "finish_reason": "function_call",
+                    }
+                ],
+            }
+        )
+        fc_items = self._function_call_items(result["output"])
+        assert len(fc_items) == 1
+        arguments = fc_items[0]["arguments"]
+        assert isinstance(arguments, str)
+        assert json.loads(arguments) == {"city": 1}
+        # No Python repr leaked: single quotes are never valid JSON.
+        assert "'" not in arguments
+
+    # ── translate_stream_chunk ──────────────────────────────────────────
+
+    @staticmethod
+    def _output_text_deltas(events: list[str]) -> list[str]:
+        """Extract the text payload of every output_text delta event."""
+        deltas: list[str] = []
+        for event in events:
+            if "response.output_text.delta" not in event:
+                continue
+            payload = json.loads(event.split("data: ", 1)[1])
+            deltas.append(payload["delta"])
+        return deltas
+
+    def test_refusal_delta_emits_the_refusal_text(self):
+        """Refusal-only delta streams the refusal text on the wire."""
+        chunk = {
+            "choices": [
+                {
+                    "delta": {"content": None, "refusal": "I can't help with that."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events = self.t.translate_stream_chunk("resp_test", chunk)
+        assert self._output_text_deltas(events) == ["I can't help with that."]
+
+    def test_list_content_delta_emits_joined_text(self):
+        """List ``content`` joins to a single output_text delta string."""
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": [
+                            {"type": "text", "text": "here is the chart"},
+                            {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events = self.t.translate_stream_chunk("resp_test", chunk)
+        assert self._output_text_deltas(events) == ["here is the chart"]
+
+    def test_legacy_function_call_stream_accumulates_one_call(self):
+        """Legacy dict ``function_call`` deltas open one function_call item, args accumulate."""
+        open_chunk = {
+            "choices": [
+                {
+                    "delta": {"function_call": {"name": "get_weather", "arguments": '{"city": '}},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        arg_chunk = {
+            "choices": [
+                {
+                    "delta": {"function_call": {"arguments": '"London"}'}},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        finish_chunk = {
+            "choices": [{"delta": {}, "finish_reason": "function_call"}],
+        }
+        self.t.translate_stream_chunk("resp_test", open_chunk)
+        self.t.translate_stream_chunk("resp_test", arg_chunk)
+        events = self.t.translate_stream_chunk("resp_test", finish_chunk)
+        fc_items = [
+            json.loads(event.split("data: ", 1)[1])["item"]
+            for event in events
+            if "response.output_item.done" in event
+            and "function_call" in event
+        ]
+        assert len(fc_items) == 1
+        assert fc_items[0]["name"] == "get_weather"
+        assert json.loads(fc_items[0]["arguments"]) == {"city": "London"}
+
+    def test_refusal_only_stream_judges_non_empty(self):
+        """Refusal-only stream reaches the finish with ``response_was_empty`` False."""
+        refusal = {
+            "choices": [
+                {
+                    "delta": {"content": None, "refusal": "I can't help with that."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        finish = {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+        }
+        self.t.translate_stream_chunk("resp_test", refusal)
+        self.t.translate_stream_chunk("resp_test", finish)
+        assert self.t.response_was_empty is False
 
 
 # ── translate_stream_start ──────────────────────────────────────────────
@@ -1371,3 +1597,271 @@ class TestOutputItemIndices:
         call_events = self._feed({"tool_calls": [self._tool_call(0, "call_b")]})
         assert self._added(text_events) == [(0, "message")]
         assert self._added(call_events) == [(1, "function_call")]
+
+
+class TestResponsesToolChoice:
+    """KBR-221: ``tool_choice`` and ``parallel_tool_calls`` survive the Responses -> CC hop.
+
+    Responses and Chat Completions spell most values the same way; named choices move
+    across via a spelling shift (``function.name`` -> ``function.function.name``), and
+    ``allowed_tools`` / hosted / MCP / ``custom`` shapes that have no CC form are
+    omitted (D5 / D10). ``parallel_tool_calls`` is forwarded only when the wire
+    carries the explicit non-default ``false`` (D2) -- the rest of the request is
+    unaffected.
+    """
+
+    def setup_method(self):
+        self.t = ResponsesTranslator()
+
+    def _req(self, **extra):
+        """Build a minimal Responses request with one function tool, plus the case's fields."""
+        req = {
+            "model": "m",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "name": "get_weather", "parameters": {}}],
+        }
+        req.update(extra)
+        return req
+
+    @pytest.mark.parametrize(
+        "choice",
+        ["auto", "none", "required"],
+        ids=["auto", "none", "required"],
+    )
+    def test_tool_choice_string_is_carried(self, choice):
+        """AC-1: each published string choice maps to the CC spelling (R1)."""
+        result = self.t.translate_request(self._req(tool_choice=choice))
+        assert result["tool_choice"] == choice
+
+    def test_tool_choice_function_is_carried(self):
+        """AC-1: named function choice moves ``name`` under ``function.function.name``."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "function", "name": "get_weather"})
+        )
+        assert result["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+
+    def test_tool_choice_custom_is_omitted(self):
+        """AC-2 / D10: ``custom``-typed choice names a tool the hop degraded."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "custom", "name": "x"})
+        )
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "file_search",
+            "web_search_preview",
+            "computer",
+            "computer_use_preview",
+            "computer_use",
+            "web_search_preview_2025_03_11",
+            "image_generation",
+            "code_interpreter",
+            "programmatic_tool_calling",
+            "apply_patch",
+            "shell",
+        ],
+        ids=[
+            "file_search",
+            "web_search_preview",
+            "computer",
+            "computer_use_preview",
+            "computer_use",
+            "web_search_preview_2025_03_11",
+            "image_generation",
+            "code_interpreter",
+            "programmatic_tool_calling",
+            "apply_patch",
+            "shell",
+        ],
+    )
+    def test_tool_choice_hosted_is_omitted(self, kind):
+        """AC-2: hosted built-in choices have no CC form and nothing downstream can run them (D5 / D10)."""
+        result = self.t.translate_request(self._req(tool_choice={"type": kind}))
+        assert "tool_choice" not in result
+
+    def test_tool_choice_mcp_is_omitted(self):
+        """AC-2: an MCP choice names a server tool the bridge does not proxy (D5 / D10)."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "mcp", "server_label": "srv", "name": "tool"})
+        )
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [7, 7.0, [], True],
+        ids=["int", "float", "list", "bool"],
+    )
+    def test_tool_choice_malformed_is_omitted(self, malformed):
+        """AC-2: a non-string non-dict shape has no CC home and is omitted (D5)."""
+        result = self.t.translate_request(self._req(tool_choice=malformed))
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        ("mode", "cc"),
+        [("auto", "auto"), ("required", "required"), ("none", "none")],
+        ids=["auto", "required", "defensive-none"],
+    )
+    def test_allowed_tools_carries_mode_only(self, mode, cc):
+        """AC-3: only the mode has a canonical home; the tools list is dropped."""
+        result = self.t.translate_request(
+            self._req(
+                tool_choice={
+                    "type": "allowed_tools",
+                    "mode": mode,
+                    "tools": [{"type": "function", "name": "get_weather"}],
+                }
+            )
+        )
+        assert result["tool_choice"] == cc
+
+    @pytest.mark.parametrize(
+        "bad_mode",
+        ["bogus", None, 7],
+        ids=["unknown-string", "null", "int"],
+    )
+    def test_allowed_tools_unknown_mode_is_omitted(self, bad_mode):
+        """AC-3 / D5: a non-published or non-string mode inside ``allowed_tools`` has no canonical home."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "allowed_tools", "mode": bad_mode})
+        )
+        assert "tool_choice" not in result
+
+    def test_parallel_tool_calls_false_is_carried(self):
+        """AC-4: explicit non-default ``false`` is forwarded (R2)."""
+        result = self.t.translate_request(self._req(parallel_tool_calls=False))
+        assert result["parallel_tool_calls"] is False
+
+    def test_parallel_tool_calls_true_is_omitted(self):
+        """AC-5: explicit ``true`` matches the documented default on both wires (D2)."""
+        result = self.t.translate_request(self._req(parallel_tool_calls=True))
+        assert "parallel_tool_calls" not in result
+
+    def test_parallel_tool_calls_absent_is_omitted(self):
+        """AC-5: no instruction means no entry (R9)."""
+        assert "parallel_tool_calls" not in self.t.translate_request(self._req())
+
+    @pytest.mark.parametrize(
+        "value",
+        ["false", 0, None, []],
+        ids=["string", "zero", "null", "empty-list"],
+    )
+    def test_parallel_tool_calls_non_bool_is_omitted(self, value):
+        """AC-5b: a non-bool value would create an unclaimed residual delta (D5)."""
+        result = self.t.translate_request(self._req(parallel_tool_calls=value))
+        assert "parallel_tool_calls" not in result
+
+    def test_no_tool_choice_invents_none(self):
+        """R9: no inbound ``tool_choice`` and no inbound ``parallel_tool_calls`` -> no entries."""
+        result = self.t.translate_request(self._req())
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    def test_forced_call_to_custom_tool_is_omitted_beside_a_function(self):
+        """AC-12a / D10: a function-typed choice naming a custom-declared tool is omitted.
+
+        The declared function tool keeps the CC list non-empty, so the D9 gate
+        passes and this test is decided by the D10 named-tool lookup -- which
+        must walk the inbound list, the only place the degraded entry still
+        lives (the hop has filtered it out of the CC list).
+        """
+        req = self._req(
+            tools=[
+                {"type": "function", "name": "get_weather", "parameters": {}},
+                {"type": "custom", "name": "review", "format": {"type": "text"}},
+            ],
+            tool_choice={"type": "function", "name": "review"},
+        )
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_forced_call_to_hosted_tool_is_omitted_beside_a_function(self):
+        """AC-12a / D10: the hosted twin -- choice naming a hosted entry beside a function tool."""
+        req = self._req(
+            tools=[
+                {"type": "function", "name": "get_weather", "parameters": {}},
+                {"type": "web_search_preview", "name": "search"},
+            ],
+            tool_choice={"type": "function", "name": "search"},
+        )
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_forced_call_to_undeclared_tool_is_carried(self):
+        """AC-12b / D8: a choice naming no declared tool is the agent's mistake -- the provider's error names it."""
+        result = self.t.translate_request(
+            self._req(tool_choice={"type": "function", "name": "not_declared"})
+        )
+        assert result["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "not_declared"},
+        }
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"type": "function"},
+            {"type": "function", "name": 7},
+        ],
+        ids=["function-no-name", "function-non-string-name"],
+    )
+    def test_tool_choice_function_malformed_is_omitted(self, bad):
+        """AC-2 / D5: a function-typed choice without a string name has no CC home."""
+        result = self.t.translate_request(self._req(tool_choice=bad))
+        assert "tool_choice" not in result
+
+    @pytest.mark.parametrize(
+        "tools_value",
+        [None, []],
+        ids=["absent", "empty-list"],
+    )
+    def test_tool_choice_without_tools_is_omitted(self, tools_value):
+        """AC-11 / D9: choice over no tools (key absent or empty list) is legal Responses and a 400 on CC."""
+        req = self._req(tool_choice="required")
+        if tools_value is None:
+            del req["tools"]
+        else:
+            req["tools"] = tools_value
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_hosted_tools_only_omits_tool_choice(self):
+        """AC-11 / D9: an inbound list of only hosted tools -> CC list empty -> choice omitted (gate on CC list)."""
+        req = self._req(
+            tools=[{"type": "web_search_preview", "name": "search"}],
+            tool_choice="required",
+        )
+        result = self.t.translate_request(req)
+        assert "tool_choice" not in result
+
+    def test_parallel_tool_calls_carries_without_tools(self):
+        """AC-4 / D9 boundary: the knob is a standalone field and is not gated by D9.
+
+        ``tool_choice`` nests no parallel knob on this wire (unlike Anthropic's
+        ``disable_parallel_tool_use``), so an inbound ``false`` reaches the CC
+        body even when no tools are present -- R2's mapping is unconditional.
+        """
+        req = self._req(parallel_tool_calls=False)
+        del req["tools"]
+        result = self.t.translate_request(req)
+        assert result["parallel_tool_calls"] is False
+        assert "tool_choice" not in result
+
+    def test_full_composition_carries_all_three(self):
+        """AC-14: tools + tool_choice + parallel_tool_calls reach the CC body together."""
+        result = self.t.translate_request(
+            self._req(
+                tool_choice={"type": "function", "name": "get_weather"},
+                parallel_tool_calls=False,
+            )
+        )
+        assert [t["function"]["name"] for t in result["tools"]] == ["get_weather"]
+        assert result["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+        assert result["parallel_tool_calls"] is False

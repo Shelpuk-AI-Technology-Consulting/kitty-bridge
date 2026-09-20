@@ -36,10 +36,16 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    """Write text content atomically using a temp file + rename."""
+    """Write text content atomically using a temp file + rename.
+
+    ``newline=""`` disables CPython's ``\\n`` -> ``os.linesep`` translation;
+    without it, on Windows a ``\\n`` in ``content`` becomes ``\\r\\n`` on
+    disk and breaks the byte-identity contract that ``kitty cleanup``'s
+    restore relies on.
+    """
     tmp_fd, tmp_path_str = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         os.replace(tmp_path_str, path)
     except Exception:
@@ -81,12 +87,18 @@ def load_settings_backup(backup_path: Path | None = None) -> str | None:
 
     Returns:
         The backed-up settings content, or ``None`` when no backup exists.
+
+    Notes:
+        ``newline=""`` disables universal newlines (``\\r\\n`` -> ``\\n`` on
+        every platform); ``save_settings_backup`` round-trips the user's
+        bytes verbatim only if the reader does too.
     """
     if backup_path is None:
         backup_path = _DEFAULT_BACKUP_PATH
     if not backup_path.exists():
         return None
-    return backup_path.read_text(encoding="utf-8")
+    with backup_path.open("r", encoding="utf-8", newline="") as f:
+        return f.read()
 
 
 def delete_settings_backup(backup_path: Path | None = None) -> None:
@@ -213,6 +225,7 @@ _SETTINGS_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "ENABLE_CLAUDEAI_MCP_SERVERS",
 )
 
 _DEFAULT_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -282,6 +295,7 @@ class ClaudeAdapter(LauncherAdapter):
             "ANTHROPIC_DEFAULT_OPUS_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": profile.model,
+            "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         }
         if context_tokens is not None and context_tokens > 0:
             env_overrides["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context_tokens)

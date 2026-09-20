@@ -1,0 +1,45 @@
+{
+  "id": "m6_recovery_oversized_paired_streaming",
+  "description": "Streaming twin of m6_recovery_oversized_paired: a well-paired conversation whose post-pre-flight serialized size exceeds the 600,000-char oversized gate, issued with stream: true so the bridge's streaming Messages path engages. Exercises the KBR-256 compact-and-retry-same-backend recovery on the pre-byte 413 path.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic, not captured: an oversized well-paired streaming conversation does not occur in a real Claude Code session on demand (Claude Code ships stream: true, but the conversation shape that exceeds the 600,000-char gate only fires under test-side bodies; the same T-C4 rationale as the non-streaming twin applies). The size is constructed from the non-streaming twin's body with a single field flip — the deterministic filler and the well-paired shape carry over. The mandatory human-review step is replaced by code-review of the builder (scripts/build_corpus_m6_streaming.py), the scrubber's full-byte scan in CI, and a bounded head/tail human read of the committed .body file, per TEST_SUITE.md section 7.1.1.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "http",
+  "host": "127.0.0.1",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "Host",
+      "127.0.0.1"
+    ],
+    [
+      "Accept",
+      "text/event-stream"
+    ],
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "X-Api-Key",
+      "<redacted:credential_header>"
+    ],
+    [
+      "anthropic-version",
+      "2023-06-01"
+    ],
+    [
+      "anthropic-beta",
+      "claude-code-20250219"
+    ]
+  ],
+  "body_file": "m6_recovery_oversized_paired_streaming.body",
+  "body_sha256": "4a018ebb1cccb4a7fdfe13a6f39582b48f204c85eb58b68a17ed5f088d953531",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": []
+}

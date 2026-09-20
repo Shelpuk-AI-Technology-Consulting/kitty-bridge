@@ -95,15 +95,60 @@ _SHAPES: tuple[tuple[str, str], ...] = (
         c.part_path(2, 0, "cache_control"),
     ),
     (c.tool_path(c.WILDCARD, "cache_control"), c.tool_path("Bash", "cache_control")),
+    # KBR-195 — M18's anchor (functionCall id synth on the Gemini route).
+    (c.part_path(c.WILDCARD, c.WILDCARD, "id"), c.part_path(2, 0, "id")),
+    # KBR-195 — M19's anchor (functionResponse tool_use_id synth).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "tool_use_id"),
+        c.part_path(2, 0, "tool_use_id"),
+    ),
+    # KBR-195 — M21's anchor (Gemini NON_BLOCKING calling toggle on a tool decl).
+    (c.tool_path(c.WILDCARD, "behavior"), c.tool_path("get_weather", "behavior")),
+    # KBR-195 — M22's anchor (Gemini thoughtSignature on a functionCall).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "signature"),
+        c.part_path(2, 0, "signature"),
+    ),
+    # KBR-195 — M23's anchor (Gemini functionResponse scheduling).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "scheduling"),
+        c.part_path(2, 0, "scheduling"),
+    ),
+    # KBR-195 — M24's anchor (Gemini part videoMetadata).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "video_metadata"),
+        c.part_path(2, 0, "video_metadata"),
+    ),
+    # KBR-195 — M25's anchor (Gemini image displayName).
+    (
+        c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),
+        c.part_path(2, 0, "display_name"),
+    ),
 )
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 52 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 73 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """16 bridge-level rows less the withdrawn M13, plus 36 provider-level."""
-        assert len(r.REGISTER) == 52
+        """25 bridge-level rows less the withdrawn M13, plus 48 provider-level.
+
+        The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
+        KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
+        (KBR-44). The +5 over the pre-KBR-258 count is P26..P30, the five
+        Chat Completions cache-breakpoint drops the Anthropic adapter family
+        performs on the translated route. The +7 over the pre-KBR-184 count is
+        KBR-184: M26 (G31 metadata drop on the Anthropic family), P24 (G26
+        CC-origin twin of P23), P31/P32 (G32 ollama + bedrock route drops),
+        P33 (G33 Bedrock auto-toolChoice rewrite), P34 (G34 Anthropic
+        parallel-false omission), P35 (G35 omitted legal tool_choice). The +4
+        over the pre-KBR-137 count is P36/P37/P38/P42, the OpenCode Go
+        Responses-route mutations (whole-body translate, eight CC-only drops,
+        the max_tokens rename, the reasoning injection). All literals are the
+        no-reflow damage test — a future change that drops a row or adds one
+        without updating the guard fails loudly.
+        """
+        assert len(r.REGISTER) == 77
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -436,11 +481,14 @@ class TestThePathsEachRowTouches:
         Pinned so that widening the escape is a deliberate edit here, not a
         quiet way to make a hard row go away.  M15 (KBR-144) is the seventh: the
         two spellings of a Responses ``input`` are one request, so the rewrite is
-        invisible to a wire-independent projection for P16's reason.
+        invisible to a wire-independent projection for P16's reason.  P36
+        (KBR-137) is the eighth: OpenAI Responses is a fifth wire format M2
+        does not name, and the per-message / envelope-unwrap renames inside it
+        have no path vocabulary, for the same reason P11/P12 have none.
         """
         escaped = {row.id for row in r.REGISTER if not row.is_projectable}
 
-        assert escaped == {"M2", "M9", "M15", "P1", "P11", "P12", "P16"}
+        assert escaped == {"M2", "M9", "M15", "P1", "P11", "P12", "P16", "P36"}
 
     def test_m15_still_binds_the_reader_its_escape_depends_on(self) -> None:
         """M15's escape is only sound while T-A3 reads both spellings alike.
@@ -514,3 +562,147 @@ class TestTheModuleStandsAlone:
         ]
 
         assert [line for line in innocent if _KITTY_IMPORT.search(line)] == []
+
+
+class TestTheTriggerArrangingBy:
+    """KBR-186 — every non-ALWAYS trigger declares how it is arranged.
+
+    The classification table is the spec.  Moving any trigger to the wrong kind
+    fails exactly the test that pins that trigger (``F1``); the falsification
+    cases below are the design's adversarial twins for plan §1.4.
+    """
+
+    def test_arranging_by_is_a_four_value_enum(self) -> None:
+        """The four kinds the ticket names — no fifth, no fourth.
+
+        ``ALWAYS`` is the absence of a condition (per the register docstring) and
+        does not carry an ``arranged_by``; the four real kinds are what the
+        enum enumerates.
+        """
+        assert {member.name for member in r.ArrangingBy} == {
+            "REQUEST",
+            "ROUTE",
+            "RESPONSE",
+            "PROFILE",
+        }
+
+    def test_always_does_not_carry_an_arranging_by(self) -> None:
+        """``ALWAYS`` is "the absence of a condition, not a condition".
+
+        Attaching an ``arranged_by`` to it would classify something the register
+        says is un-classifiable, and the derived ``NOT_CORPUS_DECIDABLE`` rule
+        (REQUEST is the only corpus-decidable kind) would have to special-case
+        it again.  Both halves of that are the drift this ticket exists to kill.
+        """
+        assert "arranged_by" not in vars(r.Trigger.ALWAYS)
+
+    def test_every_non_always_trigger_has_an_arranging_by(self) -> None:
+        """The positive control on the schema.
+
+        A trigger without ``arranged_by`` would not be picked up by the
+        derivation, and the corpus loader would silently treat it as
+        corpus-decidable — the under-claiming hazard §3.3.1a calls unrecoverable.
+        """
+        for trigger in r.Trigger:
+            if trigger is r.Trigger.ALWAYS:
+                continue
+            assert hasattr(trigger, "arranged_by"), f"{trigger.name} has no arranged_by"
+            assert trigger.arranged_by in set(r.ArrangingBy), (
+                f"{trigger.name}.arranged_by is {trigger.arranged_by!r}"
+            )
+
+    def test_classification_matches_the_specified_table(self) -> None:
+        """F1 — the full (trigger → arranged_by) table, per the ticket.
+
+        Any member moved to the wrong kind fails this test by name.  The table
+        is the spec; the test is the guard.
+        """
+        expected: dict[r.Trigger, r.ArrangingBy] = {
+            r.Trigger.PROFILE_SETS_MODEL: r.ArrangingBy.PROFILE,
+            r.Trigger.NON_NATIVE_UPSTREAM_WIRE: r.ArrangingBy.ROUTE,
+            r.Trigger.TOOL_RESULT_OVER_LIMIT: r.ArrangingBy.REQUEST,
+            r.Trigger.COMPACTION_RAN_WITH_OVERSIZED_TOOL_RESULT: r.ArrangingBy.PROFILE,
+            r.Trigger.OVER_COMPACTION_BUDGET: r.ArrangingBy.PROFILE,
+            r.Trigger.UPSTREAM_REJECTED_OVERSIZED_ON_BALANCING: r.ArrangingBy.RESPONSE,
+            r.Trigger.ORPHAN_TOOL_RESULT: r.ArrangingBy.REQUEST,
+            r.Trigger.THINKING_ROUNDTRIP_REJECTED: r.ArrangingBy.RESPONSE,
+            r.Trigger.NATIVE_TOOL_USE_FORMAT_ERROR: r.ArrangingBy.RESPONSE,
+            r.Trigger.GEMINI_PROTOCOL: r.ArrangingBy.ROUTE,
+            r.Trigger.GEMINI_NON_STREAMING: r.ArrangingBy.REQUEST,
+            r.Trigger.GEMINI_INBOUND_ID_ABSENT: r.ArrangingBy.REQUEST,
+            r.Trigger.UPSTREAM_EMPTY_RESPONSE: r.ArrangingBy.RESPONSE,
+            r.Trigger.ZAI_THINKING_ENABLED: r.ArrangingBy.REQUEST,
+            r.Trigger.ZAI_THINKING_DISABLED: r.ArrangingBy.REQUEST,
+            r.Trigger.REASONING_EFFORT_PRESENT: r.ArrangingBy.REQUEST,
+            r.Trigger.MAX_TOKENS_ABSENT: r.ArrangingBy.REQUEST,
+            r.Trigger.MULTIPLE_SYSTEM_BLOCKS: r.ArrangingBy.REQUEST,
+            r.Trigger.ANTHROPIC_THINKING_ENABLED: r.ArrangingBy.REQUEST,
+            r.Trigger.ADAPTIVE_THINKING_KEYS_PRESENT: r.ArrangingBy.REQUEST,
+            r.Trigger.ASSISTANT_TURN_LACKS_THINKING_BLOCK: r.ArrangingBy.REQUEST,
+            r.Trigger.NON_STREAMING_MAX_TOKENS_OVER_4096: r.ArrangingBy.REQUEST,
+            r.Trigger.THINKING_SIGNALLED_OR_INFERRED: r.ArrangingBy.REQUEST,
+            r.Trigger.OUTPUT_CONFIG_PRESENT: r.ArrangingBy.REQUEST,
+            r.Trigger.CC_ORIGIN_PATH: r.ArrangingBy.ROUTE,
+            r.Trigger.RESPONSES_ORIGIN_PATH: r.ArrangingBy.REQUEST,
+            r.Trigger.ALLOWLISTED_FIELD_IS_FALSY: r.ArrangingBy.REQUEST,
+            r.Trigger.NON_ENTRA_CREDENTIAL: r.ArrangingBy.PROFILE,
+            r.Trigger.CHATGPT_ACCOUNT_ID_PRESENT: r.ArrangingBy.PROFILE,
+            r.Trigger.THINKING_SIGNATURE_REJECTED: r.ArrangingBy.RESPONSE,
+            r.Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE: r.ArrangingBy.REQUEST,
+            r.Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED: r.ArrangingBy.REQUEST,
+            r.Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED: r.ArrangingBy.REQUEST,
+        }
+
+        assert set(expected) == set(r.Trigger) - {r.Trigger.ALWAYS}, (
+            "the classification table and the vocabulary drifted — either a "
+            "trigger was added without a row in expected or vice versa"
+        )
+
+        for trigger, want in expected.items():
+            assert trigger.arranged_by is want, (
+                f"{trigger.name} is classified as {trigger.arranged_by.name!r}; "
+                f"the spec says {want.name!r}"
+            )
+
+    def test_cc_origin_path_docstring_states_route_through_cc_to_responses(self) -> None:
+        """F4 — the docstring on ``CC_ORIGIN_PATH`` settles the KBR-178 ambiguity.
+
+        KBR-178 made the ambiguity observable for the first time by carrying
+        ``stop`` from the Messages ingress into the CC body.  The docstring must
+        state reading (2) explicitly so an oracle run that meets the trigger on
+        a Messages-origin entry does not report a false I1 breach.
+        """
+        doc = r.Trigger.CC_ORIGIN_PATH.__doc__ or ""
+        assert "_cc_to_responses" in doc, (
+            "the docstring must name the dispatch site, not the inbound wire"
+        )
+        # 'regardless of' or 'any non-Responses origin' — both forms name reading (2).
+        assert ("regardless of" in doc.lower()) or ("non-responses origin" in doc.lower()), (
+            "the docstring must explicitly state reading (2): the body reaching "
+            "_cc_to_responses regardless of inbound wire"
+        )
+
+    def test_cc_origin_path_is_route_responses_origin_path_is_request(self) -> None:
+        """The asymmetry, recorded as a test.
+
+        The two triggers look like a symmetric pair — they share an adapter and
+        the dispatch is the same single bit (``_original_body``).  The
+        classification is asymmetric because the ticket says CC_ORIGIN_PATH is
+        ROUTE (the provider decides) and RESPONSES_ORIGIN_PATH is REQUEST (the
+        inbound wire is Responses).  A future reader who notices the symmetry
+        must not silently unify them.
+        """
+        assert r.Trigger.CC_ORIGIN_PATH.arranged_by is r.ArrangingBy.ROUTE
+        assert r.Trigger.RESPONSES_ORIGIN_PATH.arranged_by is r.ArrangingBy.REQUEST
+
+    def test_responses_origin_path_docstring_names_inbound_wire(self) -> None:
+        """The mirror-image half of F4 — the genuine inbound-wire trigger.
+
+        Unlike ``CC_ORIGIN_PATH``, this trigger is decided by the body the
+        inbound wire carries (Responses-shaped), not by the adapter's dispatch.
+        A docstring that names the inbound wire makes the asymmetry explicit.
+        """
+        doc = r.Trigger.RESPONSES_ORIGIN_PATH.__doc__ or ""
+        assert "responses" in doc.lower(), (
+            "the docstring must name the inbound wire shape that decides the trigger"
+        )

@@ -27,15 +27,25 @@ reviewer can tell an addressed finding from an ignored one. It is fenced as
 untrusted input: an attempt to instruct the reviewer through a comment is itself
 reported as a critical finding.
 
+The span opens with a `# Snapshot` header — the instant the fetch began, and a
+count of contributions per kind. That instant is a strict lower bound on what
+this review can have seen; anything posted at or after it is unknown, including
+replies written while the review runs. The reviewer's notes claim absence only
+as of the snapshot, citing its timestamp; the prompt names this rule so a
+reviewer that says "nothing stands" without qualifying the boundary has
+ignored it.
+
 ⚠️ **The reviewer's specification is `README.md` plus `.system_design/`.**
-`.gitignore` excludes `/.requirements/` and `/CLAUDE.md`, so neither exists in a
-CI checkout and the reviewer must not be pointed at them. `/.system_design/` was
-un-ignored when the design documents were first committed, and the selector
-already matched those paths, so a change under them is reviewed with rules
-loaded. The traceability target is therefore the README (the user-facing
-interface contract), the design documents (the internal one), and the pull
-request description — and `REVIEW_GUIDE.md` says exactly that rather than
-pointing at a document that is not there.
+`.gitignore` excludes `/.requirements/`, so it does not exist in a CI
+checkout and the reviewer must not be pointed at it. `CLAUDE.md` left
+`.gitignore` with KBR-286 and is now tracked, but it carries agent workflow
+instructions, not reviewer specifications. `/.system_design/` was un-ignored
+when the design documents were first committed, and the selector already
+matched those paths, so a change under them is reviewed with rules loaded.
+The traceability target is therefore the README (the user-facing interface
+contract), the design documents (the internal one), and the pull request
+description — and `REVIEW_GUIDE.md` says exactly that rather than pointing
+at a document that is not there.
 
 ---
 
@@ -209,7 +219,7 @@ step 2 above.
 ## Changing the review system
 
 `.github/workflows/ci.yml` runs `tests/test_review_scripts.py` on every pull
-request — 717 tests over the selector, the classifier, the notices, the redactor,
+request — 738 tests over the selector, the classifier, the notices, the redactor,
 the schema and the workflow's own wiring, plus the workflow parser, the
 runner-ceiling table and the `ci-required` aggregation. Run them locally the same
 way:

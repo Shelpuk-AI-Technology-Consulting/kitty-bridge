@@ -91,7 +91,7 @@ def main() -> None:
 
     # Resolve provider and key from profile
     from kitty.credentials.file_backend import FileBackend
-    from kitty.credentials.store import CredentialStore
+    from kitty.credentials.store import CredentialError, CredentialStore
     from kitty.profiles.schema import BalancingProfile
     from kitty.profiles.store import ProfileStore
     from kitty.providers.registry import get_provider
@@ -139,7 +139,13 @@ def main() -> None:
         members = resolver.resolve_balancing(backend.name)
         backends = []
         for mp in members:
-            key = cred_store.get(mp.auth_ref)
+            # KBR-87: a corrupt stored value reports cleanly and exits, where
+            # today's missing-key path does.
+            try:
+                key = cred_store.get(mp.auth_ref)
+            except CredentialError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
             if not key:
                 print(f"No API key for profile {mp.name!r}", file=sys.stderr)
                 sys.exit(1)
@@ -171,7 +177,13 @@ def main() -> None:
         )
     else:
         profile = backend
-        resolved_key = cred_store.get(profile.auth_ref)
+        # KBR-87: a corrupt stored value reports cleanly and exits, where
+        # today's missing-key path does.
+        try:
+            resolved_key = cred_store.get(profile.auth_ref)
+        except CredentialError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         if not resolved_key:
             print(f"No API key for profile {profile.name!r}", file=sys.stderr)
             sys.exit(1)

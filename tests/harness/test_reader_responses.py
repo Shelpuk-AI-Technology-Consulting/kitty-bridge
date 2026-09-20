@@ -166,6 +166,72 @@ class TestEnvelope:
         assert "reasoning" not in projected.envelope.extra
 
 
+class TestParallelToolCalls:
+    """KBR-273 — the §3.3.1b non-default rule at the Responses address.
+
+    The CC reader (T-A2) settled the four-way conditional; this reader is the
+    second to *read* the address directly, and the tests mirror
+    :class:`test_reader_chat_completions.TestEnvelope.test_parallel_tool_calls_*`
+    one for one — the readers' agreement claim is only as good as its test.
+    """
+
+    def test_parallel_tool_calls_true_is_not_written_to_extra(self) -> None:
+        """AC-1 — §3.3.1b: the entry is written only on a **non-default** wire value.
+
+        The Responses default is ``true`` (parallel calls allowed), the same
+        default the CC wire carries. A body carrying ``parallel_tool_calls:
+        true`` writes nothing to ``extra[parallel_tool_calls]`` — the absence
+        is the canonical form, and an absent entry and an explicit default are
+        one request on both wires. The key is consumed for totality so a body
+        that explicitly sent ``true`` is accounted for, not silently dropped.
+        """
+        projected = project({"input": "hi", "parallel_tool_calls": True})
+
+        assert c.PARALLEL_TOOL_CALLS_KEY not in projected.envelope.extra
+        assert "parallel_tool_calls" in projected.consumed
+
+    def test_parallel_tool_calls_false_lands_at_the_canonical_address(self) -> None:
+        """AC-2 — the non-default delta the oracle names.
+
+        ``False`` is the only value Responses carries that does not match the
+        documented default, so it is the only one the reader writes onto
+        ``extra[parallel_tool_calls]``. Routes through
+        :data:`~harness.contract.PARALLEL_TOOL_CALLS_KEY` rather than the wire
+        key, so the two spellings cannot drift if either ever changes (the
+        same posture the CC reader takes at lines 602–605).
+        """
+        projected = project({"input": "hi", "parallel_tool_calls": False})
+
+        assert projected.envelope.extra[c.PARALLEL_TOOL_CALLS_KEY] is False
+
+    def test_parallel_tool_calls_null_is_treated_as_absent(self) -> None:
+        """AC-3 — ``null`` follows the ``cache_control`` precedent.
+
+        The wire key carries no instruction, and the bridge does not invent
+        one. The key is consumed for totality so a body that explicitly sent
+        ``null`` is accounted for, not silently dropped.
+        """
+        projected = project({"input": "hi", "parallel_tool_calls": None})
+
+        assert c.PARALLEL_TOOL_CALLS_KEY not in projected.envelope.extra
+        assert "parallel_tool_calls" in projected.consumed
+
+    def test_a_wrongly_typed_parallel_tool_calls_residualises(self) -> None:
+        """AC-4 — §7.4.1's wrongly-typed-leaf rule at the canonical address.
+
+        The fallback residualises at the bare wire name (not under the
+        contract key) so the cross-reader comparison sees the same answer
+        either side. ``verify_total`` fails closed on the residual.
+        """
+        body = {"input": "hi", "parallel_tool_calls": "yes"}
+        projected = r.ResponsesProjection().read_request(captured(body))
+
+        assert c.PARALLEL_TOOL_CALLS_KEY not in projected.envelope.extra
+        assert projected.residual == {"parallel_tool_calls": "yes"}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+
 class TestToolChoiceNormalisation:
     """All nine published `ToolChoiceParam` forms, onto the canonical vocabulary.
 
@@ -518,7 +584,10 @@ class TestContentParts:
             }
         )
 
-        assert projected.conversation.turns[0].parts == (c.Opaque("document"),)
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "document"
+        assert part.digest == c.opaque_digest({"type": "input_file", "file_id": "file-123"})
 
     def test_a_data_url_image_is_digested(self) -> None:
         """`image_digest` is pinned so six readers agree on one image.
@@ -587,22 +656,22 @@ class TestContentParts:
 
         Another reader decoding the same bytes would produce a digest, and the
         two projections would then differ on an unchanged image — a permanent
-        unclaimed delta that no register row could ever explain.
+        unclaimed delta that no register row could ever explain. The part is
+        also never dropped: §7.4 rule 7 — no branch returns *no part*, or
+        every later part's index shifts (KBR-251).
         """
+        url = "data:image/png,abc"
         projected = r.ResponsesProjection().read_request(
-            captured(
-                {
-                    "input": [
-                        {
-                            "role": "user",
-                            "content": [{"type": "input_image", "image_url": "data:image/png,abc"}],
-                        }
-                    ]
-                }
-            )
+            captured({"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]})
         )
 
-        assert set(projected.residual) == {"input[0].content[0]"}
+        # The digest sees the payload bytes only; the media segment parses out
+        # of the prefix and is carried separately, consistent with
+        # `image_digest`'s "media type excluded" rule.
+        assert projected.conversation.turns[0].parts == (
+            c.Image(digest=c.image_digest(b"abc"), media_type="image/png"),
+        )
+        assert projected.residual == {"input[0].content[0].image_url": url}
 
     def test_an_image_given_only_by_file_id_carries_the_id_as_its_reference(self) -> None:
         """`InputImageContent` permits `file_id` instead of `image_url`."""
@@ -611,13 +680,398 @@ class TestContentParts:
                 "input": [
                     {
                         "role": "user",
-                        "content": [{"type": "input_image", "file_id": "file-9", "detail": "auto"}],
+                        "content": [{"type": "input_image", "file_id": "file-9"}],
                     }
                 ]
             }
         )
 
         assert projected.conversation.turns[0].parts == (c.Image(ref="file-9"),)
+
+
+class TestUndecodableImagePayloads:
+    """An image the reader cannot digest keeps its place; the leaf residualises.
+
+    §7.4 rule 7 row 3 (KBR-251). The reader used to drop the part here
+    (``return None``), which shifts every later part's index and invents a
+    delta on content nobody touched — §7.4: "no branch ever returns *no
+    part*". Three input shapes the previous code conflated, each pinned
+    separately:
+
+    * an undecodable base64 data URL — digest the wire's payload string;
+    * a non-base64 ``^data:`` URL — digest the payload after the first comma,
+      with the media segment parsed out of the prefix and carried separately,
+      consistent with ``image_digest``'s "media type excluded" rule;
+    * no ``image_url`` and no usable ``file_id`` — ``opaque_digest(part)``
+      identity, mirroring Gemini's missing-``fileUri`` shape.
+    """
+
+    def test_a_undecodable_base64_data_url_residualises_the_leaf_and_keeps_the_part(self) -> None:
+        """The decode-fails branch carries the raw-bytes recipe."""
+        wrapped = base64.b64encode(b"hello world" * 8).decode("ascii")
+        wrapped = wrapped[:20] + "\n" + wrapped[20:]
+        url = f"data:image/png;base64,{wrapped}"
+
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_image", "image_url": url},
+                                {"type": "input_text", "text": "and"},
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        # The part keeps its place and the later part keeps its index; the
+        # digest is the raw wire bytes of the base64 payload.
+        assert projected.conversation.turns[0].parts == (
+            c.Image(digest=c.image_digest(wrapped.encode("utf-8")), media_type="image/png"),
+            c.Text("and"),
+        )
+        assert projected.residual == {"input[0].content[0].image_url": url}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_an_image_with_no_identity_field_keeps_its_place_under_the_opaque_digest(self) -> None:
+        """No `image_url` (absent or wrongly typed) and no usable `file_id` — the
+        ``opaque_digest`` recipe, mirroring Gemini's missing-``fileUri`` shape.
+        """
+        entry = {"type": "input_image"}
+        projected = r.ResponsesProjection().read_request(
+            captured({"input": [{"role": "user", "content": [entry, {"type": "input_text", "text": "last"}]}]})
+        )
+
+        assert projected.conversation.turns[0].parts == (
+            c.Image(digest=c.opaque_digest(entry)),
+            c.Text("last"),
+        )
+        assert projected.residual == {"input[0].content[0].image_url": None}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_wrongly_typed_image_url_residualises_the_value_and_keeps_the_part(self) -> None:
+        """A non-string `image_url` is a required-field-missing-or-wrong case (rule 7 row 2)."""
+        entry = {"type": "input_image", "image_url": 7}
+        projected = r.ResponsesProjection().read_request(captured({"input": [{"role": "user", "content": [entry]}]}))
+
+        assert projected.conversation.turns[0].parts == (c.Image(digest=c.opaque_digest(entry)),)
+        assert projected.residual == {"input[0].content[0].image_url": 7}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_wrongly_typed_image_url_residualises_even_when_file_id_carries_the_part(self) -> None:
+        """The mixed case: the malformed field must not hide inside a `ref`-only projection.
+
+        A usable `file_id` still carries the part's identity, but the
+        wrongly-typed `image_url` residualises at its own path — otherwise the
+        silent drop §7.4.1 names would live inside a projection that looks
+        clean.
+        """
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_image", "image_url": 7, "file_id": "f-1"}],
+                        }
+                    ]
+                }
+            )
+        )
+
+        assert projected.conversation.turns[0].parts == (c.Image(ref="f-1"),)
+        assert projected.residual == {"input[0].content[0].image_url": 7}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_an_unmapped_sibling_key_residualises_at_its_own_path(self) -> None:
+        """§3.3.1's "unknown fields fail closed", at depth — on every branch.
+
+        The whole-entry residuals the failure branches used to write captured
+        sibling keys as a side effect; the leaf-level residuals must not lose
+        that. A key the reader does not map (`detail`, future siblings) has to
+        land in the residual at its exact path or it vanishes silently.
+        """
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_image", "image_url": 7, "detail": "auto"}],
+                        }
+                    ]
+                }
+            )
+        )
+
+        assert projected.residual == {
+            "input[0].content[0].image_url": 7,
+            "input[0].content[0].detail": "auto",
+        }
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_unmapped_sibling_key_also_residualises_on_the_clean_success_path(self) -> None:
+        """The sweep runs before any branch — the sibling claim is branch-independent.
+
+        A successful remote-image projection with an unmapped sibling should
+        still surface the sibling at its exact path, not silently drop it.
+        """
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_image", "image_url": "https://example.test/cat.png", "detail": "auto"},
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        assert projected.conversation.turns[0].parts == (c.Image(ref="https://example.test/cat.png"),)
+        assert projected.residual == {"input[0].content[0].detail": "auto"}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_no_image_failure_branch_drops_a_part_and_shifts_the_later_indices(self) -> None:
+        """All three failure shapes above, in one body — the index claim as one fact."""
+        wrapped = base64.b64encode(b"hello" * 8).decode("ascii")
+        wrapped = wrapped[:4] + "\n" + wrapped[4:]
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_image", "image_url": f"data:image/png;base64,{wrapped}"},
+                                {"type": "input_text", "text": "last"},
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        parts = projected.conversation.turns[0].parts
+        assert len(parts) == 2
+        assert parts[1] == c.Text("last")
+
+    def test_the_non_base64_and_no_identity_branches_also_keep_the_later_index(self) -> None:
+        """The index claim is not specific to the decode-fails branch."""
+        projected = r.ResponsesProjection().read_request(
+            captured(
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_image", "image_url": "data:image/png,abc"},
+                                {"type": "input_image"},
+                                {"type": "input_text", "text": "last"},
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        parts = projected.conversation.turns[0].parts
+        assert len(parts) == 3
+        assert parts[2] == c.Text("last")
+
+
+class TestInputFileDigests:
+    """The sibling sweep the KBR-251 observations comment recorded.
+
+    The Responses reader's ``input_file`` branch used to build an ``Opaque``
+    with no digest and no sweep, so ``detail`` (carried by the File input
+    entry of :data:`_PUBLISHED_EXAMPLES`) and any future sibling vanished
+    silently. The fix mirrors ``reader_anthropic_messages._read_opaque``: the
+    digest rides on the part, and a no-op sweep runs before projection — both
+    readers spell "Opaque consumes its payload" the same way.
+    """
+
+    def test_an_input_file_carries_the_payload_digest(self) -> None:
+        """§7.4.1: the part is detectable, not just projected."""
+        entry = {"type": "input_file", "file_id": "file-123"}
+
+        projected = project({"input": [{"role": "user", "content": [entry]}]})
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "document"
+        assert part.digest == c.opaque_digest(entry)
+
+    def test_an_input_files_digest_changes_when_a_sibling_changes(self) -> None:
+        """The hole KBR-179 closes, on this content part too.
+
+        A bridge that mutated ``detail`` (or ``filename``, ``file_url``, anything
+        the grammar does not model) used to be invisible because the Opaque had
+        no digest. The digest rides on the part now, so the mutation changes
+        the digest and the oracle sees it.
+        """
+        original = {"type": "input_file", "file_id": "f-1", "detail": "auto"}
+        mutated = {"type": "input_file", "file_id": "f-1", "detail": "high"}
+
+        first = project({"input": [{"role": "user", "content": [original]}]}).conversation.turns[0].parts[0]
+        second = project({"input": [{"role": "user", "content": [mutated]}]}).conversation.turns[0].parts[0]
+
+        assert isinstance(first, c.Opaque) and isinstance(second, c.Opaque)
+        assert first.kind == second.kind == "document"
+        assert first.digest != second.digest
+
+    def test_a_payload_key_is_excluded_from_the_digest(self) -> None:
+        """The recipe excludes ``cache_control``; the Responses published
+        schemas do not place it on items or content parts, so this is a
+        recipe-contract test rather than a real-traffic visibility test. The
+        Anthropic cache field rides in the digest (not the residual, not the
+        part) by design — for Anthropic's reader the part carries it on the
+        slot, but the *Opaque* digest always strips it so two differently-
+        placed ``cache_control`` blocks digest identically.
+
+        What a Responses request would actually carry is
+        ``prompt_cache_breakpoint``, which the recipe does not strip — see
+        the next test for the real-traffic contract.
+        """
+        with_cc = {"type": "input_file", "file_id": "f-1", "cache_control": {"type": "ephemeral"}}
+        without_cc = {"type": "input_file", "file_id": "f-1"}
+
+        with_part = project({"input": [{"role": "user", "content": [with_cc]}]}).conversation.turns[0].parts[0]
+        without_part = project({"input": [{"role": "user", "content": [without_cc]}]}).conversation.turns[0].parts[0]
+
+        assert isinstance(with_part, c.Opaque) and isinstance(without_part, c.Opaque)
+        # `opaque_digest` strips `cache_control`; the two bodies digest
+        # identically even though one carries it.
+        assert with_part.digest == without_part.digest
+
+    def test_a_responses_cache_breakpoint_changes_the_digest(self) -> None:
+        """OpenAI's published equivalent of ``cache_control`` rides in the
+        digest because the recipe does not strip it (``prompt_cache_breakpoint``
+        is the OpenAI spelling, on the content part; ``cache_control`` is
+        Anthropic's). Until G37 lands a slot for it, a breakpoint mutation
+        shows as a part-level digest delta — visible, not silent.
+        """
+        without_bp = {"type": "input_file", "file_id": "f-1"}
+        with_bp = {
+            "type": "input_file",
+            "file_id": "f-1",
+            "prompt_cache_breakpoint": {"type": "ephemeral"},
+        }
+
+        without_part = project({"input": [{"role": "user", "content": [without_bp]}]}).conversation.turns[0].parts[0]
+        with_part = project({"input": [{"role": "user", "content": [with_bp]}]}).conversation.turns[0].parts[0]
+
+        assert isinstance(without_part, c.Opaque) and isinstance(with_part, c.Opaque)
+        assert with_part.digest != without_part.digest
+
+    def test_the_published_file_input_example_round_trips_with_an_empty_residual(self) -> None:
+        """The §7.4 acceptance criterion this fix must not break.
+
+        The eight ``x-oaiMeta`` request examples are the suite's oracle against
+        the published schema, parametrised in
+        :class:`TestPublishedExamples`. The File input example carries ``detail``
+        (a key the schema does list on ``InputFileContentParam``, but that no
+        Opaque slot covers) and ``file_url``; the reader consumes both into the
+        digest rather than residualising them, or this assertion fails on legal
+        traffic.
+        """
+        projected = project(_PUBLISHED_EXAMPLES["File input"])
+
+        assert projected.residual == {}
+        assert projected.envelope.model == "gpt-6-astra"
+        # The file is the only part in the user turn, and it is the document.
+        assert projected.conversation.turns, "every published example carries input"
+        part = projected.conversation.turns[0].parts[-1]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "document"
+        assert part.digest == c.opaque_digest(
+            {"type": "input_file", "file_url": "https://example.test/2024ltr.pdf", "detail": "auto"}
+        )
+
+
+class TestDataUrlRegexAcceptance:
+    """Two legal shapes the pre-KBR-179 regex routed to the non-base64 branch.
+
+    ``data:;base64,…`` (empty media segment — RFC 2397 permits a zero-length
+    media type) and a case-variant ``;BASE64,`` / ``;Base64,`` marker (the
+    grammar spells the marker literally ``;base64``, but real senders and
+    browsers treat the encoding token case-insensitively, consistent with
+    RFC 2045's Content-Transfer-Encoding) were both rejected by the case-
+    sensitive ``[^;,]+`` regex; the routing handled them gracefully, but the
+    regex was the defect.
+    """
+
+    def test_an_empty_media_segment_routes_through_the_base64_branch(self) -> None:
+        """``data:;base64,<payload>`` is a legal RFC 2397 form."""
+        raw = b"\x89PNG\r\n\x1a\nfake"
+        url = "data:;base64," + base64.b64encode(raw).decode("ascii")
+
+        projected = project(
+            {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]}
+        )
+
+        # Decodes cleanly, so it is the canonical Image shape — with no media
+        # type, mirroring the empty-media convention. `None` (not `""`) so it
+        # agrees with the non-base64 branch — both spell "absent" the same way.
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.digest == hashlib.sha256(raw).hexdigest()
+        assert part.media_type is None
+
+    def test_a_uppercase_base64_marker_routes_through_the_base64_branch(self) -> None:
+        """``;BASE64,`` and ``;Base64,`` are both legal per RFC 2045."""
+        raw = b"raw-bytes"
+        url = "data:image/png;BASE64," + base64.b64encode(raw).decode("ascii")
+
+        projected = project(
+            {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]}
+        )
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.digest == hashlib.sha256(raw).hexdigest()
+        assert part.media_type == "image/png"
+
+    def test_a_mixed_case_base64_marker_routes_through_the_base64_branch(self) -> None:
+        """``;Base64,`` (mixed case) — the third spelling a permissive reader must accept."""
+        raw = b"another-payload"
+        url = "data:image/jpeg;Base64," + base64.b64encode(raw).decode("ascii")
+
+        projected = project(
+            {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]}
+        )
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.digest == hashlib.sha256(raw).hexdigest()
+        assert part.media_type == "image/jpeg"
+
+    def test_the_canonical_base64_data_url_still_decodes(self) -> None:
+        """Regression net for the relaxation — the common case keeps working."""
+        raw = b"\x89PNG\r\n\x1a\nfake"
+        url = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+        projected = project(
+            {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": url}]}]}
+        )
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Image)
+        assert part.digest == hashlib.sha256(raw).hexdigest()
+        assert part.media_type == "image/png"
 
 
 class TestFunctionCall:
@@ -777,10 +1231,15 @@ class TestFunctionCallOutput:
 
         result = projected.conversation.turns[0].parts[0]
         assert isinstance(result, c.ToolResult)
-        assert result.content == (
+        file_part = result.content[-1]
+        assert isinstance(file_part, c.Opaque)
+        assert file_part.kind == "document"
+        assert file_part.digest == c.opaque_digest({"type": "input_file", "file_id": "file-1"})
+        # Compare the rest by content; the file part is asserted separately above
+        # because its digest is the very thing this change fixes.
+        assert result.content[:-1] == (
             c.Text("see attached"),
             c.Image(digest=hashlib.sha256(raw).hexdigest(), media_type="image/png"),
-            c.Opaque("document"),
         )
 
     def test_a_content_type_the_output_branch_does_not_publish_residualises(self) -> None:
@@ -937,25 +1396,44 @@ class TestOpaqueItems:
         """Because paths are index-based, one wrong role corrupts every later path."""
         projected = project({"input": [{"type": kind}]})
 
-        assert projected.conversation.turns == (c.Turn("user", [c.Opaque(kind)]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "user"
+        assert len(turn.parts) == 1
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
 
     @pytest.mark.parametrize("kind", sorted(r._OPAQUE_ASSISTANT_ITEMS))
     def test_a_model_produced_item_lands_in_an_assistant_turn(self, kind: str) -> None:
         """The other half of the role table, asserted per type rather than in prose."""
         projected = project({"input": [{"type": kind}]})
 
-        assert projected.conversation.turns == (c.Turn("assistant", [c.Opaque(kind)]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "assistant"
+        assert len(turn.parts) == 1
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
 
     def test_a_null_type_counts_as_absent_rather_than_as_an_unknown_type(self) -> None:
         """`ItemReferenceParam.type` is `anyOf[enum, null]`, so this is legal traffic.
 
         A reader dispatching on `"type" in item` rather than on the value being a
         string would residualise this and fail the run on a valid body. The
-        `type`-absent test cannot catch that regression; this one can.
+        `type`-absent test cannot catch that regression; this one can. KBR-179
+        extends this rule: ``None`` is *not* a present-but-wrongly-typed
+        ``type`` (that would raise) — it is the schema's own absent spelling.
         """
-        projected = project({"input": [{"id": "msg_1", "type": None}]})
+        item = {"id": "msg_1", "type": None}
+        projected = project({"input": [item]})
 
-        assert projected.conversation.turns == (c.Turn("user", [c.Opaque("item_reference")]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "user"
+        assert len(turn.parts) == 1
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "item_reference"
+        assert part.digest == c.opaque_digest(item)
 
     def test_additional_tools_lands_in_a_user_turn_despite_declaring_developer(self) -> None:
         """The named exception whose reasoning is hardest to guess from the rule.
@@ -971,16 +1449,28 @@ class TestOpaqueItems:
         future reader seeing `role: "developer"` would reasonably try to lift it
         and would then be changing turn indices for every later turn.
         """
-        projected = project({"input": [{"type": "additional_tools", "role": "developer"}]})
+        item = {"type": "additional_tools", "role": "developer"}
+        projected = project({"input": [item]})
 
         assert projected.conversation.system == ()
-        assert projected.conversation.turns == (c.Turn("user", [c.Opaque("additional_tools")]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "user"
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "additional_tools"
+        assert part.digest == c.opaque_digest(item)
 
     def test_an_item_reference_is_recognised_without_a_type(self) -> None:
         """`ItemReferenceParam.type` is nullable, so `{"id": ...}` alone is legal."""
-        projected = project({"input": [{"id": "msg_1"}]})
+        item = {"id": "msg_1"}
+        projected = project({"input": [item]})
 
-        assert projected.conversation.turns == (c.Turn("user", [c.Opaque("item_reference")]),)
+        turn = projected.conversation.turns[0]
+        assert turn.role == "user"
+        part = turn.parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == "item_reference"
+        assert part.digest == c.opaque_digest(item)
 
     def test_the_closed_sets_are_internally_consistent_and_sized_as_recorded(self) -> None:
         """A guard on the module's own tables — **not** on OpenAI's schema.
@@ -1028,6 +1518,106 @@ class TestOpaqueItems:
         by_rule = {k for k in r.PUBLISHED_ITEM_TYPES if k.endswith("_output")} | exceptions
 
         assert by_rule - r._MODELLED_ITEMS == r._OPAQUE_USER_ITEMS
+
+
+# --------------------------------------------------------------------------
+# KBR-179 — unmodelled input items carry their payload digest, so a swapped
+# item produces a delta the oracle can see (§7.4.1, R3 in this ticket).
+# --------------------------------------------------------------------------
+
+
+class TestOpaqueItemDigests:
+    """The payload digest makes a swapped unmodelled item visible.
+
+    §7.4.1 puts ``digest`` on :class:`contract.Opaque` precisely so two different
+    items of the same kind do not project identically — the silent hole the
+    Responses reader had on `main`. The recipe is pinned in
+    :func:`contract.opaque_digest`; these tests pin the *call sites* that put
+    it on the part.
+    """
+
+    @pytest.mark.parametrize("kind", sorted(r._OPAQUE_USER_ITEMS))
+    def test_a_user_side_opaque_item_carries_the_payload_digest(self, kind: str) -> None:
+        """§7.4.1: ``digest`` carries the body that ``kind`` does not.
+
+        A reader that built ``c.Opaque(kind)`` with no digest would project
+        every item of one type identically, so a mutated body would be invisible
+        — the hole KBR-179 closes.
+        """
+        item = {"type": kind, "id": "tag-1", "queries": ["alpha"]}
+
+        projected = project({"input": [item]})
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
+        assert part.digest == c.opaque_digest(item)
+
+    @pytest.mark.parametrize("kind", sorted(r._OPAQUE_ASSISTANT_ITEMS))
+    def test_an_assistant_side_opaque_item_carries_the_payload_digest(self, kind: str) -> None:
+        """The other half of the role table."""
+        item = {"type": kind, "id": "tag-1", "action": {"type": "search", "query": "kitten"}}
+
+        projected = project({"input": [item]})
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.kind == kind
+        assert part.digest == c.opaque_digest(item)
+
+    def test_two_differing_items_of_the_same_kind_project_unequally(self) -> None:
+        """The ticket's own failing case, inverted: a swap now produces a delta.
+
+        On `main` before the fix this projected two equal ``Opaque(kind=…)``
+        values for these two items, so a bridge that swapped ``alpha`` for
+        ``beta`` was invisible. After the fix the digests differ.
+        """
+        alpha = {"type": "additional_tools", "id": "a1", "queries": ["alpha"]}
+        beta = {"type": "additional_tools", "id": "b2", "queries": ["beta"]}
+
+        first = project({"input": [alpha]}).conversation.turns[0].parts[0]
+        second = project({"input": [beta]}).conversation.turns[0].parts[0]
+
+        assert isinstance(first, c.Opaque) and isinstance(second, c.Opaque)
+        assert first.digest != second.digest
+
+    def test_an_input_items_payload_is_excluded_from_its_kind_but_kept_in_the_digest(self) -> None:
+        """The recipe strips ``type``; here only the discriminator is in scope.
+
+        ``cache_control`` is Anthropic-specific and not published on Responses
+        items, so the only exclusion the recipe applies here is the discriminator
+        the Opaque already carries as :attr:`Opaque.kind` — a reader that fed the
+        discriminator back into the digest would double-count it.
+        """
+        item = {"type": "additional_tools", "id": "x", "queries": ["alpha"]}
+
+        projected = project({"input": [item]})
+
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        # The digest covers the payload without the discriminator — which is
+        # exactly what `opaque_digest` enforces; restating the expectation here
+        # pins the *call site*, not the recipe.
+        assert part.digest == c.opaque_digest({"id": "x", "queries": ["alpha"]})
+
+    def test_three_reader_layouts_for_the_same_item_kind_match(self) -> None:
+        """Symmetry with :func:`reader_anthropic_messages._read_opaque`.
+
+        The Anthropic reader runs ``_residualise(block, set(block), …)`` — a
+        no-op sweep that documents the design (Opaque consumes its payload).
+        The Responses reader adopts the same shape, so a maintainer seeing
+        either sweep reads the same story.
+        """
+        item = {"type": "web_search_call", "id": "ws_1", "action": {"type": "search"}}
+
+        projected = project({"input": [item]})
+
+        # Every key the wire sent is consumed — nothing residualises beneath
+        # the Opaque — and the digest carries the payload.
+        assert projected.residual == {}
+        part = projected.conversation.turns[0].parts[0]
+        assert isinstance(part, c.Opaque)
+        assert part.digest == c.opaque_digest(item)
 
 
 # --------------------------------------------------------------------------
@@ -1311,7 +1901,7 @@ _TOP_LEVEL_EXPECTATIONS: tuple[tuple[str, Any, str], ...] = (
     ("max_tool_calls", 4, "envelope.extra[max_tool_calls]"),
     ("metadata", {"k": "v"}, "envelope.extra[metadata]"),
     ("moderation", {}, "envelope.extra[moderation]"),
-    ("parallel_tool_calls", True, "envelope.extra[parallel_tool_calls]"),
+    ("parallel_tool_calls", False, "envelope.extra[parallel_tool_calls]"),
     ("previous_response_id", "resp_1", "envelope.extra[previous_response_id]"),
     ("prompt", {"id": "p_1"}, "envelope.extra[prompt]"),
     ("prompt_cache_key", "ck", "envelope.extra[prompt_cache_key]"),
@@ -1462,7 +2052,6 @@ class TestFailureShapes:
                 "input[0].content[0]",
                 id="content-type",
             ),
-            pytest.param({"input": [{"type": ["reasoning"]}]}, "input[0]", id="item-type"),
             pytest.param({"tools": [{"type": ["function"], "name": "f"}]}, "tools[0]", id="tool-type"),
         ],
     )
@@ -1486,6 +2075,44 @@ class TestFailureShapes:
         assert set(projected.residual) == {expected_key}
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
+
+    @pytest.mark.parametrize(
+        ("body", "expected_type_name"),
+        [
+            pytest.param({"input": [{"type": ["reasoning"]}]}, "list", id="item-type-list"),
+            pytest.param({"input": [{"type": {"kind": "reasoning"}}]}, "dict", id="item-type-object"),
+            pytest.param({"input": [{"type": 7, "queries": ["alpha"]}]}, "int", id="item-type-number"),
+        ],
+    )
+    def test_an_input_items_type_that_is_not_a_string_or_null_is_an_unreadable_body(
+        self, body: Any, expected_type_name: str
+    ) -> None:
+        """KBR-179's structural half: the discriminator *is* the value.
+
+        §7.4.1 scopes the wrongly-typed-leaf rule to leaves with an absent value
+        to fall back to. `Opaque.kind`, `Text.text` and `Thinking.text` have none
+        — they *are* their value — so those cases raise `UnreadableBodyError`,
+        and the Anthropic Messages reader has raised on the same shape since
+        T-A1. The Responses reader used to residualise the whole entry here,
+        which hid nothing but handed T-D1 a different diagnosis for the same
+        class of malformed body; the readers now agree on *raise*.
+
+        AC-3 names the path and the observed type in the message, so a human
+        triaging a malformed-body run can locate the bad item from the message
+        alone — the assertion below pins both, rather than just the exception
+        class.
+        """
+        with pytest.raises(c.UnreadableBodyError) as exc_info:
+            r.ResponsesProjection().read_request(captured(body))
+
+        assert "input[0]" in str(exc_info.value), (
+            "the raise must name the item's path so a malformed body can be triaged from "
+            f"the message alone (got {exc_info.value!r})"
+        )
+        assert expected_type_name in str(exc_info.value), (
+            f"the raise must name the observed type (expected {expected_type_name!r} in "
+            f"{exc_info.value!r})"
+        )
 
     def test_a_message_role_that_is_not_even_a_string_is_an_unreadable_body(self) -> None:
         """R11's named case, in the shape that breaks a naive membership test.

@@ -24,7 +24,11 @@ left over.  But ``consumed`` covers *top-level* keys only (§3.3.1's stated
 boundary), so a value dropped from *inside* a key this module claims is not
 caught here.  Two such blind spots are deliberate and are named in the task's
 requirements rather than left implied: the internals of the 27 opaque item types
-(a mutated shell command inside a ``local_shell_call`` is invisible), and
+(**detected** since KBR-179 — every unmodelled item now carries a payload digest,
+so a mutated shell command inside a ``local_shell_call`` changes the digest and
+shows as a delta at the part path — but not *addressed* per field: the delta is
+at the part, not at the sibling key that changed, because the projection keeps
+no field-level structure for an unmodelled type), and
 ``previous_response_id`` / ``conversation``, which move history server-side so a
 formally total projection can still be missing turns.
 """
@@ -213,8 +217,14 @@ _TOOL_CHOICE_BY_TYPE = frozenset(
     }
 )
 
-#: A ``data:`` URL carrying base64 image bytes, with its media type.
-_DATA_URL = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
+#: A ``data:`` URL carrying base64 image bytes, with its media type.  RFC 2397
+#: puts no minimum on the media segment (``data:;base64,…`` is legal).  The
+#: ``;base64`` marker is matched case-insensitively because real senders spell
+#: it that way and the convention everywhere else in the URL grammar treats
+#: encoding tokens case-insensitively (RFC 2045's Content-Transfer-Encoding
+#: values included) — both shapes previously routed to the non-base64 branch,
+#: which handled them gracefully but by accident rather than by design (KBR-179).
+_DATA_URL = re.compile(r"^data:([^;,]*);base64,(.*)$", re.DOTALL | re.IGNORECASE)
 
 #: Any ``data:`` URL at all.  Matched separately so that a *non*-base64 data URL
 #: — ``data:image/png,abc`` — residualises instead of falling through to
@@ -223,6 +233,26 @@ _DATA_URL = re.compile(r"^data:([^;,]+);base64,(.*)$", re.DOTALL)
 #: another reader decoding the same bytes would produce a digest, and the two
 #: projections would differ on an unchanged image.
 _ANY_DATA_URL = re.compile(r"^data:", re.IGNORECASE)
+
+
+def _residualise(source: Mapping[str, Any], mapped: set[str], prefix: str, residual: dict[str, Any]) -> None:
+    """Record every key of ``source`` the reader did not map.
+
+    §3.3.1's "unknown fields fail closed", applied at depth: ``verify_total``
+    sees top-level keys only, so this is what closes the gap beneath them.
+    Mirrors ``reader_anthropic_messages._residualise`` — one spelling for one
+    rule across the readers that share it.
+
+    Args:
+        source: The object being read.
+        mapped: The keys the caller accounted for.
+        prefix: The object's path from the body root, to which each unmapped
+            key is appended.
+        residual: The residual mapping, extended in place.
+    """
+    for key, value in source.items():
+        if key not in mapped:
+            residual[c.residual_key(prefix, key)] = value
 
 
 def _mcp_tool_name(server_label: str) -> str:
@@ -280,8 +310,11 @@ class ResponsesProjection:
 
         Raises:
             UnreadableBodyError: When the body is not a JSON object, when
-                ``input`` is neither a string nor an array, or when a ``message``
-                item carries a role no published schema defines.
+                ``input`` is neither a string nor an array, when a ``message``
+                item carries a role no published schema defines, or when an
+                input item's ``type`` is present but neither a string nor
+                ``null`` (KBR-179 — the reader names the item's path and the
+                observed type in the message).
         """
         body = self._parse(captured.body)
 
@@ -363,6 +396,16 @@ class ResponsesProjection:
             consumed.add(key)
             if key == "tool_choice":
                 self._read_tool_choice(body[key], extra, residual)
+            elif key == "parallel_tool_calls":
+                # The four-way conditional matches the CC reader's
+                # branch in `reader_chat_completions.py`. The `extra`
+                # write inside the helper routes through
+                # `c.PARALLEL_TOOL_CALLS_KEY` (the same source-of-truth
+                # posture the CC reader takes on its `extra` write);
+                # the residual write uses the bare wire name so the
+                # cross-reader comparison sees the same spelling either
+                # side.
+                self._read_parallel_tool_calls(body[key], extra, residual)
             else:
                 extra[key] = body[key]
 
@@ -457,6 +500,47 @@ class ResponsesProjection:
             return f"tool:{kind}"
 
         return None
+
+    def _read_parallel_tool_calls(self, value: Any, extra: dict[str, Any], residual: dict[str, Any]) -> None:
+        """Map ``parallel_tool_calls`` onto the canonical address per §3.3.1b.
+
+        The Responses default is ``true`` (parallel calls allowed), the same
+        default the CC wire carries (KBR-205 / G36). An absent entry and an
+        explicit default are one request on both wires, so the reader writes
+        ``extra[parallel_tool_calls]`` only on a **non-default** value:
+        writing the default would invent a second field some providers reject
+        and every comparison would carry.
+
+        The four-way conditional mirrors the CC reader's analogous branch
+        (lines 615–651 of ``reader_chat_completions.py``):
+
+        - ``True`` — the documented default; consumed, **not** written.
+        - ``False`` — the non-default delta; written to
+          ``extra[parallel_tool_calls]``.
+        - ``None`` — the wire key carries no instruction (the
+          ``cache_control`` precedent); consumed, **not** written.
+        - anything else — a wrongly-typed leaf; residualised at the bare wire
+          name so the cross-reader comparison sees the same answer either
+          side.
+
+        Args:
+            value: The raw ``parallel_tool_calls`` value.
+            extra: The envelope's extra mapping, mutated here.
+            residual: Accumulator of unclassifiable values, mutated here.
+        """
+        if value is True:
+            # Default — not written. The caller has already added the key to
+            # `consumed`; the absence in `extra[parallel_tool_calls]` is the
+            # canonical form.
+            return
+        if value is False:
+            extra[c.PARALLEL_TOOL_CALLS_KEY] = False
+            return
+        if value is None:
+            # The wire key carries no instruction (the `cache_control`
+            # precedent); treated as no-op.
+            return
+        residual["parallel_tool_calls"] = value
 
     # ----------------------------------------------------------------
     # Conversation
@@ -579,7 +663,9 @@ class ResponsesProjection:
             residual: Accumulator of unclassifiable values, mutated here.
 
         Raises:
-            UnreadableBodyError: When a ``message`` item carries an undefined role.
+            UnreadableBodyError: When a ``message`` item carries an undefined
+                role, or when the item's ``type`` is present but neither a
+                string nor ``None`` (KBR-179).
         """
         path = c.residual_key("input", index=index)
 
@@ -587,7 +673,7 @@ class ResponsesProjection:
             residual[path] = item
             return
 
-        kind = self._item_type(item)
+        kind = self._item_type(item, path)
 
         if kind == "message":
             self._read_message(item, path, system, turns, residual)
@@ -598,9 +684,23 @@ class ResponsesProjection:
         elif kind == "reasoning":
             turns.append(c.Turn("assistant", self._read_reasoning(item, path, residual)))
         elif kind in _OPAQUE_USER_ITEMS:
-            turns.append(c.Turn("user", [c.Opaque(kind)]))
+            # `Opaque` consumes its payload (mirroring
+            # :func:`reader_anthropic_messages._read_opaque`): the digest rides
+            # on the part so a swapped or mutated body shows as a delta at the
+            # part path. The sweep is **structural symmetry, a no-op by
+            # construction** — ``set(item)`` claims every key, so nothing
+            # residualises beneath the Opaque, matching the Anthropic reader's
+            # own ``_residualise(block, set(block), …)``. A reader that ever
+            # needs to exclude a sibling (e.g. ``cache_control`` on a format
+            # that publishes it) replaces the mapped set and the no-op becomes
+            # a real filter (KBR-179).
+            _residualise(item, set(item), path, residual)
+            turns.append(c.Turn("user", [c.Opaque(kind, digest=c.opaque_digest(item))]))
         elif kind in _OPAQUE_ASSISTANT_ITEMS:
-            turns.append(c.Turn("assistant", [c.Opaque(kind)]))
+            # See the comment on the user-side branch above; this is the same
+            # Opaque shape for model-produced items.
+            _residualise(item, set(item), path, residual)
+            turns.append(c.Turn("assistant", [c.Opaque(kind, digest=c.opaque_digest(item))]))
         else:
             # An item type outside all 31 published values. §3.3.1: adding a
             # shape to a wire format must force a deliberate decision, so this
@@ -608,7 +708,7 @@ class ResponsesProjection:
             residual[path] = item
 
     @staticmethod
-    def _item_type(item: Mapping[str, Any]) -> str | None:
+    def _item_type(item: Mapping[str, Any], path: str) -> str | None:
         """Return an item's discriminator, inferring it when the wire omits it.
 
         ``EasyInputMessage``, ``FunctionCallOutputItemParam`` and
@@ -617,13 +717,32 @@ class ResponsesProjection:
 
         Args:
             item: The raw item.
+            path: The item's path from the body root, which the raise message
+                names — the sibling role raise spells it the same way, and a
+                malformed body a human must triage reads the path off the
+                message rather than re-deriving it from the input array.
 
         Returns:
             The item's type, or ``None`` when it cannot be inferred.
+
+        Raises:
+            UnreadableBodyError: When ``type`` is present but neither a string
+                nor ``None``.
         """
         declared = item.get("type")
         if isinstance(declared, str):
             return declared
+
+        # `None` is the schema's own "absent" spelling on `ItemReferenceParam`,
+        # so it must not raise — the inference below is what keeps it legal.
+        # A present-but-non-string type raises (KBR-179): the discriminator *is*
+        # the value the projection hangs the part on, §7.4.1 scopes the
+        # wrongly-typed-leaf rule to leaves with an absent value to fall back
+        # to, and the Anthropic Messages reader has raised on the same shape
+        # since T-A1 — the readers agree because a disagreement hands T-D1 two
+        # different diagnoses for one class of malformed body.
+        if declared is not None:
+            raise c.UnreadableBodyError(f"{path} type must be a string or null, got {type(declared).__name__}")
 
         # A `role` makes it a message — the published `EasyInputMessage`, which
         # is the shape every hand-written example uses. An `id` alone is an item
@@ -791,13 +910,21 @@ class ResponsesProjection:
         # both spell this `document`, and T-A3 first shipped `file` for it —
         # one concept under two names is the delta no register row can claim.
         if kind == "input_file":
-            return c.Opaque(c.opaque_kind("input_file"))
+            # `Opaque` consumes its payload — same shape as the Anthropic reader's
+            # `_read_opaque` and as the unmodelled-item branches in `_read_item`
+            # above. The digest rides on the part so a mutated sibling (``detail``,
+            # ``filename``, ``file_url``) is visible as a delta at the part path
+            # rather than vanishing silently (KBR-179 / KBR-251 observations).
+            # The sweep is structural symmetry, a no-op by construction — see
+            # the `_read_item` comment for why it stays in the code anyway.
+            _residualise(entry, set(entry), path, residual)
+            return c.Opaque(c.opaque_kind("input_file"), digest=c.opaque_digest(entry))
 
         residual[path] = entry
         return None
 
     @staticmethod
-    def _read_image(entry: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.Part | None:
+    def _read_image(entry: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.Image:
         """Project an ``input_image`` content part.
 
         ``contract.image_digest`` is pinned so six independently written readers
@@ -811,8 +938,18 @@ class ResponsesProjection:
             residual: Accumulator of unclassifiable values, mutated here.
 
         Returns:
-            The projected image, or ``None`` when it was residualised.
+            The projected image. Never ``None``: §7.4 rule 7 — no branch drops
+            a part, because a dropped part shifts every later part's index and
+            invents a delta on content nobody touched (KBR-251).
         """
+        # Close the depth gap for every entry the reader does not map. The
+        # published ``input_image`` keys are ``type``, ``image_url`` and
+        # ``file_id``; anything else (``detail``, future siblings) residualises
+        # at its exact path so the run fails loudly. Mirrors the Anthropic
+        # reader's block- and source-level sweeps (§3.3.1's "unknown fields
+        # fail closed").
+        _residualise(entry, {"type", "image_url", "file_id"}, path, residual)
+
         url = entry.get("image_url")
 
         if isinstance(url, str):
@@ -822,30 +959,64 @@ class ResponsesProjection:
                 try:
                     raw = base64.b64decode(payload, validate=True)
                 except (binascii.Error, ValueError):
-                    # Undecodable bytes are not an image this reader can digest,
-                    # and inventing a digest would make two unequal images
-                    # compare equal.
-                    residual[path] = entry
-                    return None
-                return c.Image(digest=c.image_digest(raw), media_type=media_type)
+                    # Residualised, not raised on, and the part is not dropped:
+                    # §7.4 rule 7 row 3 — "raising is the other wrong answer:
+                    # it blinds the oracle to everything else in a request it
+                    # could otherwise diff", and `validate=True` rejects every
+                    # RFC 2045 line break, so wrapped base64 is real traffic.
+                    # The identity is the wire's own bytes of the payload —
+                    # the second of `image_digest`'s recipes (KBR-192). The
+                    # media type *is* stated here and carried separately, so a
+                    # changed media type stays its own delta; an empty segment
+                    # is spelled `None` so it agrees with the non-base64 branch.
+                    residual[c.residual_key(path, "image_url")] = url
+                    return c.Image(
+                        digest=c.image_digest(payload.encode("utf-8")),
+                        media_type=media_type or None,
+                    )
+                return c.Image(digest=c.image_digest(raw), media_type=media_type or None)
 
             # A data URL that is not base64 carries bytes this reader cannot
-            # canonicalise; putting it in `ref` would make it compare unequal to
-            # another reader's digest of the same image.
+            # canonicalise; putting it in `ref` would make it compare unequal
+            # to another reader's digest of the same image. The media segment
+            # *is* parseable here — anything between ``data:`` and the first
+            # ``;`` or ``,`` — and the payload sits after the first comma.
+            # Both carry through to the projected part; the digest sees only
+            # the payload bytes, so the media segment stays its own delta,
+            # consistent with `image_digest`'s "media type excluded" rule.
             if _ANY_DATA_URL.match(url):
-                residual[path] = entry
-                return None
+                residual[c.residual_key(path, "image_url")] = url
+                media_type = url[5:].split(";", 1)[0].split(",", 1)[0] or None
+                _, _, payload = url.partition(",")
+                return c.Image(digest=c.image_digest(payload.encode("utf-8")), media_type=media_type)
 
             # A remote image has no bytes to digest; the URI is the identity, the
             # same shape §3.3.1 gives Gemini's `fileData.fileUri`.
             return c.Image(ref=url)
 
+        # `image_url` present but wrongly typed is a rule-7 row-2 anomaly even
+        # when a usable `file_id` carries the part — a dropped field is the
+        # silent defect §7.4.1 names, and it would otherwise hide inside a
+        # `ref`-only projection. An *absent* `image_url` is the format's legal
+        # file_id-only shape and residualises nothing here.
+        if url is not None:
+            residual[c.residual_key(path, "image_url")] = url
+
         file_id = entry.get("file_id")
         if isinstance(file_id, str):
             return c.Image(ref=file_id)
 
-        residual[path] = entry
-        return None
+        # No identity the format defines. The part keeps its position with
+        # identity from the canonical-JSON digest of the part — the
+        # `opaque_digest` recipe, mirroring Gemini's missing-`fileUri` shape —
+        # and the residual names the missing identity key as ``None``, plus
+        # any wrongly-typed `file_id` value, so the run fails visibly at the
+        # right path.
+        if url is None:
+            residual[c.residual_key(path, "image_url")] = None
+        if file_id is not None:
+            residual[c.residual_key(path, "file_id")] = file_id
+        return c.Image(digest=c.opaque_digest(entry))
 
     def _read_function_call(self, item: Mapping[str, Any], path: str, residual: dict[str, Any]) -> c.ToolUse:
         """Project a ``function_call`` item.
@@ -1131,3 +1302,362 @@ class ResponsesProjection:
                 merged.append(turn)
 
         return merged
+
+
+class ResponsesReplyProjection:
+    """Reads an OpenAI Responses reply into :class:`~harness.contract.Reply`.
+
+    Implements :class:`~harness.contract.ReplyProjection` for
+    :attr:`~harness.contract.WireFormat.OPENAI_RESPONSES`. Schema retrieved
+    2026-09-16 from
+    ``https://raw.githubusercontent.com/openai/openai-openapi/main/openapi.yaml``
+    (``CreateResponse``; the schema's own ``example`` block is the ground
+    truth for which top-level keys a complete reply carries).
+
+    The Responses API has no ``finish_reason``: completion comes from
+    ``status`` and ``incomplete_details``. ``status = "completed"`` with
+    ``incomplete_details = null`` projects as ``end_turn``;
+    ``incomplete_details.reason = "max_output_tokens"`` projects as
+    ``max_tokens``; any other published reason escapes through ``other`` with
+    the wire string in :attr:`~harness.contract.Reply.stop_reason_raw`.
+    ``status = "failed"`` projects as ``error``; ``"cancelled"`` also escapes
+    through ``other`` (a distinct semantic the canonical set does not name);
+    intermediate statuses (``in_progress``, ``queued``) are not a captured
+    reply — :class:`~harness.contract.UnreadableBodyError` is raised so the
+    recorder cannot hand a mid-stream snapshot to the projection.
+
+    ``output[]`` carries the assistant's items. ``type = "message"`` content
+    blocks (``output_text``, ``refusal``) project as
+    :class:`~harness.contract.Text`. ``type = "function_call"`` arguments
+    arrive as a JSON string and decode through ``decode_arguments``
+    (§7.4.1, KBR-174). ``type = "reasoning"`` ``summary[].summary_text``
+    items join into a single :class:`~harness.contract.Thinking` ``text``;
+    the reasoning item's own ``id`` is carried as ``signature``.
+
+    Attributes:
+        wire_format: Always :attr:`~harness.contract.WireFormat.OPENAI_RESPONSES`.
+    """
+
+    wire_format = c.WireFormat.OPENAI_RESPONSES
+
+    #: Every top-level key the schema's own example carries. Most are request
+    #: echoes the bridge may legitimately rewrite; ``status``, ``error`` and
+    #: ``incomplete_details`` carry the completion semantics the projection
+    #: reads. Listing them here is what keeps them out of the residual.
+    _PROJECTION_KEYS = frozenset(
+        {
+            "id",
+            "object",
+            "created_at",
+            "status",
+            "completed_at",
+            "error",
+            "incomplete_details",
+            "instructions",
+            "max_output_tokens",
+            "model",
+            "output",
+            "parallel_tool_calls",
+            "previous_response_id",
+            "reasoning",
+            "store",
+            "temperature",
+            "text",
+            "tool_choice",
+            "tools",
+            "top_p",
+            "truncation",
+            "usage",
+            "user",
+            "metadata",
+        }
+    )
+
+    #: Keys a ``function_call`` output item carries.
+    _FUNCTION_CALL_KEYS = frozenset({"type", "id", "status", "call_id", "name", "arguments"})
+
+    #: Keys a ``message`` output item carries.
+    _MESSAGE_ITEM_KEYS = frozenset({"type", "id", "status", "role", "content"})
+
+    #: Keys a ``message`` item's content block carries.
+    _MESSAGE_CONTENT_KEYS = frozenset({"type", "text", "refusal", "annotations"})
+
+    #: Keys a ``reasoning`` output item carries.
+    _REASONING_KEYS = frozenset({"type", "id", "status", "summary"})
+
+    #: Keys a ``summary`` entry carries.
+    _SUMMARY_KEYS = frozenset({"type", "text"})
+
+    #: Terminal ``status`` values the reader accepts. Anything else is a
+    #: mid-stream snapshot and raises :class:`~harness.contract.UnreadableBodyError`.
+    _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+    def read_reply(self, captured: c.CapturedReply) -> c.Reply:
+        """Project a captured Responses reply.
+
+        Args:
+            captured: The reply as observed on the wire. SSE reassembly is the
+                caller's responsibility (§7.4 boundary).
+
+        Returns:
+            The wire-independent projection, total over the body.
+
+        Raises:
+            UnreadableBodyError: When the body is not a readable Responses
+                reply (malformed JSON, non-terminal ``status``, an ``output``
+                item structurally unprojectable).
+        """
+        body = ResponsesProjection._parse(captured.body)
+
+        residual: dict[str, Any] = {}
+        consumed: set[str] = set()
+        for key, value in body.items():
+            if key in self._PROJECTION_KEYS:
+                consumed.add(key)
+            else:
+                residual[c.residual_key(key)] = value
+
+        status = body.get("status")
+        if not isinstance(status, str) or status not in self._TERMINAL_STATUSES:
+            raise c.UnreadableBodyError(
+                f"status must be one of {sorted(self._TERMINAL_STATUSES)}, got {status!r}"
+            )
+
+        stop_reason, stop_reason_raw = self._map_status(
+            status, body.get("incomplete_details"), residual
+        )
+        parts = self._read_output(body.get("output"), residual)
+
+        usage_raw = body.get("usage")
+        if isinstance(usage_raw, dict):
+            usage: Mapping[str, Any] = dict(usage_raw)
+        elif usage_raw is None:
+            usage = {}
+        else:
+            residual[c.residual_key("usage")] = usage_raw
+            usage = {}
+
+        return c.Reply(
+            parts=parts,
+            stop_reason=stop_reason,
+            stop_reason_raw=stop_reason_raw,
+            usage=usage,
+            residual=residual,
+            consumed=frozenset(consumed),
+            source=body,
+        )
+
+    @staticmethod
+    def _map_status(
+        status: str, incomplete_details: Any, residual: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        """Map ``status`` + ``incomplete_details`` onto :data:`~harness.contract.STOP_REASONS`.
+
+        Args:
+            status: The wire ``status`` (one of the terminal values).
+            incomplete_details: The wire ``incomplete_details`` (``None`` or
+                ``{"reason": "<…>"}``).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            ``(stop_reason, stop_reason_raw)``.
+
+        Raises:
+            UnreadableBodyError: When ``incomplete_details`` is neither
+                ``None`` nor an object, or carries a non-string ``reason``.
+        """
+        if status == "completed":
+            if incomplete_details is None:
+                return "end_turn", None
+            if not isinstance(incomplete_details, dict):
+                raise c.UnreadableBodyError(
+                    "incomplete_details must be null or an object, "
+                    f"got {type(incomplete_details).__name__}"
+                )
+            reason = incomplete_details.get("reason")
+            if not isinstance(reason, str):
+                raise c.UnreadableBodyError(
+                    f"incomplete_details.reason must be a string, got {type(reason).__name__}"
+                )
+            if reason == "max_output_tokens":
+                return "max_tokens", None
+            # A reason the canonical set does not name escapes through
+            # ``other`` with the wire string, matching the Anthropic / Gemini
+            # posture.
+            return "other", reason
+        if status == "failed":
+            return "error", None
+        # ``cancelled`` — terminal but not a failure; escape via ``other`` so
+        # the wire semantic is preserved for T-D10's register match.
+        return "other", status
+
+    @classmethod
+    def _read_output(cls, value: Any, residual: dict[str, Any]) -> tuple[c.Part, ...]:
+        """Read the reply's ``output`` array.
+
+        Args:
+            value: The wire value (array of output items, or absent).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            The projected parts, in wire order. An absent or non-array
+            ``output`` returns ``()`` and residualises at the body's top-level
+            ``output`` path so the run names the structural break (a terminal
+            reply always carries ``output``).
+        """
+        if not isinstance(value, list):
+            residual[c.residual_key("output")] = value
+            return ()
+        parts: list[c.Part] = []
+        for index, item in enumerate(value):
+            parts.extend(cls._read_output_item(item, index, residual))
+        return tuple(parts)
+
+    @classmethod
+    def _read_output_item(
+        cls, item: Any, index: int, residual: dict[str, Any]
+    ) -> tuple[c.Part, ...]:
+        """Read one ``output`` item into zero or more parts.
+
+        Args:
+            item: The wire value.
+            index: The item's array position, for residual paths.
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            The projected parts. A ``message`` item yields one ``Text`` per
+            ``output_text`` / ``refusal`` content block; a ``function_call``
+            yields one ``ToolUse``; a ``reasoning`` yields one ``Thinking``;
+            every other item type yields one ``Opaque`` so an unmodelled item
+            stays detectable by digest.
+
+        Raises:
+            UnreadableBodyError: When ``item`` is not an object, carries no
+                string ``type``, or fails a structural check of its own kind.
+        """
+        if not isinstance(item, dict):
+            raise c.UnreadableBodyError(
+                f"output[{index}] must be an object, got {type(item).__name__}"
+            )
+        kind = item.get("type")
+        if not isinstance(kind, str):
+            raise c.UnreadableBodyError(
+                f"output[{index}].type must be a string, got {type(kind).__name__}"
+            )
+
+        prefix = f"output[{index}]"
+
+        if kind == "message":
+            return cls._read_message_item(item, prefix, residual)
+        if kind == "function_call":
+            if not isinstance(item.get("name"), str):
+                raise c.UnreadableBodyError(f"{prefix}.name must be a string")
+            _residualise(item, set(cls._FUNCTION_CALL_KEYS), prefix, residual)
+            return (
+                c.ToolUse(
+                    name=item["name"],
+                    arguments=c.decode_arguments(
+                        item.get("arguments"), f"{prefix}.arguments", residual
+                    ),
+                    id=item.get("call_id") if isinstance(item.get("call_id"), str) else None,
+                ),
+            )
+        if kind == "reasoning":
+            return cls._read_reasoning_item(item, prefix, residual)
+
+        # Unmodelled item type — carry the whole item as ``Opaque``. The
+        # ``opaque_digest`` is the canonical-JSON hash over every key except
+        # ``type`` and ``cache_control`` (§7.4.1), which is what keeps an
+        # unmodelled payload detectable. Residualising each unmodelled key
+        # separately would fail the run on every real item that carries
+        # bookkeeping fields like ``id`` / ``status``.
+        return (c.Opaque(kind=c.opaque_kind(kind), digest=c.opaque_digest(item)),)
+
+    @classmethod
+    def _read_message_item(
+        cls, item: Mapping[str, Any], prefix: str, residual: dict[str, Any]
+    ) -> tuple[c.Part, ...]:
+        """Read a ``type = "message"`` output item.
+
+        Args:
+            item: The wire value.
+            prefix: The item's residual path (``output[index]``).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            :class:`~harness.contract.Text` parts — one per ``output_text``
+            and ``refusal`` content block, in wire order.
+
+        Raises:
+            UnreadableBodyError: When ``content`` is not an array.
+        """
+        _residualise(item, set(cls._MESSAGE_ITEM_KEYS), prefix, residual)
+        content = item.get("content")
+        if not isinstance(content, list):
+            raise c.UnreadableBodyError(
+                f"{prefix}.content must be an array, got {type(content).__name__}"
+            )
+        parts: list[c.Part] = []
+        for block_index, block in enumerate(content):
+            block_prefix = f"{prefix}.content[{block_index}]"
+            if not isinstance(block, dict):
+                residual[c.residual_key(block_prefix)] = block
+                continue
+            _residualise(block, set(cls._MESSAGE_CONTENT_KEYS), block_prefix, residual)
+            block_kind = block.get("type")
+            if block_kind == "output_text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(c.Text(text))
+                elif text is not None:
+                    # A wrongly-typed ``text`` (the schema requires a string)
+                    # residualises at its own path so the run names it.
+                    residual[c.residual_key(block_prefix, "text")] = text
+            elif block_kind == "refusal":
+                text = block.get("refusal")
+                if isinstance(text, str):
+                    parts.append(c.Text(text))
+                elif text is not None:
+                    residual[c.residual_key(block_prefix, "refusal")] = text
+        return tuple(parts)
+
+    @classmethod
+    def _read_reasoning_item(
+        cls, item: Mapping[str, Any], prefix: str, residual: dict[str, Any]
+    ) -> tuple[c.Part, ...]:
+        """Read a ``type = "reasoning"`` output item.
+
+        Args:
+            item: The wire value.
+            prefix: The item's residual path (``output[index]``).
+            residual: The residual mapping, extended in place.
+
+        Returns:
+            A single :class:`~harness.contract.Thinking` whose ``text`` joins
+            every ``summary[].summary_text`` block in wire order;
+            ``signature`` carries the item's own ``id`` when present.
+
+        Raises:
+            UnreadableBodyError: When ``summary`` is not an array.
+        """
+        _residualise(item, set(cls._REASONING_KEYS), prefix, residual)
+        summary = item.get("summary")
+        if not isinstance(summary, list):
+            raise c.UnreadableBodyError(
+                f"{prefix}.summary must be an array, got {type(summary).__name__}"
+            )
+        texts: list[str] = []
+        for summary_index, entry in enumerate(summary):
+            entry_prefix = f"{prefix}.summary[{summary_index}]"
+            if not isinstance(entry, dict):
+                residual[c.residual_key(entry_prefix)] = entry
+                continue
+            _residualise(entry, set(cls._SUMMARY_KEYS), entry_prefix, residual)
+            if entry.get("type") == "summary_text" and isinstance(entry.get("text"), str):
+                texts.append(entry["text"])
+        item_id = item.get("id")
+        return (
+            c.Thinking(
+                text="".join(texts), signature=item_id if isinstance(item_id, str) else None
+            ),
+        )

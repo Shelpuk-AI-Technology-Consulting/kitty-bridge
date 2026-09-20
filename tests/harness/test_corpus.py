@@ -28,7 +28,17 @@ import pytest
 
 from harness import corpus as k
 from harness.contract import REDACTED_HEADERS, REDACTED_QUERY_KEYS, CapturedRequest, WireFormat
-from harness.register import Trigger
+from harness.register import ArrangingBy, Trigger
+
+#: The REQUEST-classified triggers, sorted by name — the positive-control
+#: population for the loader tests.  Computed from the classification so a
+#: reclassification moves a trigger between this list and
+#: :data:`harness.corpus.NOT_CORPUS_DECIDABLE` in the same edit (F1 pins the
+#: table; F2 and F3 here pin the consequences).
+_CORPUS_DECIDABLE_TRIGGERS = sorted(
+    (t for t in Trigger if getattr(t, "arranged_by", None) is ArrangingBy.REQUEST),
+    key=lambda t: t.name,
+)
 
 #: A body shaped like a real Claude Code request and carrying **no** secret:
 #: a thinking-block signature, a ``toolu_`` identifier, a base64 image, a large
@@ -500,6 +510,110 @@ class TestProvenanceIsRequired:
             k.load_entry(path)
 
 
+class TestTheFreshnessGuard:
+    """Every captured entry must name the pinned Claude Code version.
+
+    The refresh cadence (re-capture when the pin changes) is unactionable if
+    nothing fails when the pin moves — the corpus would go silently stale,
+    the museum of a protocol nobody speaks §7.1 warns about. These drive the
+    guard over constructed entries; the L2 test in
+    :mod:`tests.harness.test_corpus_lint` binds it to the committed corpus
+    and the workflow files.
+    """
+
+    def test_a_captured_entry_at_the_pin_passes(self) -> None:
+        """The matching case, so the refusals below are not the only path."""
+        entries = [
+            entry(origin=k.CAPTURED, origin_note="", captured_from="claude-code/2.1.238", captured_at="2026-09-14"),
+            entry(
+                id="other",
+                origin=k.CAPTURED,
+                origin_note="",
+                captured_from="claude-code/2.1.238",
+                captured_at="2026-09-14",
+            ),
+        ]
+
+        k.assert_captured_from_matches_pin(entries, "2.1.238")
+
+    def test_a_captured_entry_at_another_version_fails_naming_both(self) -> None:
+        """The bump the guard exists to catch: the pin moved, the capture did not.
+
+        Both versions are named so the operator can tell at a glance whether
+        the corpus is behind or ahead of the pin.
+        """
+        stale = entry(
+            origin=k.CAPTURED,
+            origin_note="",
+            captured_from="claude-code/1.2.3",
+            captured_at="2026-09-14",
+        )
+
+        with pytest.raises(k.CorpusEntryError, match=r"1\.2\.3.*2\.1\.238"):
+            k.assert_captured_from_matches_pin([stale], "2.1.238")
+
+    def test_a_malformed_captured_from_is_refused_not_reported_as_stale(self) -> None:
+        """The canonical form is enforced, not assumed.
+
+        ``2.1.238`` (bare) and ``claude-code/v2.1.238`` would both satisfy a
+        substring check against the pin, so a string comparison would wave
+        them through — and the README's documented spelling would drift one
+        ``v`` at a time. Refusing the form makes the drift a lint failure
+        instead.
+        """
+        for malformed in ("2.1.238", "claude-code/v2.1.238", "claude-code/2.1", "claude-code/x.y.z"):
+            bad = entry(
+                origin=k.CAPTURED, origin_note="", captured_from=malformed, captured_at="2026-09-14"
+            )
+
+            with pytest.raises(k.CorpusEntryError, match="captured_from is"):
+                k.assert_captured_from_matches_pin([bad], "2.1.238")
+
+    def test_no_captured_entries_fails_the_guard(self) -> None:
+        """The vacuous-pass trap: a guard over nothing cannot pass by looking.
+
+        This is :func:`~harness.corpus.assert_corpus_clean`'s empty-corpus
+        refusal, narrowed to the captured half — a corpus of only synthetic
+        entries (T-W6's starting state) satisfies "every captured entry
+        matches" by having no captured entries to check.
+        """
+        synthetic_only = [entry(), entry(id="another")]
+
+        with pytest.raises(k.CorpusEntryError, match="no captured entries"):
+            k.assert_captured_from_matches_pin(synthetic_only, "2.1.238")
+
+    def test_synthetic_entries_do_not_count(self) -> None:
+        """Only `captured_only()`'s half is guarded.
+
+        ``format_example`` carries ``captured_from: ""`` by design; the guard
+        must not read that as "stale" or the worked example would fail the
+        gate it exists to illustrate.
+        """
+        mixed = [
+            entry(),
+            entry(
+                id="real",
+                origin=k.CAPTURED,
+                origin_note="",
+                captured_from="claude-code/2.1.238",
+                captured_at="2026-09-14",
+            ),
+        ]
+
+        k.assert_captured_from_matches_pin(mixed, "2.1.238")
+
+    def test_a_malformed_pin_is_refused(self) -> None:
+        """A pin the parser cannot read is a broken workflow, not a stale corpus.
+
+        Failing here rather than reporting every entry stale keeps the
+        failure's cause in the failure's message.
+        """
+        one = entry(origin=k.CAPTURED, origin_note="", captured_from="claude-code/2.1.238", captured_at="2026-09-14")
+
+        with pytest.raises(k.CorpusEntryError, match="pin"):
+            k.assert_captured_from_matches_pin([one], "stable")
+
+
 class TestTriggersHaveThreeStates:
     """Met, explicitly absent, and silent — and silence is not absence."""
 
@@ -514,9 +628,16 @@ class TestTriggersHaveThreeStates:
             k.load_entry(path)
 
     def test_a_trigger_cannot_be_both_met_and_absent(self, tmp_path: Path) -> None:
-        """A contradiction would make the entry serve as its own complement."""
+        """A contradiction would make the entry serve as its own complement.
+
+        Uses a REQUEST trigger deliberately: a non-REQUEST trigger is refused
+        by the "cannot arrange" rule before the contradiction check runs (it
+        cannot legitimately be in either list, so the contradiction is moot for
+        it). ``tool_result_over_limit`` is corpus-decidable, so it is the
+        contradiction itself that must be caught.
+        """
         path = manifest_for(
-            tmp_path, triggers_met=["over_compaction_budget"], triggers_absent=["over_compaction_budget"]
+            tmp_path, triggers_met=["tool_result_over_limit"], triggers_absent=["tool_result_over_limit"]
         )
 
         with pytest.raises(k.CorpusEntryError, match="both met and absent"):
@@ -1113,6 +1234,22 @@ class TestTheRoundTrip:
 
         assert "claude-opus" not in path.read_text(encoding="utf-8")
 
+    def test_the_manifest_bytes_are_lf_only(self, tmp_path: Path) -> None:
+        """`write_entry` must emit LF on every platform (KBR-261).
+
+        `Path.write_text` with default newline translation rewrites every
+        ``\\n`` to ``\\r\\n`` on Windows regardless of ``.gitattributes``,
+        which commits a CRLF manifest the rest of the suite (which reads
+        through ``load_corpus``) silently accepts — text-mode translation
+        erases the drift on read. The L2 lint catches a CRLF *after* it is
+        committed; this test catches the writer before. Read with
+        ``read_bytes()`` so the assertion is what Python wrote, not what
+        Python's universal-newlines translator would prefer to see.
+        """
+        path = k.write_entry(tmp_path, entry(request=capture(CLEAN_BODY)))
+
+        assert b"\r\n" not in path.read_bytes()
+
     def test_writing_scrubs(self, tmp_path: Path) -> None:
         """The one step a tired operator skips must not be the one that matters."""
         k.write_entry(tmp_path, entry(request=capture(DIRTY_BODY)))
@@ -1523,46 +1660,162 @@ class TestKnownNonSecrets:
             k.load_entry(path)
 
 
-class TestTriggersAnEntryCannotArrange:
-    """G21's over-declaration hazard, closed for the cases the repository proves."""
+class TestNotCorpusDecidableIsDerivedFromArrangingBy:
+    """KBR-186 — the corpus loader's refusal set is derived, not hand-listed.
+
+    The hand-listed ``NOT_CORPUS_DECIDABLE`` of six members (ALWAYS plus the
+    five RESPONSE triggers) drifted from the register's classification the
+    moment a new ROUTE or PROFILE trigger shipped.  This class pins the
+    derivation so the two cannot drift, and falsifies the rule for every member
+    of the derived set.
+
+    Note: the pre-KBR-186 ``TestTriggersAnEntryCannotArrange`` (three tests,
+    hard-coded against five RESPONSE names plus ``ALWAYS`` plus a positive
+    control) is now fully subsumed — every case is covered here, and the
+    refusal test is parametrised over the derived set itself so any future
+    member is covered automatically.  It was deleted as dead code in the same
+    change that made it dead.
+    """
+
+    @pytest.fixture
+    def expected_not_corpus_decidable(self) -> frozenset[Trigger]:
+        """The expected refusal set: ALWAYS plus every non-REQUEST trigger.
+
+        Computed from the classification table the ticket publishes, so an edit
+        to the table that disagrees with this fixture is caught here (the table
+        itself is pinned by F1 in :mod:`tests.harness.test_register`).
+        """
+        from harness.register import ArrangingBy
+
+        return frozenset(
+            {Trigger.ALWAYS}
+            | {
+                trigger
+                for trigger in Trigger
+                if trigger is not Trigger.ALWAYS
+                and getattr(trigger, "arranged_by", None) is not ArrangingBy.REQUEST
+            }
+        )
+
+    def test_not_corpus_decidable_matches_the_derived_set(
+        self, expected_not_corpus_decidable: frozenset[Trigger]
+    ) -> None:
+        """F2 — the derivation formula and the exported set agree.
+
+        Both sides are computed from ``Trigger.arranged_by``, so by construction
+        they cannot disagree on a reclassification.  This test is the guard
+        against a *different* failure mode: a hand-edit to ``NOT_CORPUS_DECIDABLE``
+        that adds or removes a member in a way the formula does not endorse.
+        Reintroducing a hand list — the very drift this ticket removes — fails
+        here.
+        """
+        assert expected_not_corpus_decidable == k.NOT_CORPUS_DECIDABLE
 
     @pytest.mark.parametrize(
-        "name",
+        "trigger", sorted(k.NOT_CORPUS_DECIDABLE, key=lambda t: t.name)
+    )
+    def test_a_non_corpus_decidable_trigger_is_refused_in_both_lists(
+        self, tmp_path: Path, trigger: Trigger
+    ) -> None:
+        """F3 — every derived non-REQUEST trigger is refused in both lists.
+
+        The ticket's own falsification, realised: "A RESPONSE trigger
+        reclassified as REQUEST must make the corpus loader accept a manifest
+        it should refuse."  The chain is two-step:
+
+        1. The reclassification moves the trigger out of the derived set
+           (the formula is ``t.arranged_by != REQUEST``), so this parametrisation
+           stops covering it.
+        2. ``test_classification_matches_the_specified_table`` (F1) fails
+           first because the pinned table disagrees with the new
+           ``arranged_by`` value.  The loader then accepts a manifest naming
+           the reclassified trigger — the ticket's stated consequence.
+
+        F2 is a tautology on the formula and so does not fail under the
+        reclassification; the gate against a wrong classification is F1, and
+        F3 demonstrates the consequence.
+        """
+        path = manifest_for(tmp_path, triggers_met=[trigger.value])
+        with pytest.raises(k.CorpusEntryError, match="cannot arrange"):
+            k.load_entry(path)
+
+        path = manifest_for(tmp_path, triggers_absent=[trigger.value])
+        with pytest.raises(k.CorpusEntryError, match="cannot arrange"):
+            k.load_entry(path)
+
+    @pytest.mark.parametrize("trigger", _CORPUS_DECIDABLE_TRIGGERS)
+    def test_a_corpus_decidable_trigger_is_accepted_in_both_lists_and_ignored_when_silent(
+        self, tmp_path: Path, trigger: Trigger
+    ) -> None:
+        """F3's positive controls — the third state (silence) included.
+
+        §3.3.2 assertion 2 runs against a *claimed* complement; the third
+        state (omitted) is silent, not absent.  A loader that conflates
+        "omitted" with "absent" would silently offer every unvetted entry as
+        a complement.  Exercising all three legs (met, absent, silent) is what
+        catches that.
+        """
+        path = manifest_for(tmp_path, triggers_met=[trigger.value])
+        assert trigger in k.load_entry(path).triggers_met
+
+        path = manifest_for(tmp_path, triggers_absent=[trigger.value])
+        assert trigger in k.load_entry(path).triggers_absent
+
+        # Silence is the third state — the loader must index neither list.
+        path = manifest_for(tmp_path)
+        entry = k.load_entry(path)
+        assert trigger not in entry.triggers_met
+        assert trigger not in entry.triggers_absent
+
+
+class TestTheRefusalMessageIsPerKind:
+    """KBR-186 (orphan review): the loader's refusal message names the kind.
+
+    The earlier message pointed every refusal at "the test that scripts the
+    recorder" — correct advice for RESPONSE triggers, wrong for ROUTE (the
+    adapter's dispatch decides, no complement on-route) and PROFILE (declared
+    at the call site that resolves the profile).  The message must point the
+    reader at the *right* place, so this test pins a representative member of
+    each kind against its own reason text.
+    """
+
+    @pytest.mark.parametrize(
+        ("trigger", "expected_reason"),
         [
-            "upstream_empty_response",
-            "thinking_roundtrip_rejected",
-            "native_tool_use_format_error",
-            "upstream_rejected_oversized_on_balancing",
-            "thinking_signature_rejected",
+            (
+                Trigger.NON_NATIVE_UPSTREAM_WIRE,
+                "adapter's dispatch",
+            ),
+            (
+                Trigger.UPSTREAM_EMPTY_RESPONSE,
+                "scripts the recorder",
+            ),
+            (
+                Trigger.OVER_COMPACTION_BUDGET,
+                "resolved profile",
+            ),
+            (
+                Trigger.ALWAYS,
+                "absence of a condition",
+            ),
         ],
     )
-    def test_a_response_trigger_cannot_be_declared(self, tmp_path: Path, name: str) -> None:
-        """These five are decided by the upstream, not by the request.
+    def test_refusal_message_names_the_correct_destination(
+        self,
+        tmp_path: Path,
+        trigger: Trigger,
+        expected_reason: str,
+    ) -> None:
+        path = manifest_for(tmp_path, triggers_met=[trigger.value])
 
-        `register.py`'s own docstring names each one; an entry claiming it would
-        be claiming something it is not the thing that decides, which is exactly
-        the over-declaration that makes the oracle pass over a broken bridge.
-        """
-        path = manifest_for(tmp_path, triggers_met=[name])
-
-        with pytest.raises(k.CorpusEntryError, match="cannot arrange"):
+        with pytest.raises(k.CorpusEntryError) as info:
             k.load_entry(path)
 
-    def test_always_cannot_be_declared(self, tmp_path: Path) -> None:
-        """The register calls it "the absence of a condition, not a condition".
-
-        Declaring it met is noise; declaring it absent is false.
-        """
-        path = manifest_for(tmp_path, triggers_absent=["always"])
-
-        with pytest.raises(k.CorpusEntryError, match="cannot arrange"):
-            k.load_entry(path)
-
-    def test_a_request_trigger_is_still_accepted(self, tmp_path: Path) -> None:
-        """The positive control: the guard must not reject what the corpus is for."""
-        path = manifest_for(tmp_path, triggers_met=["tool_result_over_limit"])
-
-        assert Trigger.TOOL_RESULT_OVER_LIMIT in k.load_entry(path).triggers_met
+        assert "cannot arrange" in str(info.value)
+        assert expected_reason in str(info.value), (
+            f"refusal for {trigger.name} ({getattr(trigger, 'arranged_by', None)}) "
+            f"must point at the {expected_reason!r} destination"
+        )
 
 
 class TestTheInboundFormatIsDeclared:

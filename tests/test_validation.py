@@ -412,6 +412,54 @@ class TestPreflightBlamesTheUrlNotTheKey:
         assert "project_id" in result.reason
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("provider_config", "expected_source"),
+        [
+            ({}, "configuration"),
+            (None, "configuration"),
+            ({"base_url": ""}, "base URL ('')"),
+        ],
+        ids=["missing-key", "none-config", "empty-value"],
+    )
+    async def test_azures_missing_base_url_names_what_is_missing(self, provider_config, expected_source):
+        """KBR-153 — Azure requires a ``base_url`` and pre-flight says which one.
+
+        Before this fix the adapter never read ``provider_config``, so a
+        missing URL surfaced as a DNS failure on the literal ``{resource}``
+        placeholder.  The adapter now raises; ``_unusable_url_result``'s
+        branches stay distinct — a profile that configured an empty value is
+        told about its (empty) base URL, one with no key at all is told about
+        its configuration — because naming a URL the user never set would be
+        a new misdirection in place of the old one.
+
+        Args:
+            provider_config: The profile's provider configuration under test.
+            expected_source: The source phrase the reason must carry.
+        """
+        from kitty.providers.azure import AzureOpenAIAdapter
+
+        result = await validate_api_key(AzureOpenAIAdapter(), "any-key", provider_config)
+
+        assert result.valid is False
+        assert expected_source in result.reason, result.reason
+        assert "base_url" in result.reason, result.reason
+
+    @pytest.mark.asyncio
+    async def test_azures_malformed_base_url_blames_the_url(self):
+        """A configured but non-``http(s)`` value quotes the value back.
+
+        Same guard as ``custom_openai``'s ``ftp://x`` case above: the raw URL
+        never reaches the agent, the redaction does.
+        """
+        from kitty.providers.azure import AzureOpenAIAdapter
+
+        result = await validate_api_key(AzureOpenAIAdapter(), "any-key", {"base_url": "ftp://x"})
+
+        assert result.valid is False
+        assert "base URL" in result.reason
+        assert ".." not in result.reason, result.reason
+
+    @pytest.mark.asyncio
     @patch("kitty.validation.aiohttp.ClientSession")
     async def test_a_dirty_key_still_reports_the_key(self, mock_session_cls):
         """The branch is narrowed, not removed: a real header fault still says so.

@@ -7,7 +7,7 @@ import uuid
 
 import questionary
 
-from kitty.credentials.store import CredentialStore
+from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import (
     _NAME_PATTERN,
     PROVIDER_LABELS,
@@ -129,7 +129,13 @@ def _find_reusable_auth_ref(store: ProfileStore, cred_store: CredentialStore, pr
     """
     for profile in store.load_all():
         if profile.provider == provider:
-            key = cred_store.get(profile.auth_ref)
+            # KBR-87: a corrupt stored value is not reusable — skip the profile
+            # and let the wizard re-prompt. Re-entry is the recovery, so the
+            # reuse scan must stay reachable when one profile's value is damaged.
+            try:
+                key = cred_store.get(profile.auth_ref)
+            except CredentialError:
+                continue
             if key is not None:
                 return profile.auth_ref
     return None
@@ -168,7 +174,10 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
     provider_config: dict = {}
     if provider_adapter.requires_custom_url:
         while True:
-            base_url = prompt_text("API base URL — the API root, e.g. https://api.deepseek.com/v1: ")
+            base_url = prompt_text(
+                "API base URL — the API root, e.g. https://api.deepseek.com/v1 "
+                "or https://my-resource.openai.azure.com: "
+            )
             if base_url and base_url.strip():
                 provider_config = {"base_url": base_url.strip()}
                 break

@@ -1,0 +1,119 @@
+{
+  "id": "tool_use_and_tool_result",
+  "description": "The paired turn: three messages = [user text, assistant tool_use, user tool_result]. The recorder's first scripted reply (Bash tool_use) provoked CC to execute `echo ok` and send the paired follow-up; the second reply was plain text so CC stopped. M7's complement — `orphan_tool_result` is provably absent because the tool_result has a matching tool_use. The assistant turn carries only the tool_use block (no thinking block); the trigger cell for P5e would meet it but P5e's row is per-adapter (opt-in) so the corpus deliberately stays silent on it (the trigger's per-adapter scope is prose, not a corpus claim). C5 verified: output_config + thinking co-occur.",
+  "origin": "captured",
+  "origin_note": "",
+  "captured_from": "claude-code/2.1.238",
+  "captured_at": "2026-09-14",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "beta=true",
+  "headers": [
+    [
+      "Accept",
+      "application/json"
+    ],
+    [
+      "Authorization",
+      "<redacted:credential_header>"
+    ],
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "User-Agent",
+      "claude-cli/2.1.238 (external, sdk-cli)"
+    ],
+    [
+      "X-Claude-Code-Session-Id",
+      "ce4d608b-5d36-4a55-8774-14aca5654b0a"
+    ],
+    [
+      "X-Stainless-Arch",
+      "x64"
+    ],
+    [
+      "X-Stainless-Lang",
+      "js"
+    ],
+    [
+      "X-Stainless-OS",
+      "Linux"
+    ],
+    [
+      "X-Stainless-Package-Version",
+      "0.112.1"
+    ],
+    [
+      "X-Stainless-Retry-Count",
+      "0"
+    ],
+    [
+      "X-Stainless-Runtime",
+      "node"
+    ],
+    [
+      "X-Stainless-Runtime-Version",
+      "v26.3.0"
+    ],
+    [
+      "X-Stainless-Timeout",
+      "600"
+    ],
+    [
+      "anthropic-beta",
+      "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24"
+    ],
+    [
+      "anthropic-dangerous-direct-browser-access",
+      "true"
+    ],
+    [
+      "anthropic-version",
+      "2023-06-01"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ],
+    [
+      "x-app",
+      "cli"
+    ],
+    [
+      "Connection",
+      "keep-alive"
+    ],
+    [
+      "Host",
+      "127.0.0.1:37083"
+    ],
+    [
+      "Accept-Encoding",
+      "gzip, deflate, br, zstd"
+    ],
+    [
+      "Content-Length",
+      "5273"
+    ]
+  ],
+  "body_file": "tool_use_and_tool_result.body",
+  "body_sha256": "f440fd7ca06ac96be7f55dad334b929c743941c11f1aa9fd9bae6a83bf3c77bc",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "adaptive_thinking_keys_present",
+    "multiple_system_blocks",
+    "output_config_present"
+  ],
+  "triggers_absent": [
+    "max_tokens_absent",
+    "non_streaming_max_tokens_over_4096",
+    "orphan_tool_result",
+    "responses_origin_path",
+    "tool_result_over_limit"
+  ]
+}

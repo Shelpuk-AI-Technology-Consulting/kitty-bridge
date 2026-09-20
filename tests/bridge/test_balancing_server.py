@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 import pytest
 from aioresponses import aioresponses
-from exemptions import ratchet
 
 from kitty.bridge.server import BridgeServer
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
@@ -627,6 +626,44 @@ class TestBalancingAllCustomTransport:
     produced 'Upstream Cloudflare block' errors from the aiohttp path.
     """
 
+    class NoStreamProvider(ProviderAdapter):
+        """A plain HTTP provider with no `stream_request` override.
+
+        Shared by the KBR-249 tests in this class: the skip test needs a
+        provider that cannot be driven by the custom-transport branch, and
+        the cap test needs the same skeleton plus a poisoned stream path.
+        """
+
+        def __init__(self):
+            self._provider_type = "nostream"
+
+        @property
+        def provider_type(self) -> str:
+            return self._provider_type
+
+        @property
+        def default_base_url(self) -> str:
+            return "https://api.nostream.example.com/v1"
+
+        def build_request(self, model: str, messages: list[dict], **kwargs) -> dict:
+            return {"model": model, "messages": messages, **kwargs}
+
+        def translate_to_upstream(self, cc_request: dict) -> dict:
+            return {
+                "model": cc_request["model"],
+                "messages": cc_request["messages"],
+                "stream": True,
+            }
+
+        def parse_response(self, response_data: dict) -> dict:
+            return response_data
+
+        def map_error(self, status_code: int, body: dict) -> Exception:
+            return Exception(f"Error {status_code}")
+
+        def make_request(self, cc_request: dict) -> dict:
+            return UPSTREAM_RESPONSE
+
     @pytest.mark.asyncio
     async def test_responses_stream_uses_custom_transport(self):
         """Responses API streaming should call provider.stream_request(), not aiohttp."""
@@ -816,37 +853,7 @@ class TestBalancingAllCustomTransport:
 
         from kitty.profiles.schema import Profile
 
-        class NoStreamProvider(ProviderAdapter):
-            def __init__(self):
-                self._provider_type = "nostream"
-
-            @property
-            def provider_type(self) -> str:
-                return self._provider_type
-
-            @property
-            def default_base_url(self) -> str:
-                return "https://api.nostream.example.com/v1"
-
-            def build_request(self, model: str, messages: list[dict], **kwargs) -> dict:
-                return {"model": model, "messages": messages, **kwargs}
-
-            def translate_to_upstream(self, cc_request: dict) -> dict:
-                return {
-                    "model": cc_request["model"],
-                    "messages": cc_request["messages"],
-                    "stream": True,
-                }
-
-            def parse_response(self, response_data: dict) -> dict:
-                return response_data
-
-            def map_error(self, status_code: int, body: dict) -> Exception:
-                return Exception(f"Error {status_code}")
-
-            def make_request(self, cc_request: dict) -> dict:
-                return UPSTREAM_RESPONSE
-
+        NoStreamProvider = self.NoStreamProvider
         stream_provider = BedrockAdapter()
 
         async def _fake_stream(req, write):
@@ -892,10 +899,10 @@ class TestBalancingAllCustomTransport:
         # Pin the weighted draw (random.choices): the non-stream backend is drawn first
         # and the streaming failover then selects the custom-transport one, so the
         # failover under test runs deterministically instead of by coin flip.
-        # KBR-249: while the plain-POST branch cannot drive a custom-transport backend,
-        # this path delivers no content and ends in the D4 502, so the client-visible
-        # status and content-type assertions are exempted against KBR-249; their rows
-        # must be deleted the day that ticket's dispatch fix lands.
+        # KBR-249: the dispatch fix (re-dispatch across transport classes on
+        # plain→custom failover) means the custom-transport branch drives the
+        # response; the previously exempted ratchets are gone with the fix and
+        # the exemption rows in tests/exemptions.py.
         draw = iter(chain([0], repeat(1)))
 
         def _deterministic_draw(self=server, *, require_streaming: bool = False):
@@ -913,16 +920,518 @@ class TestBalancingAllCustomTransport:
         try:
             with patch("kitty.bridge.server._EMPTY_FINAL_DELAYS", [0.0, 0.0]):
                 async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
-                    with ratchet("kbr-249-failover-plain-post-status"):
-                        assert resp.status == 200
+                    assert resp.status == 200
                     assert server._active_provider is stream_provider
-                    with ratchet("kbr-249-failover-plain-post-sse"):
-                        assert resp.content_type == "text/event-stream"
+                    assert resp.content_type == "text/event-stream"
                     _ = await resp.read()
         finally:
             await server.stop_async()
 
         assert server._active_provider is stream_provider
+        # The custom-transport backend's stream_request must have been invoked at
+        # least once on the failover path — that is the dispatch correctness oracle
+        # for KBR-249 (AC-1.2). Without the re-dispatch fix the plain-POST branch
+        # drives the provider over HTTP and the mock never fires.
+        assert stream_provider.stream_request.called, (
+            "Expected the stream-capable backend's stream_request() to have been "
+            "called via cross-mode re-dispatch (KBR-249); got 0 calls."
+        )
+
+    @pytest.mark.asyncio
+    async def test_streaming_re_dispatch_cap_surfaces_502(self):
+        """Hit the cross-class re-dispatch hop cap — KBR-249 §S7.
+
+        The pool alternates between a plain and a custom-transport provider,
+        every failover crosses class, the per-request hop cap
+        ``(2 * n_backends) + 1`` should fire and surface a JSON 502 with the
+        ``no usable backend`` wording. The path is otherwise unreachable
+        on the production 2-backend pool because cooldowns expire slowly;
+        here we patch `_mark_backend_unhealthy` to a no-op (so the pool
+        never drains) and shorten transport grace so each attempt fails
+        through quickly.
+        """
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        NoStreamProvider = self.NoStreamProvider
+
+        # Pool: one plain, one custom-transport. Marking is patched to a no-op
+        # so the pool never drains — the cap is the only stop.
+        plain = NoStreamProvider()
+        custom = BedrockAdapter()
+
+        async def _poison(req, write):
+            raise ConnectionResetError("poisoned")
+
+        custom.stream_request = AsyncMock(side_effect=_poison)
+
+        backends = [
+            (
+                plain,
+                "k0",
+                Profile(name="p", provider="openai", model="m", auth_ref=str(uuid.uuid4())),
+            ),
+            (
+                custom,
+                "k1",
+                Profile(name="c", provider="bedrock", model="m", auth_ref=str(uuid.uuid4())),
+            ),
+        ]
+        server = BridgeServer(
+            adapter=None,
+            provider=backends[0][0],
+            resolved_key="k0",
+            model="m",
+            backends=backends,
+        )
+
+        # First call (initial selection) returns the plain provider. After that,
+        # alternate: even calls return idx 1 (custom), odd calls return idx 0
+        # (plain). With `_mark_backend_unhealthy` patched to a no-op the
+        # pool never drains, and the require_streaming filter patched to
+        # False forces the custom branch's cross-mode fall-through to fire,
+        # so every iteration crosses class.
+        _call_count = [0]
+
+        def _alternate(self=server, **kwargs):
+            n = _call_count[0]
+            _call_count[0] += 1
+            idx = 0 if n == 0 else (1 if n % 2 == 1 else 0)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, {}, idx
+
+        server._get_next_backend = _alternate
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/messages"
+        request_body = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+
+        # Force the cross-mode fall-through in the custom branch by making
+        # `_any_healthy_backend(require_streaming=True)` always return False,
+        # while leaving the no-filter call (the plain branch's failover
+        # and the custom branch's cross-mode line) seeing healthy peers.
+        def _any_healthy(*, require_streaming=False):
+            return not require_streaming
+
+        try:
+            with (
+                patch("kitty.bridge.server._EMPTY_FINAL_DELAYS", []),
+                patch("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0,)),
+                patch.object(server, "_mark_backend_unhealthy", lambda *a, **k: None),
+                patch.object(server, "_any_healthy_backend", _any_healthy),
+            ):
+                async with aiohttp.ClientSession() as session, session.post(
+                    url, json=request_body
+                ) as resp:
+                    assert resp.status == 502, (
+                        f"cap-hit should surface 502, got {resp.status}"
+                    )
+                    body = await resp.json()
+                    msg = body.get("error", {}).get("message", "").lower()
+                    assert "usable backend" in msg, (
+                        f"cap-hit message should mention a usable-backend "
+                        f"exhaustion, got {msg!r}"
+                    )
+                    # Every pre-stream exhaustion 502 on this handler carries a
+                    # "reason" marker (D4, KBR-241); the cap-hit must sit in the
+                    # same family so clients can branch on it.
+                    assert body.get("error", {}).get("reason") == "cross_class_exhaustion", (
+                        f"cap-hit 502 should carry reason=cross_class_exhaustion, got {body!r}"
+                    )
+        finally:
+            await server.stop_async()
+
+    # KBR-254: the dispatch-loop fix shape must reach the three sibling
+    # streaming handlers (`_stream_responses`, `_stream_gemini`,
+    # `_stream_chat_completions`). Each positive test proves a plain-POST
+    # failover that lands on a custom-transport backend is re-dispatched into
+    # the custom branch (content oracle, not the KBR-249 vacuous one); each
+    # cap test proves the per-request hop cap surfaces the route's
+    # cross_class_exhaustion terminal event instead of looping.
+
+    async def _fake_hello_stream(self, req, write):
+        """Emit a Responses-API SSE carrying the text ``hello`` — the content oracle.
+
+        The Responses and Gemini custom-transport branches pipe provider
+        bytes through their own wire translators, which read Responses-SSE
+        — the shape this stub emits. The Chat Completions branch instead
+        parse-and-synthesises (``parse_stream_to_cc_response`` dispatch,
+        KBR-287) and needs :meth:`_fake_hello_cc_stream`.
+        """
+        await write(b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n')
+        await write(b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n')
+        await write(b"data: [DONE]\n\n")
+
+    async def _fake_hello_cc_stream(self, req, write):
+        """Emit a CC-SSE stream carrying the text ``hello`` — the content oracle.
+
+        Shaped as what ``BedrockAdapter.stream_request`` actually writes via
+        ``_translate_stream_event``/``_make_sse_chunk``: Chat Completions
+        SSE chunks, which ``BedrockAdapter.parse_stream_to_cc_response``
+        (KBR-287 review round 1) parses into the response the branch's
+        judge-first hold judges.
+        """
+        chunk = {
+            "id": "resp_test",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "",
+            "choices": [],
+        }
+        for delta, finish in (({"role": "assistant"}, None), ({"content": "hello"}, None), ({}, "stop")):
+            chunk["choices"] = [{"index": 0, "delta": delta, "finish_reason": finish}]
+            await write(f"data: {json.dumps(chunk)}\n\n".encode())
+        await write(b"data: [DONE]\n\n")
+
+    def _sibling_pool(self, stream_side_effect):
+        """Build a two-backend pool: plain NoStreamProvider first, custom BedrockAdapter second.
+
+        Args:
+            stream_side_effect: An async callable ``(req, write)`` installed as
+                the custom backend's ``stream_request``.
+
+        Returns:
+            ``(backends, server, stream_provider)`` where ``server`` is not yet
+            started — the caller starts and stops it.
+        """
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        NoStreamProvider = self.NoStreamProvider
+        stream_provider = BedrockAdapter()
+        stream_provider.stream_request = AsyncMock(side_effect=stream_side_effect)
+        backends = [
+            (
+                NoStreamProvider(),
+                "nostream-key",
+                Profile(
+                    name="nostream",
+                    provider="openai",
+                    model="nostream-model",
+                    auth_ref=str(uuid.uuid4()),
+                ),
+            ),
+            (
+                stream_provider,
+                "stream-key",
+                Profile(
+                    name="stream",
+                    provider="bedrock",
+                    model="stream-model",
+                    auth_ref=str(uuid.uuid4()),
+                ),
+            ),
+        ]
+        server = BridgeServer(
+            adapter=None,
+            provider=backends[0][0],
+            resolved_key=backends[0][1],
+            model="nostream-model",
+            backends=backends,
+        )
+        return backends, server, stream_provider
+
+    @pytest.mark.asyncio
+    async def test_responses_stream_cross_class_dispatch(self):
+        """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/responses)."""
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_stream)
+
+        # Pin the weighted draw: the plain backend is drawn first and the
+        # non-2xx failover selects the custom-transport one (see KBR-249's
+        # chain([0], repeat(1)) pattern).
+        draw = iter(chain([0], repeat(1)))
+
+        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+            idx = next(draw)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, profile.provider_config or {}, idx
+
+        server._get_next_backend = _deterministic_draw
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/responses"
+        request_body = {
+            "model": "test-model",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "stream": True,
+        }
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api.nostream.example.com/v1/chat/completions", status=500, body="boom")
+                async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                    assert resp.status == 200
+                    body = await resp.read()
+        finally:
+            await server.stop_async()
+
+        assert server._active_provider is stream_provider
+        # The dispatch correctness oracle: without re-dispatch the plain-POST
+        # branch drives the custom provider over HTTP and the mock never fires.
+        assert stream_provider.stream_request.called, (
+            "Expected the stream-capable backend's stream_request() to have been "
+            "called via cross-mode re-dispatch (KBR-254); got 0 calls."
+        )
+        # Content oracle (the KBR-249 vacuous-oracle trap): the mocked payload's
+        # text must reach the client, not just a 200 with the right shape.
+        assert b"hello" in body, f"Expected mocked 'hello' payload in body, got {body[:500]!r}"
+
+    @pytest.mark.asyncio
+    async def test_gemini_stream_cross_class_dispatch(self):
+        """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/gemini)."""
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_stream)
+        draw = iter(chain([0], repeat(1)))
+
+        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+            idx = next(draw)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, profile.provider_config or {}, idx
+
+        server._get_next_backend = _deterministic_draw
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent"
+        request_body = {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api.nostream.example.com/v1/chat/completions", status=500, body="boom")
+                async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                    assert resp.status == 200
+                    body = await resp.read()
+        finally:
+            await server.stop_async()
+
+        assert server._active_provider is stream_provider
+        assert stream_provider.stream_request.called, (
+            "Expected the stream-capable backend's stream_request() to have been "
+            "called via cross-mode re-dispatch (KBR-254); got 0 calls."
+        )
+        assert b"hello" in body, f"Expected mocked 'hello' payload in body, got {body[:500]!r}"
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_stream_cross_class_dispatch(self):
+        """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/chat/completions)."""
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_cc_stream)
+        draw = iter(chain([0], repeat(1)))
+
+        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+            idx = next(draw)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, profile.provider_config or {}, idx
+
+        server._get_next_backend = _deterministic_draw
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        request_body = {"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api.nostream.example.com/v1/chat/completions", status=500, body="boom")
+                async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
+                    assert resp.status == 200
+                    body = await resp.read()
+        finally:
+            await server.stop_async()
+
+        assert server._active_provider is stream_provider
+        assert stream_provider.stream_request.called, (
+            "Expected the stream-capable backend's stream_request() to have been "
+            "called via cross-mode re-dispatch (KBR-254); got 0 calls."
+        )
+        assert b"hello" in body, f"Expected mocked 'hello' payload in body, got {body[:500]!r}"
+
+    async def _run_cap_hit(
+        self,
+        route_path: str,
+        request_body: dict,
+        discriminator: str,
+        *,
+        absent_discriminators: tuple[str, ...] = (),
+        required_discriminators: tuple[str, ...] = (),
+    ):
+        """Drive one request until the cross-class hop cap fires; return the body.
+
+        The pool alternates plain / custom with the custom backend's stream
+        poisoned and health-marking a no-op, so every failover crosses class
+        (the KBR-249 cap-test mechanism). The plain backend's upstream URL is
+        intercepted with a 500 so each plain-POST attempt fails through its
+        non-2xx failover quickly. Unlike `/v1/messages` — which defers
+        ``sr.prepare()`` and can answer a cap-hit with a bare JSON 502 — the
+        three sibling routes prepare their SSE response eagerly, so the cap
+        surfaces as the route's terminal in-stream event instead.
+
+        Args:
+            route_path: The inbound route, e.g. ``/v1/responses``.
+            request_body: The JSON body for the inbound request.
+            discriminator: The route's D4-family error field name
+                (``code`` / ``reason`` / ``type``) — asserted set to
+                ``"cross_class_exhaustion"`` in the body.
+            absent_discriminators: Field names that must NOT appear with
+                ``"cross_class_exhaustion"`` in the body. Used to pin the
+                per-route asymmetry §5.3 S8 promises (e.g. Chat
+                Completions carries ``type`` alone, never ``reason``).
+            required_discriminators: Field names that MUST appear with
+                ``"cross_class_exhaustion"`` in the body, alongside the
+                route's D4 discriminator. Used to pin the additional
+                fields §5.3 S8 names — Responses carries ``reason`` (the
+                parent KBR-241 marker) in addition to its D4 ``code``.
+
+        Returns:
+            ``(status, body_bytes)`` of the client's response.
+        """
+
+        async def _poison(req, write):
+            raise ConnectionResetError("poisoned")
+
+        backends, server, _stream_provider = self._sibling_pool(_poison)
+        _call_count = [0]
+
+        def _alternate(self=server, **kwargs):
+            n = _call_count[0]
+            _call_count[0] += 1
+            idx = 0 if n == 0 else (1 if n % 2 == 1 else 0)
+            provider, key, profile = self._backends[idx]
+            return provider, key, profile.model, {}, idx
+
+        server._get_next_backend = _alternate
+
+        def _any_healthy(*, require_streaming=False):
+            return not require_streaming
+
+        port = await server.start_async()
+        url = f"http://127.0.0.1:{port}{route_path}"
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    "https://api.nostream.example.com/v1/chat/completions",
+                    status=500,
+                    body="boom",
+                    repeat=True,
+                )
+                with (
+                    patch("kitty.bridge.server._EMPTY_FINAL_DELAYS", []),
+                    patch("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0,)),
+                    patch.object(server, "_mark_backend_unhealthy", lambda *a, **k: None),
+                    patch.object(server, "_any_healthy_backend", _any_healthy),
+                ):
+                    async with aiohttp.ClientSession() as session, session.post(
+                        url, json=request_body
+                    ) as resp:
+                        status = resp.status
+                        body = await resp.read()
+        finally:
+            await server.stop_async()
+
+        text = body.decode("utf-8", errors="replace")
+        # Parse each SSE event and find the terminal cap-hit error. The route's
+        # D4 discriminator must name `cross_class_exhaustion` exactly — not
+        # merely appear as a value somewhere in the body (the AC-2 oracle).
+        # Responses puts `code`/`reason`/`message` at the top level of the
+        # error event; Gemini and Chat Completions nest them under "error".
+        terminal = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                continue
+            try:
+                payload = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else payload
+            if discriminator in error:
+                assert error[discriminator] == "cross_class_exhaustion", (
+                    f"cap-hit event should carry {discriminator}="
+                    f"cross_class_exhaustion, got {payload!r}"
+                )
+                terminal = payload
+        assert terminal is not None, (
+            f"cap-hit body should carry an event with {discriminator}="
+            f"cross_class_exhaustion, got {text[:500]!r}"
+        )
+        # Fields a route must NOT carry. §5.3 S8 gives each route exactly one
+        # D4 discriminator for the cap-hit (plus `reason` on Responses as the
+        # parent KBR-241 marker): Chat Completions carries `type` alone — if a
+        # regression adds `reason` there, clients branching on `reason` would
+        # see a shape the design doc does not define.
+        absent_text = text
+        for absent in absent_discriminators:
+            assert f'"{absent}": "cross_class_exhaustion"' not in absent_text, (
+                f"cap-hit event must NOT carry {absent}="
+                f"cross_class_exhaustion, got {text[:500]!r}"
+            )
+        # Fields a route must carry alongside the route's D4 discriminator.
+        # Responses carries `reason` (the parent KBR-241 marker) in addition
+        # to its D4 `code`; the §5.3 S8 design names this explicitly. A
+        # regression that drops `reason` from the Responses payload would
+        # leave clients branching on the KBR-241 family unable to tell the
+        # cap-hit apart from an upstream_error.
+        for required in required_discriminators:
+            assert f'"{required}": "cross_class_exhaustion"' in text, (
+                f"cap-hit event must carry {required}="
+                f"cross_class_exhaustion, got {text[:500]!r}"
+            )
+        # The full standard wording, not just a fragment.
+        assert "could not land on a usable backend" in text, (
+            f"cap-hit message should carry the standard wording, got {text[:500]!r}"
+        )
+        return status, body
+
+    @pytest.mark.asyncio
+    async def test_responses_stream_re_dispatch_cap_surfaces_error_event(self):
+        """Hop-cap hit on /v1/responses surfaces the route's D4 error event (KBR-254).
+
+        Responses carries BOTH its D4 discriminator (`code`) and the parent
+        KBR-241 marker (`reason`) on every cap-hit, per §5.3 S8. The
+        `required_discriminators=("reason",)` below pins the second one so
+        a regression that drops `reason` from the Responses payload fails
+        this test.
+        """
+        status, _body = await self._run_cap_hit(
+            "/v1/responses",
+            {"model": "test-model", "input": [{"type": "message", "role": "user", "content": "hi"}], "stream": True},
+            discriminator="code",
+            required_discriminators=("reason",),
+        )
+        # sr.prepare() is eager on this route, so the cap surfaces in-stream
+        # (200 + the error event) rather than as the Messages route's bare 502.
+        assert status == 200, f"cap-hit should surface as 200 SSE (committed by prepare), got {status}"
+
+    @pytest.mark.asyncio
+    async def test_gemini_stream_re_dispatch_cap_surfaces_error_event(self):
+        """Hop-cap hit on /v1beta/...streamGenerateContent surfaces the route's error event (KBR-254)."""
+        status, _body = await self._run_cap_hit(
+            "/v1beta/models/test-model:streamGenerateContent",
+            {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+            discriminator="reason",
+        )
+        assert status == 200
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_stream_re_dispatch_cap_surfaces_error_event(self):
+        """Hop-cap hit on /v1/chat/completions surfaces the route's error event (KBR-254).
+
+        Chat Completions's D4 discriminator is `type` alone — §5.3 S8 says it
+        must NOT carry `reason`. The `absent_discriminators=("reason",)`
+        below pins that absence so a regression that adds `reason` to the CC
+        cap-hit fails this test.
+        """
+        status, _body = await self._run_cap_hit(
+            "/v1/chat/completions",
+            {"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            discriminator="type",
+            absent_discriminators=("reason",),
+        )
+        assert status == 200
 
 
 class TestCustomTransportCloudflareClassification:
@@ -1245,7 +1754,7 @@ class TestCrossModeFailover:
     @pytest.mark.asyncio
     async def test_messages_stream_cross_mode_failover(self):
         """Messages API: custom transport 400 → standard backend succeeds."""
-        server, _ = self._make_cross_mode_server()
+        server, backends = self._make_cross_mode_server()
         self._patch_selection_order(server)
         port = await server.start_async()
         url = f"http://127.0.0.1:{port}/v1/messages"
@@ -1269,8 +1778,12 @@ class TestCrossModeFailover:
             finally:
                 await server.stop_async()
 
-        # Verify cross-mode failover: failing backend was used first (failure_count increased).
+        # Verify cross-mode failover: failing backend was used first (failure_count increased)
+        # AND the standard (plain) backend served the response. The latter is the
+        # dedicated oracle for the symmetric custom→plain fall-through at
+        # `src/kitty/bridge/server.py:4254-4259` (KBR-249 §S7).
         assert server._backend_health[0]["failure_count"] >= 1
+        assert server._active_provider is backends[1][0]
 
     @pytest.mark.asyncio
     async def test_responses_stream_cross_mode_failover(self):

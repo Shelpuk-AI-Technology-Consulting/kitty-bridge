@@ -400,6 +400,18 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_internal_key_completeness.py",
             "tests/test_egress_coverage.py",
             "tests/test_wire_shape_honesty.py",
+            # KBR-80 (T-G4). The wire-form sibling of the hook-level guard
+            # above: §6.2.3's "Wire-shape honesty" row observed at the §3.2.3
+            # serialization boundary rather than at `translate_to_upstream`.
+            # Captures the body handed to each custom-transport client and
+            # pairs the classification against the declaration; also covers
+            # `provider_config`-constructed adapters and native-passthrough
+            # requests. Closed a stale `CHAT_COMPLETIONS` declaration on
+            # `openai_subscription` (KBR-7 atomic pattern; all four
+            # server.py readers of the declaration are unreachable for
+            # custom transports — the full analysis lives in the
+            # adapter's `upstream_wire_shape` docstring).
+            "tests/test_wire_shape_honesty_wire.py",
             # KBR-126. Both are docs-vs-code guards in the §6.2.3 sense: one
             # holds the OpenCode Go routing table against the provider's
             # published endpoint table, the other holds every adapter's
@@ -440,8 +452,8 @@ class TestTheWholeSuiteIsCoherent:
             # from this one and by someone else entirely.
             "tests/test_ipaddress_contract.py",
             # KBR-161. Two dependency-and-agreement guards: what curl_cffi
-            # promises the OpenAI subscription legs (§6.2.4, an unbounded
-            # pin), and that both legs present one identity from one source.
+            # promises the OpenAI subscription legs (§6.2.4, a pin bounded by
+            # KBR-283), and that both legs present one identity from one source.
             "tests/test_curl_cffi_transport_contract.py",
             "tests/test_oauth_leg_identity.py",
             # T-W6 (KBR-29). The corpus's *lint* reads three real artifacts --
@@ -457,6 +469,113 @@ class TestTheWholeSuiteIsCoherent:
             # module-level `pytestmark` cannot be overridden per test, and the
             # behavioural cases for the same helper are L1.
             "tests/test_cc_ingress_normalises_stop.py",
+            # KBR-76 (T-G1). A §6.2.3 docs-vs-code guard with four arms: the
+            # README's endpoint table, `X-Kitty-*` attribution-header table,
+            # `KITTY_*` env-var register and logging-flag table, each held
+            # against the code artefact that implements it. All four gate
+            # normally; the KBR-9 endpoint-table exemption was withdrawn
+            # together with the README correction on 2026-09-17.
+            "tests/test_readme_table_guards.py",
+            # KBR-88 (T-H1). A §6.2.3 source-vs-source contract: the mutmut
+            # scope registry (the machine-readable form of TEST_SUITE.md
+            # section 6.1's mutation-target table) must agree with the live
+            # source. Two artifacts edited by hand, held against each other.
+            "tests/test_mutmut_scope.py",
+            # KBR-88 (T-H1). A §6.2.3 contract against mutmut's per-file
+            # `.meta` JSON shape and the aggregator's bucket routing --
+            # the script is mutmut-coupled (its exit-code mapping comes
+            # from the installed mutmut), and the bucket routing is the
+            # other side of the registry agreement the scope guard tests.
+            "tests/test_aggregate_mutation_baseline.py",
+            # KBR-152. A §6.2.3 contract against the live branch-rules JSON
+            # GitHub defines and edits: the verifier's pure decision is
+            # pinned against inline snapshots of that format, so a rule
+            # shape nobody recognised reads as *not* enforced rather than
+            # as blessed.
+            "tests/test_verify_required_status_checks.py",
+            # KBR-200 (CB-3). §6.2.3 serialization-boundary guard: the
+            # native-passthrough route must keep the agent's cache
+            # breakpoints intact. Drives the bridge branch end to end and
+            # observes ``_upstream_body_for``; pins the M9 fallback's
+            # breakpoint loss as today's behaviour. New l2 file added by
+            # CB-3.
+            "tests/bridge/test_native_passthrough_cache_breaks.py",
+            # KBR-256. A §6.2.3 structural guard: it holds the four streaming
+            # handlers' recovery skeletons (register row M6's site list) against
+            # the AST of `src/kitty/bridge/server.py` — the same read-two-real-
+            # artifacts shape as `test_register_agreement.py`. Two of the four
+            # copies have no behavioural L3 case yet (Responses/Gemini wait on
+            # the curl_cffi/botocore recorders), so this AST pin is their only
+            # automated drift enforcement.
+            "tests/bridge/test_kbr256_recovery_structure.py",
+            # KBR-73 (T-F4). A §6.2.3 structural guard: holds the four
+            # ``Upstream POST`` URL-dump sites and the two header-dump sites
+            # against the source text of `src/kitty/bridge/server.py` so a
+            # future handler that logs a credential-bearing URL or header
+            # dict without the redaction helper fails in CI.
+            "tests/test_egress_log_redaction.py",
+            # KBR-64 (T-G11). A §6.2.4 dependency behaviour contract, the
+            # botocore twin of `test_curl_cffi_transport_contract.py`: it
+            # asserts what botocore does with `Config(proxies=)` against
+            # the ambient proxy environment -- an artifact upgraded
+            # separately and by someone else entirely.
+            "tests/harness/test_botocore_transport_contract.py",
+            # KBR-84 (T-G8). A §6.2.4 dependency behaviour contract, the
+            # aiohttp twin of the curl_cffi and botocore files: it pins that
+            # a session-level `proxy=`/`proxy_auth=` is honoured and that a
+            # per-request `proxy=None` cannot escape it -- the claim
+            # `_session_for`'s containment design rests on.
+            "tests/test_aiohttp_transport_contract.py",
+            # KBR-87 (T-G12). A §6.2.4 dependency behaviour contract, the
+            # keyring sibling of the curl_cffi/botocore/aiohttp files: it pins
+            # the resolution mechanics -- the public API delegates to the
+            # resolved backend; `PYTHON_KEYRING_BACKEND` selects via
+            # `keyring.core.load_env()`; resolution always lands on a
+            # `keyring.backends.*` class; the per-platform native class where
+            # the native service is reachable; the
+            # `PasswordDeleteError ⊂ KeyringError` errors surface.
+            # Deliberately does not assert an unconditional native class on
+            # Linux (D-Bus box → chainer, not fail.Keyring) -- the
+            # no-stable-neighbour rule from the ipaddress contract's row.
+            "tests/test_keyring_backend_contract.py",
+            # KBR-278. The step-graph validator's contract, exercised
+            # against constructed fixture step files rather than the
+            # committed tree -- a committed-tree check would couple CI to
+            # sibling PRs' step files (the REQUIREMENTS.md D2 in
+            # `.requirements/20260917T185215Z_step_index_validator/`).
+            # Same config-like-artifact posture as
+            # `tests/test_aggregate_mutation_baseline.py` above.
+            "tests/test_step_index.py",
+            # KBR-280. A §6.2.3 structural guard over the suite's own tree: no
+            # test module may import the `tests` package, which bare `pytest`
+            # (the fast-gate invocation) cannot resolve but `python -m pytest`
+            # can -- the trap KBR-84 paid a full CI round for.
+            "tests/test_no_tests_package_imports.py",
+            # KBR-82 (T-G6). The OpenAPI 3.1 document + schemathesis
+            # conformance, the per-protocol registration matrix, the
+            # per-route ingress guards, and the four-measured-bodies
+            # regression each read two artifacts (the published schema
+            # vs. the live source) and gate normally.
+            "tests/test_openapi_schema.py",
+            "tests/test_openapi_conformance.py",
+            "tests/test_route_registration_matrix.py",
+            "tests/test_responses_normalizer.py",
+            "tests/test_route_preflight.py",
+            # KBR-83 (T-G7). A §6.2.2 contract guard: the downstream SSE
+            # grammar state machine driven over a real BridgeFixture — every
+            # stream the bridge writes must classify as one of the five
+            # documented outcomes (complete_sentence / error_terminal /
+            # json_error / truncated / malformed). The grammar module itself
+            # stays at the l1 default; only this bridge-driven half claims l2.
+            "tests/bridge/test_sse_grammar.py",
+            # KBR-286. A §6.2.3 docs-vs-git guard: the project `CLAUDE.md` is
+            # the instruction every Claude Code session acts on, yet nothing
+            # imports it, so its presence, tracking, ignore-status, and the
+            # four mandated review-resolution behaviours would otherwise
+            # drift silently. The same shape as the docs-vs-code guards
+            # above, with two read artifacts (`CLAUDE.md` and git's view of
+            # it) held against each other in both directions.
+            "tests/test_project_claude_md_review_discipline.py",
         }
 
         actual = {

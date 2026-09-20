@@ -473,11 +473,9 @@ class TestTheUpstreamBodyOnTheCustomTransport:
 class TestTheInputFamilyNeverReturnsAServerError:
     """§6.2.1's ``not_a_server_error``, for the shapes this change claims.
 
-    Scoped deliberately: ``tools``, a ``reasoning`` item's ``summary`` and a
-    ``function_call_output`` without ``call_id`` still reach the catch-all.
-    Those are filed separately and belong to §6.2.1's ``schemathesis`` job,
-    which fuzzes the published schema instead of guessing which shapes a human
-    will try.
+    The ``tools`` / ``summary`` / ``call_id`` shapes that used to reach the
+    catch-all alongside these are hardened separately (KBR-159 / KBR-82) and
+    pinned in ``tests/test_responses_normalizer.py``.
     """
 
     @pytest.mark.parametrize(

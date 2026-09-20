@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from kitty.bridge.server import BridgeServer
-from kitty.credentials.store import CredentialNotFoundError, CredentialStore
+from kitty.credentials.store import CredentialError, CredentialNotFoundError, CredentialStore
 from kitty.egress import get_egress
 from kitty.egress_guard import egress_block_reason
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
@@ -40,9 +40,18 @@ _atexit_registered = False
 def _atexit_cleanup() -> None:
     """Undo the agent config prepare_launch set up (delete or restore).
 
-    Registered via atexit so cleanup runs even on unhandled exceptions,
-    sys.exit(), or SIGTERM (which triggers normal Python shutdown).
-    SIGKILL cannot be caught — use `kitty cleanup` for that.
+    Registered via atexit so cleanup runs even when the normal ``finally``
+    block is never entered: interpreter shutdown after a return, an unhandled
+    exception, or ``sys.exit()``. SIGTERM is **not** one of those paths —
+    ``launch_async`` installs ``signal.signal(SIGTERM, _forward_signal)``
+    while the child runs, so SIGTERM is forwarded to the child and kitty
+    keeps running; the ``finally`` block at ``launch_async`` is the path
+    that runs when the child dies from the forwarded signal. SIGKILL cannot
+    be caught — use ``kitty cleanup`` for that. A SIGTERM landing in the
+    pre-handler window between the ``_register_atexit_cleanup`` call and
+    the ``signal.signal(SIGTERM, _forward_signal)`` install (both inside
+    ``launch_async``) kills kitty with no cleanup at all; that is a
+    known, accepted window, and ``kitty cleanup`` is the recovery.
     """
     for adapter, original, settings_path in _atexit_cleanup_state:
         try:
@@ -154,7 +163,7 @@ async def launch_async(
     # 1. Resolve credential
     try:
         resolved_key = cred_store.resolve(profile)
-    except CredentialNotFoundError as exc:
+    except (CredentialNotFoundError, CredentialError) as exc:
         logger.error("Credential resolution failed: %s", exc)
         print(f"Error: {exc}", file=sys.stderr)
         return 1

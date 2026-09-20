@@ -15,9 +15,12 @@ diff alone.
 `README.md` is ~33 KB and is read whole, deliberately.
 
 ⚠️ **What is and is not in the checkout, as a fact rather than a preference.**
-`.gitignore` excludes `/.requirements/`, `/CLAUDE.md` and `/.references/`, so
-none of them is present: do not look for a per-task `REQUIREMENTS.md`, do not
-report a missing one as a finding, and do not claim to have read one.
+`.gitignore` excludes `/.requirements/` and `/.references/`, so neither is
+present: do not look for a per-task `REQUIREMENTS.md`, do not report a missing
+one as a finding, and do not claim to have read one. `CLAUDE.md` left
+`.gitignore` with KBR-286 and is now tracked, so it is in the checkout — it
+carries agent workflow instructions, not reviewer specifications, and the
+docs rule selects it only so a change to its content triggers a review.
 
 `/.system_design/` **is tracked** and is in the checkout. When the change touches
 an area a design document covers, read that document and judge the change against
@@ -63,6 +66,15 @@ anything. The complete discussion, with nothing omitted, is written to
 `conversation-full.md` in your working directory — and when the span drops
 something it also prints an **index** of what went, one line per contribution
 with its kind, author, file and timestamp.
+
+**The span opens with a `# Snapshot` header: the instant the fetch began, and
+what it holds.** That instant is a strict lower bound on what this review can
+have seen — anything posted at or after it, **including replies written while
+this review runs**, is not in the span, not in the complete copy, and not
+anywhere you can read. **Never assert absence about the pull request**: "no
+author prose", "no answer", "nothing stands" are claims about the snapshot,
+and they must be written that way — as of the snapshot at its timestamp —
+with anything later treated as unknown, not silence.
 
 Use them together rather than reading the file whole: it runs to 160 kB on a
 long pull request, which is more than the specification you are already asked to

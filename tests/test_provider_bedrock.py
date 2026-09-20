@@ -1,7 +1,11 @@
 """Tests for providers/bedrock.py — BedrockAdapter."""
 
+import json
 from unittest.mock import MagicMock, patch
 
+import botocore.exceptions
+import botocore.session
+import botocore.validate
 import pytest
 
 from kitty.providers.base import ProviderError
@@ -300,9 +304,94 @@ class TestBedrockTranslateToUpstream:
         result = self.adapter.translate_to_upstream(cc)
         assistant_msg = result["messages"][1]
         assert assistant_msg["content"][0] == {
-            "reasoningContent": {"text": "I should check the weather tool first."},
+            "reasoningContent": {
+                "reasoningText": {"text": "I should check the weather tool first."}
+            },
         }
         assert "toolUse" in assistant_msg["content"][1]
+
+    def test_assistant_reasoning_block_passes_bedrock_schema_validation(self):
+        """Both reasoningContent emission shapes survive the live botocore schema.
+
+        KBR-264. The oracle is ``botocore.validate.validate_parameters`` against
+        the installed ``bedrock-runtime`` ``Converse.input_shape`` — the same
+        published service model the T-A5 reader (KBR-37) checks the union
+        members against. The negative control pins that the pre-KBR-264
+        spelling is rejected by the same oracle, so a regression to the old
+        shape fails here instead of at AWS.
+        """
+        input_shape = (
+            botocore.session.Session()
+            .get_service_model("bedrock-runtime")
+            .operation_model("Converse")
+            .input_shape
+        )
+
+        # Populated branch — an upstream ``reasoning_content`` string.
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "I should check the weather tool first.",
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+        converse_request = self.adapter.translate_to_upstream(cc)
+        botocore.validate.validate_parameters(converse_request, input_shape)
+
+        # Empty branch — ``_thinking_enabled`` injects an empty reasoningContent
+        # for the first assistant turn. This branch ships on every thinking
+        # turn whose earlier tool-call turn lacks ``reasoning_content``, so it
+        # is validated against the schema too.
+        cc_empty = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "London"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_abc", "content": "15°C"},
+            ],
+            "stream": False,
+            "_thinking_enabled": True,
+        }
+        empty_branch_request = self.adapter.translate_to_upstream(cc_empty)
+        botocore.validate.validate_parameters(empty_branch_request, input_shape)
+
+        # Negative control: the pre-KBR-264 spelling is rejected by the same
+        # oracle — populated and empty — so a partial regression (one branch
+        # fixed, one left behind) fails with a legible ``ParamValidationError``.
+        for old_block in (
+            {"reasoningContent": {"text": "I should check the weather tool first."}},
+            {"reasoningContent": {"text": ""}},
+        ):
+            with pytest.raises(botocore.exceptions.ParamValidationError):
+                botocore.validate.validate_parameters(
+                    {
+                        "modelId": "us.anthropic.claude-sonnet-4-20250514",
+                        "messages": [{"role": "assistant", "content": [old_block]}],
+                    },
+                    input_shape,
+                )
 
     def test_tool_result_becomes_tool_result_block(self):
         cc = {
@@ -325,6 +414,259 @@ class TestBedrockTranslateToUpstream:
         }
         result = self.adapter.translate_to_upstream(cc)
         assert result["modelId"] == "us.anthropic.claude-sonnet-4-20250514"
+
+
+# ── Bedrock Converse body builder (KBR-89 / T-H2) ─────────────────────────
+
+
+class TestBedrockBody:
+    """L1 — ``BedrockAdapter._bedrock_body`` is the pure payload builder (P18).
+
+    Register row P18 ("Remove ``modelId`` and ``stream`` from the Converse
+    payload") lives inside ``make_request`` / ``stream_request`` today, so
+    ``mutmut`` cannot reach it from the L1 selection. ``_bedrock_body``
+    extracts the body's translation plus the ``modelId`` / ``stream`` pops
+    into a pure function; this class is what makes P18 a mutation-testable
+    surface. The wire-capture characterisation of P18 itself is shipped at
+    L3 by T-B3 (`tests/harness/test_botocore.py`).
+    """
+
+    def setup_method(self):
+        self.adapter = BedrockAdapter()
+
+    # ── R1: pure builder ──
+
+    def test_returns_model_id_and_body(self) -> None:
+        """R1 / AC1 — the return is a ``(model_id, body)`` tuple."""
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        result = self.adapter._bedrock_body(cc)
+        # isinstance check first to keep the failure message legible.
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        model_id, body = result
+        assert model_id == "us.anthropic.claude-sonnet-4-20250514"
+        assert isinstance(body, dict)
+
+    def test_body_lacks_modelid_and_stream(self) -> None:
+        """R5 / AC8 (partial) — P18's ``modelId`` pop is observable on the body.
+
+        A mutation that drops ``bedrock_request.pop("modelId")`` (or rewrites
+        it as something other than a pop) leaves ``modelId`` in the body and
+        this test fails.
+
+        The ``stream`` assertion is a load-bearing guard for a different test
+        — see :meth:`test_pops_stream_even_when_translate_emits_it`. It is
+        kept here for the **defensive** case: today
+        :meth:`translate_to_upstream` never emits ``stream`` (the body it
+        builds cannot contain the key regardless of whether the pop runs), so
+        this assertion is vacuously true against current code. The sibling
+        test proves the pop is real by injecting the key.
+        """
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        _, body = self.adapter._bedrock_body(cc)
+        assert "modelId" not in body
+        # Vacuously true today (see docstring); covered by the sibling test.
+        assert "stream" not in body
+
+    def test_pops_stream_even_when_translate_emits_it(self) -> None:
+        """R5 / AC8 (full) — the ``stream`` pop runs when the body carries it.
+
+        Today :meth:`translate_to_upstream` does not emit ``stream``, so the
+        pop is defensive against a future translator change. To prove the pop
+        is real and not dead code, this test injects ``stream`` into the body
+        before :meth:`_bedrock_body` sees it and asserts the pop strips it.
+        """
+        # Build an oversized body that includes ``stream`` — translate never
+        # produces this shape today, so the pop's only observable effect comes
+        # through this injected body.
+        injected = {
+            "messages": [{"role": "user", "content": [{"text": "Hello"}]}],
+            "inferenceConfig": {"maxTokens": 4096},
+            "stream": True,
+            "modelId": "sentinel-model-x",
+        }
+        with patch.object(self.adapter, "translate_to_upstream", return_value=injected):
+            _model_id, body = self.adapter._bedrock_body(
+                {
+                    "model": "irrelevant",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                }
+            )
+        assert "modelId" not in body, "the load-bearing modelId pop ran"
+        assert "stream" not in body, "the defensive stream pop ran against an injected body"
+
+    def test_does_not_build_a_boto3_client(self) -> None:
+        """R1 / AC2 — the builder stays pure (no IO, no boto3)."""
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        with patch.object(
+            self.adapter,
+            "_get_boto3_client",
+            side_effect=AssertionError(
+                "_bedrock_body must stay pure; it must not construct a boto3 client"
+            ),
+        ):
+            self.adapter._bedrock_body(cc)  # call must not raise
+
+    # ── R2: body matches translate_to_upstream minus modelId / stream ──
+
+    @pytest.mark.parametrize(
+        "cc",
+        [
+            pytest.param(
+                {
+                    "model": "anthropic.claude-sonnet-4-20250514",
+                    "messages": [
+                        {"role": "system", "content": "You are helpful."},
+                        {"role": "user", "content": "Hello"},
+                    ],
+                    "max_tokens": 256,
+                    "temperature": 0.5,
+                },
+                id="system-and-user",
+            ),
+            pytest.param(
+                {
+                    "model": "anthropic.claude-sonnet-4-20250514",
+                    "messages": [
+                        {"role": "user", "content": "What's the weather?"},
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": "I should check the weather tool first.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_abc",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"city": "London"}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_abc",
+                            "content": "15°C",
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Get weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                },
+                            },
+                        }
+                    ],
+                },
+                id="tools-and-reasoning",
+            ),
+            pytest.param(
+                {
+                    "model": "us.anthropic.claude-sonnet-4-20250514",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": False,
+                },
+                id="minimal",
+            ),
+        ],
+    )
+    def test_body_matches_translate_to_upstream_minus_p18_keys(self, cc: dict) -> None:
+        """R2 / AC3 — body keys equal ``translate_to_upstream(cc)`` minus
+        ``modelId`` and ``stream``. The hook API is unchanged; the builder
+        is just the same body with P18 applied.
+        """
+        translated = self.adapter.translate_to_upstream(cc)
+        model_id, body = self.adapter._bedrock_body(cc)
+
+        translated_minus_p18 = {k: v for k, v in translated.items() if k not in ("modelId", "stream")}
+        assert body == translated_minus_p18
+        assert model_id == translated["modelId"]
+
+    # ── R3: transports consume the builder's output ──
+
+    @pytest.mark.asyncio
+    async def test_make_request_sends_builder_model_id_to_converse(self) -> None:
+        """R3 / AC4 — ``converse`` receives ``modelId=...`` from the builder."""
+        adapter = self.adapter
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        sentinel_model = "model-marker-x"
+        sentinel_body = {
+            "messages": [{"role": "user", "content": [{"text": "Hello"}]}],
+            "inferenceConfig": {"maxTokens": 4096},
+        }
+        mock_client = MagicMock()
+        mock_client.converse.return_value = BEDROCK_RESPONSE_TEXT
+        with (
+            patch.object(adapter, "_bedrock_body", return_value=(sentinel_model, sentinel_body)),
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+        ):
+            await adapter.make_request(cc)
+        kwargs = mock_client.converse.call_args[1]
+        assert kwargs["modelId"] == sentinel_model
+        # The builder body splats verbatim — no in-transport re-translation.
+        for key, value in sentinel_body.items():
+            assert kwargs[key] == value
+        # No stray P18 keys leaked into the kwarg call: the kwarg set is
+        # exactly the sentinel body with ``modelId`` added.
+        assert set(kwargs) == {"modelId"} | set(sentinel_body)
+        assert "stream" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_stream_request_sends_builder_model_id_to_converse_stream(self) -> None:
+        """R3 / AC5 — ``converse_stream`` receives ``modelId=...`` from the builder."""
+        adapter = self.adapter
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+        sentinel_model = "model-marker-y"
+        sentinel_body = {
+            "messages": [{"role": "user", "content": [{"text": "Hello"}]}],
+            "inferenceConfig": {"maxTokens": 4096},
+        }
+        mock_client = MagicMock()
+        mock_client.converse_stream.return_value = {"stream": iter([])}
+
+        async def noop(data: bytes) -> None:
+            pass
+
+        with (
+            patch.object(adapter, "_bedrock_body", return_value=(sentinel_model, sentinel_body)),
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+        ):
+            await adapter.stream_request(cc, noop)
+        kwargs = mock_client.converse_stream.call_args[1]
+        assert kwargs["modelId"] == sentinel_model
+        for key, value in sentinel_body.items():
+            assert kwargs[key] == value
+        # Same shape check as the non-streaming sibling — no in-transport
+        # mutation; the kwarg set equals the sentinel body with ``modelId``
+        # added.
+        assert set(kwargs) == {"modelId"} | set(sentinel_body)
+        assert "stream" not in kwargs
 
 
 # ── Bedrock → CC response translation ────────────────────────────────────
@@ -795,6 +1137,67 @@ class TestBedrockStreamRequest:
         call_kwargs = mock_client.converse_stream.call_args
         assert call_kwargs[1]["modelId"] == "us.anthropic.claude-sonnet-4-20250514"
 
+    @pytest.mark.asyncio
+    async def test_streaming_error_wraps_provider_error(self) -> None:
+        """R7 / AC10 — the streaming ``ProviderError`` wrap is preserved.
+
+        The bridge's retry ladder (``server.py``) branches on
+        ``isinstance(exc, ProviderError)`` and reads ``exc.http_status`` to
+        classify the failure; dropping the ``try/except`` wrap would
+        silently change the HTTP status / retry classification. The
+        existing ``test_bedrock_error_raises`` only checks the message
+        substring — which passes regardless of whether the wrap is in
+        place — so this test pins the wrapping explicitly.
+        """
+        adapter = BedrockAdapter()
+        cc_request = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+        mock_client = MagicMock()
+        mock_client.converse_stream.side_effect = Exception("ThrottlingException")
+
+        async def noop(data: bytes) -> None:
+            pass
+
+        with (
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+            pytest.raises(ProviderError) as exc_info,
+        ):
+            await adapter.stream_request(cc_request, noop)
+        assert "Bedrock streaming request failed" in str(exc_info.value)
+        assert "ThrottlingException" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_error_wraps_provider_error(self) -> None:
+        """R7 / AC10 (sibling) — the non-streaming wrap has the same shape.
+
+        ``make_request`` carries the same ``try/except Exception →
+        ProviderError(...)`` wrap as ``stream_request`` and the same
+        dependency on the retry ladder's ``isinstance(exc, ProviderError)``
+        branch in ``server.py``. The existing ``test_bedrock_error_raises``
+        uses ``pytest.raises(Exception, match="ThrottlingException")``, which
+        passes regardless of whether the wrap is in place — exactly the
+        failure mode the streaming sibling test exists to rule out. This
+        test pins the non-streaming wrap with the same shape.
+        """
+        adapter = BedrockAdapter()
+        cc_request = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = Exception("ThrottlingException")
+        with (
+            patch.object(adapter, "_get_boto3_client", return_value=mock_client),
+            pytest.raises(ProviderError) as exc_info,
+        ):
+            await adapter.make_request(cc_request)
+        assert "Bedrock request failed" in str(exc_info.value)
+        assert "ThrottlingException" in str(exc_info.value)
+
 
 class TestThinkingEnabledToolCallGap:
     """Regression tests for: thinking enabled but assistant tool-call messages lack reasoning_content.
@@ -840,7 +1243,7 @@ class TestThinkingEnabledToolCallGap:
         assert assistant_with_tools["role"] == "assistant"
         reasoning_blocks = [b for b in assistant_with_tools["content"] if "reasoningContent" in b]
         assert len(reasoning_blocks) == 1, "Should inject empty reasoningContent when thinking enabled"
-        assert reasoning_blocks[0]["reasoningContent"]["text"] == ""
+        assert reasoning_blocks[0]["reasoningContent"]["reasoningText"]["text"] == ""
 
     def test_thinking_enabled_text_only_assistant_without_reasoning_gets_empty_reasoning(self):
         cc = {
@@ -862,7 +1265,7 @@ class TestThinkingEnabledToolCallGap:
         first_assistant = result["messages"][1]
         reasoning_blocks = [b for b in first_assistant["content"] if "reasoningContent" in b]
         assert len(reasoning_blocks) == 1, "Should inject empty reasoningContent for text-only assistant"
-        assert reasoning_blocks[0]["reasoningContent"]["text"] == ""
+        assert reasoning_blocks[0]["reasoningContent"]["reasoningText"]["text"] == ""
 
     def test_thinking_not_enabled_no_injection(self):
         cc = {
@@ -912,7 +1315,10 @@ class TestThinkingEnabledToolCallGap:
         assistant_msg = result["messages"][0]
         reasoning_blocks = [b for b in assistant_msg["content"] if "reasoningContent" in b]
         assert len(reasoning_blocks) == 1
-        assert reasoning_blocks[0]["reasoningContent"]["text"] == "Existing reasoning here."
+        assert (
+            reasoning_blocks[0]["reasoningContent"]["reasoningText"]["text"]
+            == "Existing reasoning here."
+        )
 
 
 class TestBedrockStreamErrorEvents:
@@ -991,3 +1397,267 @@ class TestItCachesNoTransport:
         adapter._get_boto3_client("AKIAEXAMPLE:secret-key", {"region": "us-east-1"})
 
         assert set(vars(adapter)) == before
+
+
+class TestTheEndpointUrlSeam:
+    """KBR-42 — ``provider_config["endpoint_url"]`` is the test-harness seam.
+
+    T-B3's transport points the botocore client at the local recorder by
+    setting this key.  Production profiles do not carry it (so the kwarg
+    is opt-in), and a regression that dropped the new key from
+    ``_get_boto3_client`` while keeping the rest of the method intact would
+    still be caught by the harness integration — but only at the **flow**
+    level, not the **kwarg** level.  These tests pin the kwarg at the layer
+    where the production change lives, so a future refactor cannot silently
+    regress it.
+    """
+
+    def test_endpoint_url_is_passed_to_the_boto3_client_when_set(self) -> None:
+        adapter = BedrockAdapter()
+        sentinel = MagicMock()
+        captured_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return sentinel
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.return_value.client.side_effect = _capture
+            adapter._get_boto3_client(
+                "AKIAEXAMPLE:secret",
+                {"endpoint_url": "http://recorder:9", "region": "us-east-1"},
+            )
+
+        assert captured_kwargs.get("endpoint_url") == "http://recorder:9", (
+            "the test-harness seam was not forwarded to the boto3 client; "
+            "the botocore endpoint-override recorder (T-B3) cannot point at the loopback"
+        )
+
+    def test_endpoint_url_is_omitted_when_provider_config_lacks_it(self) -> None:
+        """Profiles without the key must behave as before KBR-42.
+
+        Production profiles do not carry ``endpoint_url``; passing it
+        through to ``session.client(..., endpoint_url=None)`` raises on some
+        botocore versions and is silently ignored on others, so the seam
+        must consume the key only when truthy.
+        """
+        adapter = BedrockAdapter()
+        captured_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return MagicMock()
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.return_value.client.side_effect = _capture
+            adapter._get_boto3_client("AKIAEXAMPLE:secret", {"region": "us-east-1"})
+
+        assert "endpoint_url" not in captured_kwargs, (
+            "endpoint_url must not be passed when the profile does not set it; "
+            "production profiles do not, and some botocore versions raise on None"
+        )
+
+    def test_endpoint_url_reaches_the_sso_branch_when_set(self) -> None:
+        """The SSO half of the ``if/else`` shares the same ``client_kwargs``.
+
+        The two tests above drive the credentials branch
+        (``parse_aws_credentials`` → ``boto3.Session(aws_access_key_id=…,
+        …)``); this one drives the SSO branch
+        (``boto3.Session(profile_name=…, region_name=…)``), which shares
+        the same ``client_kwargs`` the seam mutates. ``endpoint_url``
+        sits **above** the ``if/else`` today, so both branches see it —
+        a refactor that moved the lines into one branch only would pass
+        the credentials tests while silently breaking SSO profiles,
+        which is why the SSO case is pinned too.
+        """
+        adapter = BedrockAdapter()
+        captured_kwargs: dict = {}
+        captured_session_kwargs: dict = {}
+
+        def _capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            return MagicMock()
+
+        session_mock = MagicMock()
+        session_mock.client.side_effect = _capture
+
+        def _session_capture(*args: object, **kwargs: object) -> MagicMock:
+            captured_session_kwargs.update(kwargs)
+            return session_mock
+
+        with patch("boto3.Session") as session_cls:
+            session_cls.side_effect = _session_capture
+            adapter._get_boto3_client(
+                "sso",
+                {"endpoint_url": "http://recorder:9", "region": "us-east-1", "profile_name": "harness-profile"},
+            )
+
+        assert captured_session_kwargs.get("profile_name") == "harness-profile", (
+            "the SSO branch was not taken; if the if/else moved to "
+            "is_sso_mode=False for resolved_key='sso', the credentials branch's "
+            "parse_aws_credentials would raise ProviderError on the colonless key "
+            "before this assertion ran, surfacing the regression even louder than this assert"
+        )
+        assert captured_kwargs.get("endpoint_url") == "http://recorder:9", (
+            "the test-harness seam did not reach the SSO branch's boto3 client; "
+            "the seam sits inside one arm of the if/else and the other arm lost it"
+        )
+
+    def test_the_harness_key_is_not_an_sso_marker(self) -> None:
+        """The harness key routes through the credentials branch.
+
+        ``HarnessBedrockAdapter``'s override of ``parse_aws_credentials``
+        resolves the harness key to the fake pair — but only when the key
+        is **not** an SSO marker. ``is_sso_mode`` intercepts ``""`` and
+        ``"sso"`` *before* ``parse_aws_credentials`` runs, so a harness
+        key that matched either would silently fall into the SSO branch
+        and use whatever ambient AWS credentials the test machine has.
+        Pinning the harness key's non-membership here makes that
+        brittleness a checkable claim rather than a docstring promise.
+        """
+        from kitty.providers.bedrock import BedrockAdapter
+
+        adapter = BedrockAdapter()
+        assert not adapter.is_sso_mode("harness-key"), (
+            "the harness key matched an SSO marker; HarnessBedrockAdapter's "
+            "parse_aws_credentials override would be silently bypassed and "
+            "the test would use whatever ambient AWS credentials the machine has"
+        )
+
+
+class TestBedrockParseStreamToCcResponse:
+    """The parser the bridge's custom-transport branch dispatches to.
+
+    KBR-287's review round 1: ``BedrockAdapter`` had no
+    ``parse_stream_to_cc_response``, so the branch fell back to the
+    Responses-SSE parser, which cannot read the CC-SSE bytes
+    :meth:`BedrockAdapter.stream_request` writes — every Bedrock
+    completion parsed content-free and the branch's judge-first hold
+    laddered it. These tests pin the parser against the exact shapes
+    ``_translate_stream_event`` emits, so the parse step and the
+    translation step cannot drift apart silently again.
+    """
+
+    @staticmethod
+    def _sse(chunks: list[dict]) -> bytes:
+        """Render chunk payloads as the SSE bytes ``stream_request`` writes.
+
+        Args:
+            chunks: Chunk payloads, in wire order.
+
+        Returns:
+            The ``data:``-prefixed body, terminated by ``[DONE]``.
+        """
+        return b"".join(
+            b"data: " + json.dumps(chunk).encode() + b"\n\n" for chunk in chunks
+        ) + b"data: [DONE]\n\n"
+
+    def test_text_deltas_join_into_message_content(self) -> None:
+        """Content deltas accumulate in wire order into ``message.content``."""
+        adapter = BedrockAdapter()
+
+        def _chunk(delta: dict, finish: str | None = None) -> dict:
+            """Build one CC chunk payload as ``_make_sse_chunk`` shapes it.
+
+            Args:
+                delta: The chunk's ``choices[0].delta``.
+                finish: The chunk's ``finish_reason``.
+
+            Returns:
+                The chunk dict.
+            """
+            return {
+                "id": "r1",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+
+        raw = self._sse(
+            [
+                _chunk({"role": "assistant"}),
+                _chunk({"content": "Hello "}),
+                _chunk({}, finish="stop"),
+            ]
+        )
+
+        response = adapter.parse_stream_to_cc_response(raw)
+
+        message = response["choices"][0]["message"]
+        assert message["content"] == "Hello "
+        assert response["choices"][0]["finish_reason"] == "stop"
+
+    def test_tool_call_chunks_carry_whole_function_entries(self) -> None:
+        """Tool-call chunks accumulate whole (the synthesis reads ``function.name``)."""
+        adapter = BedrockAdapter()
+        tool_chunk = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "Read", "arguments": '{"path": "a"}'},
+        }
+
+        def _chunk(delta: dict, finish: str | None = None) -> dict:
+            """Build one CC chunk payload as ``_make_sse_chunk`` shapes it.
+
+            Args:
+                delta: The chunk's ``choices[0].delta``.
+                finish: The chunk's ``finish_reason``.
+
+            Returns:
+                The chunk dict.
+            """
+            return {
+                "id": "r1",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+
+        raw = self._sse(
+            [
+                _chunk({"role": "assistant"}),
+                _chunk({"tool_calls": [tool_chunk]}),
+                _chunk({}, finish="tool_calls"),
+            ]
+        )
+
+        response = adapter.parse_stream_to_cc_response(raw)
+
+        message = response["choices"][0]["message"]
+        assert message["tool_calls"] == [tool_chunk]
+        assert response["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_a_content_free_stream_parses_to_content_none(self) -> None:
+        """A stream with no content/tool_calls parses to ``content: None``.
+
+        This is the shape the judge-first hold must judge empty: the
+        message carries nothing the synthesis can project, so the branch
+        ladders instead of delivering a skeleton.
+        """
+        adapter = BedrockAdapter()
+
+        def _chunk(delta: dict, finish: str | None = None) -> dict:
+            """Build one CC chunk payload as ``_make_sse_chunk`` shapes it.
+
+            Args:
+                delta: The chunk's ``choices[0].delta``.
+                finish: The chunk's ``finish_reason``.
+
+            Returns:
+                The chunk dict.
+            """
+            return {
+                "id": "r1",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+
+        raw = self._sse([_chunk({"role": "assistant"}), _chunk({}, finish="stop")])
+
+        response = adapter.parse_stream_to_cc_response(raw)
+
+        assert response["choices"][0]["message"]["content"] is None

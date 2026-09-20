@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kitty-bridge"
-version = "1.12.0"
+version = "1.15.0"
 description = "Kitty Bridge — launch coding agents through a local API bridge"
 readme = "README.md"
 license = "MIT"
@@ -26,7 +26,17 @@ classifiers = [
 ]
 dependencies = [
     "aiohttp>=3.11,<3.14",
-    "curl_cffi>=0.7",
+    # Bounded by decision (KBR-283, 2026-09-18): the only unbounded HTTP
+    # transport the code drove directly carried the OAuth refresh leg,
+    # and curl_cffi 0.16.3 already showed same-release platform drift
+    # (the Windows build honours uppercase HTTP_PROXY; Linux/macOS apply
+    # libcurl's CGI-security no-op). Bounded below the next minor; the
+    # floor is the oldest minor the product owner selected to support.
+    # The gate for a bump is tests/test_curl_cffi_transport_contract.py
+    # plus this file's pin guard in TestVersionConsistency, which fails
+    # until both move together; uv.lock is gitignored so this is the
+    # only durable pin.
+    "curl_cffi>=0.15,<0.17",
     "pydantic>=2.0",
     "keyring>=23.0",
     "rich>=13.0",
@@ -34,6 +44,15 @@ dependencies = [
     "platformdirs>=4.0",
     "pyyaml>=6.0",
     "boto3>=1.34",
+    # Declared directly, not only via boto3: botocore implements the
+    # containment guarantee (``Config(proxies=)`` precedence over the
+    # ambient proxy environment) that section 6.2.4 of TEST_SUITE.md pins
+    # -- an undeclared dependency owning a containment guarantee is worse
+    # than an unbounded one. The gate for a botocore bump is
+    # tests/harness/test_botocore_transport_contract.py: it fails loudly
+    # if a new release rotates the precedence contract, which is the
+    # signal to re-pin the floor here.
+    "botocore>=1.34",
     "questionary>=2.0",
 ]
 
@@ -49,6 +68,7 @@ kitty = "kitty.cli.main:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-bdd>=8.1",
     "aioresponses>=0.7",
     "ruff>=0.4",
     "mypy>=1.10",
@@ -57,6 +77,14 @@ dev = [
     "build>=1.0",
     "hatchling>=1.0",
     "twine>=4.0",
+    "hypothesis>=6.100",
+    "mutmut>=3.0,<4",
+    # Schemathesis drives the OpenAPI conformance run (T-G6 / KBR-82).
+    # v4 supports OpenAPI 3.1 natively; <5 keeps a major bump a decision.
+    "schemathesis>=4.9,<5",
+    # tomllib landed in 3.11; tests/test_mutmut_scope.py reads
+    # pyproject.toml's [tool.mutmut] on every supported interpreter.
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -125,7 +153,7 @@ target-version = "py310"
 # next carried-across fix would arrive as a conflict. `.github/review/rules/ci.md`
 # records the same rule for anyone reviewing a change there.
 #
-# NOTE: this is not "that code is unchecked". `ci.yml` runs its 717-case suite
+# NOTE: this is not "that code is unchecked". `ci.yml` runs its 738-case suite
 # on every pull request, and that suite carries guards this linter could not
 # express - the private-reference sweep, the runner-ceiling pairing, the
 # aggregate's dependency set.
@@ -149,6 +177,14 @@ select = [
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# KBR-152 acceptance canary: the file's `assert False` is deliberate (the
+# file's own docstring says it must be red so KBR-152's `--require-category`
+# guard has something to fail on). The pytest runner exercises it under the
+# dedicated acceptance job; the ruff gate here only needs to tolerate the
+# specific B011 violation that an `assert False` raises.
+"tests/test_kbr152_throwaway_canary.py" = ["B011"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -252,3 +288,120 @@ forbidden_modules = [
     "kitty.credentials",
     "kitty.providers",
 ]
+
+# Mutation testing -- T-H1 (KBR-88).
+#
+# `source_paths` is the whole importable package: mutmut removes the original
+# `src/` from `sys.path` and runs tests against `mutants/`, so anything not in
+# `source_paths` (or in `also_copy`) is unimportable. TEST_SUITE.md section 6.1
+# narrows the scope to specific functions; that narrowing cannot live here --
+# mutmut treats wildcard entries as filesystem paths and silently drops them
+# (its `walk_all_files` only follows directories and files, not globs). The
+# function-level narrowing lives in `tests/mutmut_scope.py` (the registry) and
+# in the positional patterns the recorded invocation in
+# `.system_design/MUTATION_BASELINE.md` passes to `mutmut run`.
+#
+# `only_mutate` is file-level and bounds mutant generation to the files that
+# carry any section 6.1 target -- CLI, TUI, auth and `kitty.io_encoding` are
+# out of scope and never generate mutants. The `providers/*` glob was
+# intentionally narrowed to per-file globs (the round-1 review caught that
+# it matched `__init__.py`, `registry.py` and `model_context_sync.py`,
+# none of which are named by section 6.1). `tests/test_mutmut_scope.py`'s
+# `test_every_registry_file_is_covered_by_only_mutate` guard keeps this
+# list in sync with the registry: any registry target whose file is not
+# in this list fails
+# the gate.
+#
+
+# `pytest_add_cli_args_test_selection` is array form -- mutmut's TOML reader
+# requires it (its config schema validates the array shape explicitly).
+#
+# The `--ignore` below is mutmut-only, not a gate change. The internal-keys
+# guard fails against mutmut's mutated source: mutmut-generated string
+# mutations in MessagesTranslator._translate_assistant_message write
+# `_THINKING_BLOCKS` in upper case, and the test's `startswith("_")` scan
+# sees the uppercase key as leaked before the strip test runs. Every
+# parametrized case of test_no_internal_key_reaches_upstream fails for the
+# same reason -- one `--deselect` only shifts the failure to the next case.
+# Deselecting the whole file removes ~111 tests from mutmut's selection
+# only; the L1 gate still runs them. Investigating the trampoline
+# interaction further is its own ticket, not T-H1 scope.
+#
+# `also_copy` carries files outside `source_paths`/`tests/` that the L1
+# selection reads from the repo root. README.md is the one such file today:
+# `tests/bridge/test_compaction_failure_response.py` (an L1 test) reads it.
+# `scripts` is the second: the L2 test
+# `tests/test_aggregate_mutation_baseline.py` imports
+# `scripts/aggregate_mutation_baseline.py` by filesystem path at module
+# level (added in KBR-88 review round 7, after the recorded b680edd run;
+# every mutmut run on main needs this copy or test collection fails
+# before the clean run starts). `openapi` is the third: the L2 schemathesis
+# conformance test (KBR-82) loads `openapi/kitty-bridge.yaml` at module
+# import, which happens at collection even under `-m l1`, so every mutmut
+# run needs the copy since that file landed (after the KBR-266 run). The
+# whole directory is copied, not the
+# single file, because mutmut 3.8.0's file branch (`shutil.copy2`) does
+# not create the destination's parent directory and dies on a fresh
+# `mutants/` tree; the directory branch (`copytree(dirs_exist_ok=True)`)
+# does.
+# This file must stay ASCII (see the ruff note above): section 6.1 is written
+# out rather than using the section sign.
+[tool.mutmut]
+source_paths = ["src/kitty"]
+pytest_add_cli_args_test_selection = [
+    "-m",
+    "l1",
+    "--ignore",
+    "tests/test_internal_keys_not_sent_upstream.py",
+]
+only_mutate = [
+    "src/kitty/bridge/messages/*",
+    "src/kitty/bridge/responses/*",
+    "src/kitty/bridge/gemini/*",
+    "src/kitty/bridge/engine.py",
+    "src/kitty/bridge/tool_audit.py",
+    # ``server.py`` carries the section-6.1 registry-named targets: the
+    # seven ``compaction_and_pairing`` methods plus KBR-285's two content
+    # predicates (``_cc_chunk_carries_content`` and
+    # ``BridgeServer._is_empty_cc_response``); every other def/class in it
+    # is suppressed by ``# pragma: no mutate block`` (mutmut's block pragma)
+    # so generation stays fast and the scope narrows to the registered
+    # targets. The guard
+    # ``tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_registered``
+    # (KBR-266, generalised by KBR-285) pins the marker scheme against drift.
+    "src/kitty/bridge/server.py",
+    # Every adapter file carrying one of the three provider hooks
+    # (translate_to_upstream / normalize_request / build_upstream_headers)
+    # -- per-file rather than `providers/*` so the three un-scoped
+    # modules (`__init__.py`, `registry.py`, `model_context_sync.py`)
+    # generate no mutants. `tests/test_mutmut_scope.py` asserts the file
+    # set equals the union of the files carrying a registry target, so
+    # a new adapter lands in this list when its registry row lands.
+    "src/kitty/providers/anthropic.py",
+    "src/kitty/providers/azure.py",
+    "src/kitty/providers/base.py",
+    "src/kitty/providers/bedrock.py",
+    "src/kitty/providers/byteplus.py",
+    "src/kitty/providers/custom_anthropic.py",
+    "src/kitty/providers/custom_openai.py",
+    "src/kitty/providers/fireworks.py",
+    "src/kitty/providers/kimi.py",
+    "src/kitty/providers/mimo.py",
+    "src/kitty/providers/minimax.py",
+    "src/kitty/providers/minimax_token.py",
+    "src/kitty/providers/model_context.py",
+    "src/kitty/providers/ollama_cloud.py",
+    "src/kitty/providers/ollama.py",
+    "src/kitty/providers/openai.py",
+    "src/kitty/providers/openai_subscription.py",
+    "src/kitty/providers/opencode.py",
+    "src/kitty/providers/openrouter.py",
+    "src/kitty/providers/vertex.py",
+    "src/kitty/providers/zai_anthropic.py",
+    "src/kitty/providers/zai.py",
+    "src/kitty/egress.py",
+    "src/kitty/egress_guard.py",
+    "src/kitty/profiles/*",
+    "src/kitty/validation.py",
+]
+also_copy = ["README.md", "scripts", "openapi"]
