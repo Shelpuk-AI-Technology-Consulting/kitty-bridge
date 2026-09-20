@@ -3204,7 +3204,7 @@ source — so the harness ships its own encoder following the spec every AWS
 SDK implements, with CRC32 per the pinned `binascii.crc32(data) & 0xFFFFFFFF`.
 The encoder is validated by round-trip through the pinned parser, by a
 bad-CRC falsification case (`test_a_streaming_reply_with_a_bad_message_crc_fails_to_decode`),
-and by a bridge-driven end-to-end path (`test_a_streamed_request_via_the_bridge_yields_finish_reason`).
+and by a bridge-driven end-to-end path (`test_a_streamed_request_via_the_bridge_yields_content_and_finish_reason`; KBR-287's review round restored this to assert content + finish_reason, which only became possible once the same ticket added `BedrockAdapter.parse_stream_to_cc_response` — pre-KBR-287 the test pinned a content-free skeleton whose finish chunk was satisfying the finish_reason oracle).
 
 **The harness rule (§1.4) requires a falsification case against the
 recorder's own overrides** — the conformance suite runs unchanged over the
@@ -5881,6 +5881,24 @@ no longer reaching the client as a silent empty turn. Empty-response retries on 
 adapters now populate §4.3 C3(i) — T-I8's test obligation must be widened to name the
 raw-CC path alongside the native-passthrough one. Tests:
 `tests/bridge/test_raw_cc_empty_hold.py`.
+
+**Completed by KBR-287 (2026-09-19):** the hold's last leg — the `use_custom_transport`
+segment of `_stream_chat_completions` (grep anchor: `# Custom-transport providers return
+Responses API SSE but CC clients`), the branch the KBR-254 cross-class re-dispatch routes
+into. That branch parses the provider's whole response before any write, so the hold
+degenerates to a judge-first verdict: the synthesised chunk list is judged through the
+shared `_cc_chunk_carries_content` and a content-free completion writes nothing — the
+empty ladder fires instead of the skeleton, ending in the route's `empty_response` D4
+terminal (the ticket's `cross_class_exhaustion` wording was deliberately corrected — see
+SYSTEM_DESIGN §5.4 for the §5.3 S8 discriminator-contract reasoning). A content-bearing
+synthesis is byte-identical to the pre-change wire output. The suite is the KBR-276
+harness shape with canned bytes fed through the branch's real parse step
+(`parse_stream_to_cc_response` for Ollama Cloud and — added by the review round in the
+same change, which also closed the parse-path gap — Bedrock; the Responses-SSE fallback
+for the OpenAI subscription only), parametrised over the three adapters that actually
+resolve `use_custom_transport = True` — the ticket's `vertex` mention is a ticket
+correction (`VertexAIAdapter` is plain-POST passthrough, already held by KBR-276).
+Tests: `tests/bridge/test_custom_transport_empty_hold.py`.
 
 Four things the implementer needs that the question itself did not settle, decided here so KBR-155
 is writable:

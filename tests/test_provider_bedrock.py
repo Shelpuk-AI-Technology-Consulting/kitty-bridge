@@ -1,5 +1,6 @@
 """Tests for providers/bedrock.py — BedrockAdapter."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import botocore.exceptions
@@ -1522,3 +1523,141 @@ class TestTheEndpointUrlSeam:
             "parse_aws_credentials override would be silently bypassed and "
             "the test would use whatever ambient AWS credentials the machine has"
         )
+
+
+class TestBedrockParseStreamToCcResponse:
+    """The parser the bridge's custom-transport branch dispatches to.
+
+    KBR-287's review round 1: ``BedrockAdapter`` had no
+    ``parse_stream_to_cc_response``, so the branch fell back to the
+    Responses-SSE parser, which cannot read the CC-SSE bytes
+    :meth:`BedrockAdapter.stream_request` writes — every Bedrock
+    completion parsed content-free and the branch's judge-first hold
+    laddered it. These tests pin the parser against the exact shapes
+    ``_translate_stream_event`` emits, so the parse step and the
+    translation step cannot drift apart silently again.
+    """
+
+    @staticmethod
+    def _sse(chunks: list[dict]) -> bytes:
+        """Render chunk payloads as the SSE bytes ``stream_request`` writes.
+
+        Args:
+            chunks: Chunk payloads, in wire order.
+
+        Returns:
+            The ``data:``-prefixed body, terminated by ``[DONE]``.
+        """
+        return b"".join(
+            b"data: " + json.dumps(chunk).encode() + b"\n\n" for chunk in chunks
+        ) + b"data: [DONE]\n\n"
+
+    def test_text_deltas_join_into_message_content(self) -> None:
+        """Content deltas accumulate in wire order into ``message.content``."""
+        adapter = BedrockAdapter()
+
+        def _chunk(delta: dict, finish: str | None = None) -> dict:
+            """Build one CC chunk payload as ``_make_sse_chunk`` shapes it.
+
+            Args:
+                delta: The chunk's ``choices[0].delta``.
+                finish: The chunk's ``finish_reason``.
+
+            Returns:
+                The chunk dict.
+            """
+            return {
+                "id": "r1",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+
+        raw = self._sse(
+            [
+                _chunk({"role": "assistant"}),
+                _chunk({"content": "Hello "}),
+                _chunk({}, finish="stop"),
+            ]
+        )
+
+        response = adapter.parse_stream_to_cc_response(raw)
+
+        message = response["choices"][0]["message"]
+        assert message["content"] == "Hello "
+        assert response["choices"][0]["finish_reason"] == "stop"
+
+    def test_tool_call_chunks_carry_whole_function_entries(self) -> None:
+        """Tool-call chunks accumulate whole (the synthesis reads ``function.name``)."""
+        adapter = BedrockAdapter()
+        tool_chunk = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "Read", "arguments": '{"path": "a"}'},
+        }
+
+        def _chunk(delta: dict, finish: str | None = None) -> dict:
+            """Build one CC chunk payload as ``_make_sse_chunk`` shapes it.
+
+            Args:
+                delta: The chunk's ``choices[0].delta``.
+                finish: The chunk's ``finish_reason``.
+
+            Returns:
+                The chunk dict.
+            """
+            return {
+                "id": "r1",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+
+        raw = self._sse(
+            [
+                _chunk({"role": "assistant"}),
+                _chunk({"tool_calls": [tool_chunk]}),
+                _chunk({}, finish="tool_calls"),
+            ]
+        )
+
+        response = adapter.parse_stream_to_cc_response(raw)
+
+        message = response["choices"][0]["message"]
+        assert message["tool_calls"] == [tool_chunk]
+        assert response["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_a_content_free_stream_parses_to_content_none(self) -> None:
+        """A stream with no content/tool_calls parses to ``content: None``.
+
+        This is the shape the judge-first hold must judge empty: the
+        message carries nothing the synthesis can project, so the branch
+        ladders instead of delivering a skeleton.
+        """
+        adapter = BedrockAdapter()
+
+        def _chunk(delta: dict, finish: str | None = None) -> dict:
+            """Build one CC chunk payload as ``_make_sse_chunk`` shapes it.
+
+            Args:
+                delta: The chunk's ``choices[0].delta``.
+                finish: The chunk's ``finish_reason``.
+
+            Returns:
+                The chunk dict.
+            """
+            return {
+                "id": "r1",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+
+        raw = self._sse([_chunk({"role": "assistant"}), _chunk({}, finish="stop")])
+
+        response = adapter.parse_stream_to_cc_response(raw)
+
+        assert response["choices"][0]["message"]["content"] is None
