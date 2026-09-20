@@ -31,10 +31,11 @@ directions) via per-module `_require_tool_call_name`; Chat Completions and
 Anthropic inline — `git grep _require_tool_call_name tests/harness/` lists four
 helper modules.
 
-Declarations (Gemini `FunctionDeclaration`, Responses `FunctionTool`, Converse
-`toolSpec`) keep the residualise posture deliberately; their silent `""`
-admission is recorded in §7.4.2 row 2's Because cell as a sibling gap, not
-settled here.
+Declarations keep the residualise posture deliberately, with a per-branch
+split on the projection: Gemini `FunctionDeclaration` and Responses
+`FunctionTool` project `ToolDecl(name="")` from the residualised leaf, while
+Converse `toolSpec` omits the declaration. All three admit `""` silently —
+recorded in §7.4.2 row 2's Because cell as a sibling gap, not settled here.
 
 ## Why option (a) and not (b)
 

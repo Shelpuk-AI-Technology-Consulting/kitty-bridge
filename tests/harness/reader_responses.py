@@ -282,7 +282,7 @@ def _require_tool_call_name(name: Any, path: str) -> str:
     per §7.4.1's within-module anti-drift rule, mirroring Ollama's
     :func:`_require_tool_call_name` (``reader_ollama.py:1007``) so the
     readers' strict-name helpers grep together. ``""`` for a name is not a
-    lossless projection (``contract.py:935-941``): it claims a tool *named*
+    lossless projection (``contract.decode_arguments``): it claims a tool *named*
     empty-string, and a call nobody can name cannot be paired with its result
     or addressed by a register row (KBR-281 settled the rule for four readers;
     KBR-292 extends it here). Declaration names keep the residualise posture
@@ -1257,12 +1257,14 @@ class ResponsesProjection:
                 residual[c.residual_key(path, "parameters")] = parameters
                 parameters = None
 
-            # Same rule as `_read_function_call`, and for a stronger reason:
-            # `FunctionTool.required` includes `name`, and §3.3.1a addresses
-            # tools by name with no index to fall back on. Two unnamed
-            # declarations would both sit at `conversation.tools[]` — which
-            # `path_matches` accepts as the legacy wildcard spelling, so a
-            # register row would match them by accident rather than by name.
+            # §3.3.1b's general prescription, deliberately not the
+            # invocations' strict raise (§7.4.2 rule 7 row 2): a missing
+            # name residualises and the declaration still projects with
+            # `name=""`. `FunctionTool.required` includes `name`, and two
+            # unnamed declarations would both sit at `conversation.tools[]`
+            # — which `path_matches` accepts as the legacy wildcard
+            # spelling, so a register row would match them by accident
+            # rather than by name.
             name = entry.get("name")
             if not isinstance(name, str):
                 residual[c.residual_key(path, "name")] = name

@@ -1545,7 +1545,7 @@ class TestEveryOptionalLeafFailsClosed:
 class TestNameRequired:
     """A ``toolUse`` whose ``name`` is missing, empty, or not a string raises.
 
-    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    ``contract.decode_arguments`` is explicit: ``""``
     for a name is **not** lossless — a call nobody can name cannot be paired
     with its result or addressed by a register row. KBR-279 landed the rule
     for the Ollama readers, KBR-281 for Chat Completions / Gemini / Anthropic;

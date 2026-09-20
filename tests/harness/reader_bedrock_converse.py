@@ -1122,7 +1122,7 @@ def _require_tool_call_name(name: Any, path: str) -> str:
     :func:`_require_tool_call_name` (``reader_ollama.py:1007``) and Gemini's
     (``reader_gemini.py:1330``) per-module copies so the readers' strict-name
     helpers grep together (§7.4.1's within-module anti-drift rule). ``""`` for
-    a name is not a lossless projection (``contract.py:935-941``): it claims a
+    a name is not a lossless projection (``contract.decode_arguments``): it claims a
     tool *named* empty-string, and a call nobody can name cannot be paired
     with its result or addressed by a register row (KBR-281 settled the rule
     for four readers; KBR-292 extends it here).
