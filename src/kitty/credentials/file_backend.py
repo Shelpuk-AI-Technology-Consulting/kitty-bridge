@@ -50,12 +50,17 @@ class FileBackend(CredentialBackend):
             CredentialError: (a) When the reference exists but its stored value
                 is undecodable — not valid base64, not decodable as UTF-8, or
                 not a string (KBR-87). (b) When the credentials file itself is
-                damaged — not valid UTF-8 bytes, or its JSON parses to a
-                non-dict (KBR-291). The message names the file path and the
-                ``*.corrupt.<ts>.<pid>`` backup holding the original bytes.
+                damaged — not valid UTF-8 bytes (shape b, KBR-291), JSON
+                parsing to a non-dict (shape a, KBR-291), or invalid JSON with
+                a failed backup rename (the F37 failure path, KBR-291).
+                The message names the file path and, when the backup
+                rename succeeded, the ``*.corrupt.<ts>.<pid>`` backup
+                holding the original bytes; when the rename failed it
+                tells the user to restore write access instead.
                 ``set``/``delete`` swallow the file-level raise via
-                :meth:`_read_raw_for_write` so the recovery command
-                (``kitty setup``) does not crash on its own write.
+                :meth:`_read_raw_for_write` when the backup succeeded, so
+                the recovery command (``kitty setup``) does not crash on
+                its own write.
         """
         try:
             with self._lock:
