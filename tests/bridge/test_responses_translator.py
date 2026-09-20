@@ -629,6 +629,38 @@ class TestKBR285WidenedShapes:
         assert fc["arguments"] == '{"city": "London"}'
         assert fc["status"] == "completed"
 
+    def test_legacy_function_call_non_string_arguments_serialise_as_json(self):
+        """A non-string ``arguments`` value ships as JSON, never a Python repr.
+
+        The detector widening makes any truthy dict ``function_call`` count
+        as content, so a reply like ``{"name": "x", "arguments": {"city": 1}}``
+        is reachable; ``str()`` of the dict would put single-quoted
+        non-JSON text on a wire typed ``arguments: string``.
+        """
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-nonstr",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": None,
+                            "function_call": {"name": "x", "arguments": {"city": 1}},
+                        },
+                        "finish_reason": "function_call",
+                    }
+                ],
+            }
+        )
+        fc_items = self._function_call_items(result["output"])
+        assert len(fc_items) == 1
+        arguments = fc_items[0]["arguments"]
+        assert isinstance(arguments, str)
+        assert json.loads(arguments) == {"city": 1}
+        # No Python repr leaked: single quotes are never valid JSON.
+        assert "'" not in arguments
+
     # ── translate_stream_chunk ──────────────────────────────────────────
 
     @staticmethod

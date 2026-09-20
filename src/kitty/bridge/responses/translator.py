@@ -14,6 +14,7 @@ The translator emits the full Responses API streaming lifecycle:
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 
@@ -727,17 +728,25 @@ class ResponsesTranslator:
         # function_call item, the same shape the ``tool_calls`` loop emits.
         # No real upstream carries both; if one did, the ``tool_calls`` loop
         # already ran and the legacy path appends a second item — the least-
-        # bad merge, recorded for the precondition.
+        # bad merge, recorded for the precondition. A non-string
+        # ``arguments`` value (the detector widening makes the shape
+        # reachable) serialises as JSON rather than shipping a Python repr.
         function_call = message.get("function_call")
         has_function_call = isinstance(function_call, dict) and bool(function_call)
         if has_function_call:
+            raw_args = function_call.get("arguments", "{}")
+            if not isinstance(raw_args, str):
+                try:
+                    raw_args = json.dumps(raw_args)
+                except (TypeError, ValueError):
+                    raw_args = "{}"
             output.append(
                 {
                     "type": "function_call",
                     "id": f"fc_{uuid.uuid4().hex[:24]}",
                     "call_id": f"call_{uuid.uuid4().hex}",
                     "name": function_call.get("name", ""),
-                    "arguments": str(function_call.get("arguments", "{}")),
+                    "arguments": raw_args,
                     "status": "completed",
                 }
             )

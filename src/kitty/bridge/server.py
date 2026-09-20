@@ -8205,7 +8205,9 @@ class BridgeServer:
                     # widened the classifier's set to six shapes (text,
                     # multimodal list, tool calls, legacy ``function_call``,
                     # ``refusal``, reasoning); the translated routes'
-                    # MessagesTranslator carries the widened set too.
+                    # translators (Messages, Responses, and Gemini) carry the
+                    # widened set too, and the custom-transport branch judges
+                    # its synthesis through the same predicate (KBR-287).
                     # Capped at ``MAX_HELD_BYTES`` (D5): an upstream
                     # that trickles empty-content deltas forever must not grow
                     # ``held`` without limit.
