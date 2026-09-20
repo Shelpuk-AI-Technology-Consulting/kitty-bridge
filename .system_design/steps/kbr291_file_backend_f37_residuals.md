@@ -40,15 +40,21 @@ honesty document already named them.
   three concerns: (a) read bytes (`UnicodeDecodeError` now backs up via
   `os.replace` and raises `CredentialError` chained from the
   `UnicodeDecodeError`); (b) parse JSON (F37 path verbatim); (c) validate
-  shape (`isinstance(result, dict)` — non-dict backs up via `os.replace`,
-  writes `{}` via `_write_raw`, and raises `CredentialError` with no
-  chain because the JSON parsed cleanly). The F37 invalid-JSON path is
-  unchanged. Both new shapes emit a CRITICAL line naming the file path
-  and the backup path. `_read_raw_for_write()` private helper swallows
-  the file-level `CredentialError` for the write path: `set`/`delete`
-  proceed from `{}`, the CRITICAL log + backup still fire, nothing is
-  silent. `FileBackend.get` lets the exception propagate to the KBR-87
-  receiver map.
+  shape (`isinstance(result, dict)` — non-dict backs up via `os.replace`
+  and raises `CredentialError` with no chain because the JSON parsed
+  cleanly). The F37 invalid-JSON path is unchanged. Both new shapes
+  emit a CRITICAL line naming the file path and the backup path.
+  Shape (a) does **not** write `{}` after the backup (D3's no-write-
+  empty pattern extends to shape a — see the gotcha below);
+  `_read_raw_for_write()` private helper swallows the file-level
+  `CredentialError` for the write path when the backup succeeded
+  (`self._path` is absent), but propagates when the backup failed
+  (`self._path` still holds the damaged original — the read-only-mount
+  case). `set`/`delete` proceed from `{}` on the success branch; on
+  the failure branch, the recovery command sees the honest message
+  rather than silently overwriting the user's data with no backup
+  anywhere. `FileBackend.get` lets the exception propagate to the
+  KBR-87 receiver map.
 - `tests/test_credential_store.py::TestFileLevelCorruption` (L1) —
   shape (b) `CredentialError` + chain pin + backup + CRITICAL log
   content (path + backup path) + `set` after damage; shape (a)
@@ -71,8 +77,16 @@ honesty document already named them.
 - `os.replace` is bytes-level, so the shape (b) backup preserves the
   original bytes verbatim without re-encoding — recreating `{}` after
   shape (b) damage adds nothing (the bytes can't be decoded anyway).
-  Shape (a)'s bytes are valid UTF-8, so writing `{}` after the backup is
-  cheap and lets the next `set` succeed without a second trip.
+  Shape (a)'s bytes are valid UTF-8, but the file is also not written
+  `{}` after the backup: the asymmetric design (F37 invalid-JSON writes
+  `{}` because it returns `{}`; shapes a/b do not write `{}` because
+  they raise) lets `_read_raw_for_write`'s `self._path.exists()` guard
+  distinguish "backup succeeded" from "backup failed" without inspecting
+  the exception message. If a future refactor re-adds `_write_raw({})`
+  to shape (a), the guard will misfire on the success branch and the
+  read-only-mount regression pin
+  (`test_write_path_propagates_when_backup_could_not_be_made`) will
+  fail.
 - The write-path forgiveness (`_read_raw_for_write`) is the load-bearing
   reason the recovery command (`kitty setup`, `kitty egress`, profile
   wizard) stays reachable: every one of those commands reaches a

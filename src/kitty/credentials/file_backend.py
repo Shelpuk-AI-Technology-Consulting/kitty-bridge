@@ -172,21 +172,27 @@ class FileBackend(CredentialBackend):
         # the original silently; with it, the backup is the recovered
         # record. No chaining: the JSON parsed cleanly, so there is no
         # underlying exception to preserve.
+        #
+        # We do not write `{}` after the backup — the file at `self._path`
+        # is left absent. That way, when `os.replace` succeeds the path is
+        # gone and `_read_raw_for_write` can swallow via its
+        # `self._path.exists()` guard; when `os.replace` fails (read-only
+        # mount, etc.) the path still holds the damaged original and the
+        # guard propagates instead — the recovery command sees the honest
+        # "backup could not be made" message rather than silently
+        # overwriting the user's data with no backup anywhere.
         if not isinstance(result, dict):
             ts = time.strftime("%Y%m%d-%H%M%S")
             backup = self._path.with_suffix(f".json.corrupt.{ts}.{os.getpid()}")
             logger.critical(
                 "Credentials file %s is corrupt (top-level %s, expected object). "
-                "Backing up to %s and starting fresh. "
-                "All previously stored API keys may be lost!",
+                "Backing up to %s. All previously stored API keys may be lost!",
                 self._path,
                 type(result).__name__,
                 backup,
             )
             with contextlib.suppress(OSError):
                 os.replace(self._path, backup)
-            with contextlib.suppress(OSError):
-                self._write_raw({})
             raise CredentialError(
                 f"Credentials file {self._path} is corrupt "
                 f"(top-level {type(result).__name__}, expected object). "
@@ -207,13 +213,25 @@ class FileBackend(CredentialBackend):
         CRITICAL log + backup still fire from ``_read_raw``; nothing is
         silent.
 
+        The one exception: if the file is still at ``self._path`` after
+        the raise, the backup failed (``os.replace`` is wrapped in
+        ``contextlib.suppress(OSError)`` for the read-only-mount case).
+        Letting the write proceed would overwrite the still-damaged
+        original with no backup anywhere — the user was promised the
+        original is preserved, and would silently lose it. Surface the
+        exception instead so the recovery command reports the failure.
+
         Returns:
             The parsed data, or an empty dict when the file is absent
-            or damaged.
+            or its backup succeeded.
         """
         try:
             return self._read_raw()
         except CredentialError:
+            if self._path.exists():
+                # Backup failed; the original is still at self._path.
+                # Don't let the write silently overwrite it.
+                raise
             return {}
 
     def _write_raw(self, data: dict[str, Any]) -> None:

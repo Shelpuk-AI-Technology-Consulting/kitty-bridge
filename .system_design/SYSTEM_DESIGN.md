@@ -1346,6 +1346,17 @@ CRITICAL log and backup still fire from `_read_raw` before the write path forgiv
 nothing is silent. `CredentialStore.delete` is already best-effort
 (`contextlib.suppress(Exception)`).
 
+**Why `_read_raw_for_write` re-raises when `self._path` still exists.** When `os.replace`
+fails (e.g., a read-only bind mount on the credentials directory), the damaged file
+remains at `self._path` and the CRITICAL log claims the original was preserved at a
+backup that does not exist. The next `set` swallowing the exception would overwrite the
+damaged original with no backup anywhere — silent credential loss accompanied by a
+confident false promise. `_read_raw_for_write` checks `self._path.exists()` after the
+raise: present (backup failed) → propagate, the recovery command reports the failure;
+absent (backup succeeded) → return `{}`, the write proceeds. The shape (a) arm does not
+write `{}` after backup precisely so this guard can distinguish "backup succeeded" from
+"backup failed" at a single file-system check.
+
 ### 11.3 The keyring dependency contract
 
 §6.2.4's rule for a dependency whose behaviour varies by platform **by design** ("where no

@@ -469,7 +469,7 @@ class TestFileLevelCorruption:
 
     def test_f37_invalid_json_path_is_unchanged(self, tmp_path):
         """F37 regression pin (acceptance criterion 3): invalid JSON keeps
-        today's behaviour exactly — `get` returns `None`, the file is
+        the F37-original behaviour — `get` returns `None`, the file is
         reset to `{}`, no raise. The new shapes are additive, not a
         regression on the JSON path."""
         path = tmp_path / "creds.json"
@@ -478,3 +478,56 @@ class TestFileLevelCorruption:
 
         assert backend.get("any-ref") is None
         assert path.read_text(encoding="utf-8").strip() == "{}"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b"\xff\xfe\xfd",  # shape (b) — invalid UTF-8
+            b'["not", "a", "dict"]',  # shape (a) — non-dict JSON
+        ],
+    )
+    def test_write_path_propagates_when_backup_could_not_be_made(
+        self, tmp_path, monkeypatch, payload
+    ):
+        """Pin the read-only-mount fallback: when ``os.replace`` fails
+        inside ``_read_raw``, the file remains at ``self._path`` and
+        the user was promised the original was preserved at the
+        backup path. Letting the write path swallow the raise would
+        overwrite the still-damaged original with no backup anywhere
+        — silent credential loss with a false promise.
+
+        The fix in ``_read_raw_for_write`` re-raises when
+        ``self._path`` still exists after the damage event; this test
+        pins that contract by simulating ``os.replace`` failure.
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        # Simulate a read-only filesystem: os.replace raises OSError
+        # because the rename onto the backup path fails. The
+        # credentials file stays at self._path (still damaged).
+        def _raise_oserror(src: object, dst: object) -> None:
+            raise OSError("simulated read-only mount")
+
+        monkeypatch.setattr("kitty.credentials.file_backend.os.replace", _raise_oserror)
+
+        # `get` still raises (the read-path signal is intact).
+        with pytest.raises(CredentialError):
+            backend.get("any-ref")
+
+        # The damaged file is still at the path — the message claims
+        # it was preserved at a backup that does not exist.
+        assert path.exists(), "Expected damaged file to remain at path when backup fails"
+
+        # `set` MUST propagate the error too — the original would be
+        # silently overwritten without a backup otherwise. Without the
+        # `_read_raw_for_write` self._path.exists() guard, this would
+        # succeed and silently destroy the damaged file's bytes.
+        with pytest.raises(CredentialError):
+            backend.set("new-ref", "new-value")
+
+        # The damaged file is still there — the user can recover by
+        # hand once write access is restored.
+        assert path.exists()
+        assert path.read_bytes() == payload
