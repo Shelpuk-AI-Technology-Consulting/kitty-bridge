@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from kitty.bridge.server import BridgeServer
-from kitty.credentials.store import CredentialNotFoundError, CredentialStore
+from kitty.credentials.store import CredentialError, CredentialNotFoundError, CredentialStore
 from kitty.egress import get_egress
 from kitty.egress_guard import egress_block_reason
 from kitty.launchers.base import LauncherAdapter, SpawnConfig
@@ -163,7 +163,7 @@ async def launch_async(
     # 1. Resolve credential
     try:
         resolved_key = cred_store.resolve(profile)
-    except CredentialNotFoundError as exc:
+    except (CredentialNotFoundError, CredentialError) as exc:
         logger.error("Credential resolution failed: %s", exc)
         print(f"Error: {exc}", file=sys.stderr)
         return 1

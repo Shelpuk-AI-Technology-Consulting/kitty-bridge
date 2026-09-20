@@ -443,9 +443,11 @@ class ChatCompletionsReplyProjection:
         # ``tool_calls`` — each is a function-call payload with arguments as a
         # JSON string; the one shared decode rule (§7.4.1, KBR-174) handles it.
         # A wrongly-typed value residualises at its own path; a malformed
-        # *entry* (not a dict, or no string ``function.name``) raises
+        # *entry* (not a dict, or no non-empty string ``function.name``) raises
         # ``UnreadableBodyError`` because there is no partial projection to
-        # salvage — §7.4.1.
+        # salvage — §7.4.1. KBR-281 extended the raise to ``""`` per
+        # ``contract.py:935-941``'s losslessness argument; the Ollama readers
+        # already raise on this case (KBR-267/KBR-279).
         tool_calls = value.get("tool_calls")
         if tool_calls is not None:
             if not isinstance(tool_calls, list):
@@ -461,9 +463,10 @@ class ChatCompletionsReplyProjection:
                         raise c.UnreadableBodyError(
                             f"choices[0].message.tool_calls[{index}].function must be an object"
                         )
-                    if not isinstance(call["function"].get("name"), str):
+                    name = call["function"].get("name")
+                    if not isinstance(name, str) or not name:
                         raise c.UnreadableBodyError(
-                            f"choices[0].message.tool_calls[{index}].function.name must be a string"
+                            f"choices[0].message.tool_calls[{index}].function.name must be a non-empty string"
                         )
                     parts.append(
                         c.ToolUse(
@@ -487,15 +490,16 @@ class ChatCompletionsReplyProjection:
 
         # The legacy ``function_call`` key, when present alongside ``tool_calls``,
         # projects as an additional ``ToolUse`` (deprecated form). A dict
-        # without a string ``name`` is malformed — there is no partial call
-        # to salvage — and raises.
+        # without a non-empty string ``name`` is malformed — there is no
+        # partial call to salvage — and raises (KBR-281: ``""`` included, per
+        # ``contract.py:935-941``).
         function_call = value.get("function_call")
         if function_call is not None:
             if not isinstance(function_call, dict):
                 residual[c.residual_key("choices[0].message", "function_call")] = function_call
-            elif not isinstance(function_call.get("name"), str):
+            elif not isinstance(function_call.get("name"), str) or not function_call.get("name"):
                 raise c.UnreadableBodyError(
-                    "choices[0].message.function_call.name must be a string"
+                    "choices[0].message.function_call.name must be a non-empty string"
                 )
             else:
                 parts.append(
@@ -945,8 +949,11 @@ def _read_tool_calls(
             raise c.UnreadableBodyError(f"{call_path} must carry a function object")
         if not isinstance(call.get("id"), str):
             raise c.UnreadableBodyError(f"{call_path} must carry a string id")
-        if not isinstance(function.get("name"), str):
-            raise c.UnreadableBodyError(f"{call_path}.function must carry a name")
+        # KBR-281: extend the existing strict-name raise to ``""``
+        # (``contract.py:935-941``); matches Ollama's ``_require_tool_call_name``.
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise c.UnreadableBodyError(f"{call_path}.function.name must be a non-empty string")
 
         _residualise(
             call, {"type", "id", "function", "index"}, call_path, residual

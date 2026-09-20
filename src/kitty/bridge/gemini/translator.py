@@ -187,8 +187,15 @@ class GeminiTranslator:
             if text:
                 messages.append({"role": "system", "content": text})
 
-        # Translate contents → messages
-        for content in gemini_request.get("contents", []):
+        # Translate contents → messages. A non-list ``contents`` contributes
+        # no messages: iterating a scalar raises, and iterating a dict walks
+        # its keys, neither of which is a Content. Same posture as the
+        # generationConfig guard below (the conformance fuzzer generates
+        # scalars here too — KBR-82's run).
+        contents = gemini_request.get("contents")
+        if not isinstance(contents, list):
+            contents = []
+        for content in contents:
             msg = self._translate_content(content)
             if msg is not None:
                 if isinstance(msg, list):
@@ -226,9 +233,22 @@ class GeminiTranslator:
         return cc_request
 
     def _translate_content(self, content: dict) -> dict | list[dict] | None:
-        """Translate a single Gemini Content object to CC message(s)."""
+        """Translate a single Gemini Content object to CC message(s).
+
+        Malformed shapes are skipped, never raised: a ``content`` that is not
+        a dict, ``parts`` entries that are not dicts, and
+        ``functionResponse`` / ``functionCall`` objects without a ``name``
+        all contribute nothing. Schemathesis fuzzing (KBR-82's conformance
+        run) reaches every branch here with arbitrary JSON, and a body that
+        violates the Gemini schema is a 400-shaped input, not a 500.
+        """
+        if not isinstance(content, dict):
+            return None
         role = content.get("role", "user")
         parts = content.get("parts", [])
+        if not isinstance(parts, list):
+            parts = []
+        parts = [p for p in parts if isinstance(p, dict)]
         cc_role = _ROLE_MAP.get(role, role)
 
         # Check for functionResponse (tool result)
@@ -236,7 +256,7 @@ class GeminiTranslator:
             results = []
             for part in parts:
                 fr = part.get("functionResponse")
-                if fr:
+                if isinstance(fr, dict) and isinstance(fr.get("name"), str):
                     # Echo the inbound wire id; synthesise only when absent (KBR-195).
                     results.append(
                         {
@@ -254,7 +274,7 @@ class GeminiTranslator:
             thought_parts = []
             for part in parts:
                 fc = part.get("functionCall")
-                if fc:
+                if isinstance(fc, dict) and isinstance(fc.get("name"), str):
                     # Echo the inbound wire id; synthesise only when absent (KBR-195).
                     tool_calls.append(
                         {
@@ -289,10 +309,23 @@ class GeminiTranslator:
         return None
 
     def _translate_tools(self, gemini_tools: list[dict]) -> list[dict]:
-        """Convert Gemini functionDeclarations to CC tools."""
+        """Convert Gemini functionDeclarations to CC tools.
+
+        A ``tools`` value that is not a list, tools that are not dicts, and
+        declarations without a string ``name`` are skipped: a function tool
+        without a name is unusable on the CC wire, and dropping it beats
+        crashing the request (schemathesis reaches here with arbitrary JSON —
+        KBR-82's conformance run).
+        """
         cc_tools: list[dict] = []
+        if not isinstance(gemini_tools, list):
+            return cc_tools
         for tool in gemini_tools:
+            if not isinstance(tool, dict):
+                continue
             for fd in tool.get("functionDeclarations", []):
+                if not isinstance(fd, dict) or not isinstance(fd.get("name"), str):
+                    continue
                 cc_tools.append(
                     {
                         "type": "function",
@@ -307,8 +340,27 @@ class GeminiTranslator:
 
     @staticmethod
     def _extract_text(content: dict) -> str:
-        """Extract concatenated text from a Gemini Content object."""
-        return "\n".join(p.get("text", "") for p in content.get("parts", []) if "text" in p)
+        """Extract concatenated text from a Gemini Content object.
+
+        Calls ``parts[i].text`` for each entry of ``parts``. Schemathesis
+        fuzzing (KBR-82's conformance run) found that a malformed
+        ``systemInstruction`` can be any JSON value at all -- an integer, a
+        list -- and its ``parts`` can hold entries that are not ``dict``
+        instances; the unguarded ``.get`` raised ``AttributeError`` into the
+        request handler, which answered with a 500. Per the Gemini schema a
+        Content is always ``{parts: [{text: ...}, ...]}``; the fuzzer's job
+        is to find bodies that violate the schema, the translator's job is
+        to return no text from the ones that do. The 400 the rest of the
+        bridge returns for a malformed body is the right outcome, not a 500.
+        """
+        if not isinstance(content, dict):
+            return ""
+        parts = content.get("parts", [])
+        if not isinstance(parts, list):
+            return ""
+        return "\n".join(
+            p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p
+        )
 
     @staticmethod
     def _make_tool_call_id(name: str) -> str:

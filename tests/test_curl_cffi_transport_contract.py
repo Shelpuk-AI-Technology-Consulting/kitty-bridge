@@ -1,7 +1,8 @@
 """Dependency contract: what ``curl_cffi`` promises the OpenAI subscription leg.
 
 ``TEST_SUITE.md`` §6.2.4 owes a contract for ``curl_cffi``, whose declared range
-is ``>=0.7`` with **no upper bound** -- the weakest pin in the repo. §2.2's
+is bounded at ``>=0.15,<0.17`` (KBR-283: the ceiling forces every version jump
+through a deliberate upgrade; this suite is that upgrade's gate). §2.2's
 allocation table puts these claims here rather than beside the code that relies
 on them, for one reason: *they are claims about a dependency, not about kitty*.
 Nothing in ``src/kitty`` can be changed to make any of them true.

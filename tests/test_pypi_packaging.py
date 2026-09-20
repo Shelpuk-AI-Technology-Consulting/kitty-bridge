@@ -243,7 +243,13 @@ class TestBuildArtifacts:
 
 
 class TestVersionConsistency:
-    """Verify version is consistent across files."""
+    """Verify cross-file consistency the build and resolvers depend on.
+
+    Two responsibilities: the shipped version agrees between
+    ``src/kitty/__init__.py`` and ``pyproject.toml``, and the declared
+    curl_cffi range matches the pin policy recorded in TEST_SUITE.md
+    section 6.2.4 (KBR-283).
+    """
 
     def test_version_in_init_matches_pyproject(self):
         # Read version from source file to avoid importing stale installed package
@@ -262,4 +268,40 @@ class TestVersionConsistency:
 
         assert init_version == pyproject_version, (
             f"Version mismatch: __init__.py={init_version}, pyproject.toml={pyproject_version}"
+        )
+
+    def test_curl_cffi_pin_matches_recorded_policy(self):
+        """The declared curl_cffi range matches the KBR-283 recorded policy.
+
+        curl_cffi carries the OpenAI subscription legs -- prompts on the API
+        leg, refresh tokens and API keys on the OAuth leg -- and 0.16.3 already
+        showed same-release platform drift (the Windows build honours
+        uppercase ``HTTP_PROXY``; Linux/macOS apply libcurl's CGI-security
+        no-op). The dependency-contract suite
+        (``tests/test_curl_cffi_transport_contract.py``) pins the known-
+        critical behaviours; this character-exact equality is the gate for the
+        unknown ones. Anchored on the dependencies entry (the line whose
+        stripped prefix is ``"curl_cffi``) rather than on a literal-specifier
+        search, so a policy comment that restates the range cannot create a
+        second match -- the KBR-9 literal-agreement trap. ``uv.lock`` is
+        gitignored, so this declaration is the only durable pin. A deliberate
+        upgrade changes the range here AND in ``pyproject.toml`` in one PR,
+        then runs the contract suite against the new resolution.
+        """
+        pyproject = (ROOT / "pyproject.toml").read_text()
+        declared = [
+            line.strip().strip(',"')
+            for line in pyproject.splitlines()
+            if line.strip().startswith('"curl_cffi')
+        ]
+        assert len(declared) == 1, (
+            f"expected exactly one curl_cffi dependency line in pyproject.toml, "
+            f"found {declared!r}"
+        )
+        expected = "curl_cffi>=0.15,<0.17"
+        assert declared[0] == expected, (
+            f"curl_cffi pin drifted from the KBR-283 policy. Expected {expected!r}, "
+            f"found {declared[0]!r}. A deliberate upgrade refreshes the range in "
+            "pyproject.toml and in this test in the same PR, then runs "
+            "tests/test_curl_cffi_transport_contract.py against the new resolution."
         )

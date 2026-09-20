@@ -151,6 +151,75 @@ shell ─► kitty.cli.main.main
   opt-out from claude.ai MCP connectors, which suppresses the banner Claude Code prints when
   `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` shadow the user's claude.ai OAuth login.
 
+### 2.1 Launcher lifecycle and crash recovery (KBR-93, KBR-268)
+
+`launch_async` calls `adapter.prepare_launch(...)` before spawning and
+`adapter.cleanup_launch(...)` from both a `finally` block and an `atexit`
+handler (`cli/launcher.py:241-347`). `SIGKILL`, OOM, and power loss bypass
+both, which is what the crash-recovery tier below repairs; a `SIGTERM` landing
+in the pre-handler window has the same outcome and is accepted
+(`TEST_SUITE.md` §6.3.2). The two adapters patch different surfaces:
+
+- **Claude** (KBR-93) no longer patches any user-owned file: it writes a
+  per-session settings file passed as `--settings`, so the user-global
+  `~/.claude/settings.json` is only read (stale-value warning) and concurrent
+  sessions cannot disturb each other. Its backup trio
+  (`save/load/delete_settings_backup`) and `kitty cleanup`'s phase-1 exact
+  restore serve damage written by pre-per-session versions.
+- **Kilo** (KBR-268) must patch in place: Kilo CLI reads one global config,
+  `~/.config/kilo/kilo.json`, and has no per-session settings flag. kitty
+  injects a `provider.kitty` block (loopback bridge URL + session API key)
+  and overwrites the top-level `model` key with `kitty/<model>`.
+
+The Kilo crash-recovery contract, all of it marker-gated by
+`_kilo_kitty_values_present` (loopback `provider.kitty.baseURL`, or a
+top-level `model` prefixed `kitty/`; a remote-URL `provider.kitty` alone does
+**not** count — a user who named their own provider `kitty` must not have
+their config auto-restored):
+
+1. **Clean-capture backup.** `prepare_launch` writes the byte-exact original
+   to `~/.config/kitty/kilo-config-backup.json` before patching — but only
+   when the captured original carries no kitty markers. *Why:* without this
+   rule, the crash → relaunch sequence captures the *patched* file as the
+   "original" and silently destroys the only good backup
+   (system-design review blocker, 2026-09-18). The invariant this preserves:
+   **the backup file never contains kitty markers.** A malformed original
+   parses as `{}` and counts as clean — the user's bytes are still the honest
+   original.
+2. **Ownership-checked restore.** `cleanup_launch` restores (and deletes the
+   backup) only when the captured original is clean **and** the current
+   `kilo.json` is readable and marker-bearing. Polluted captured original
+   (a concurrent session's patch), clean current file (user hand-edit),
+   missing file, unreadable file → file and backup left alone. *Why
+   marker-presence rather than Claude's per-session injected values:* the
+   whole region kitty touches is kitty-owned, and the one case per-session
+   precision would add — restoring over a same-config sibling's patch — is
+   bounded (that patch is equally dead; the true original wins either way).
+   *Why not a `str`-subclass prepare contract like Claude's `_SessionSnapshot`:*
+   Kilo's adapter is new; carrying the injected values on the returned string
+   would buy precision this analysis shows is unobservable.
+3. **`kitty cleanup` Kilo arm.** `run_kilo_cleanup` (in `cleanup_cmd.py`,
+   called alongside `run_cleanup` from `_run_cleanup`; the worse exit code
+   wins): backup present → exact byte restore (`newline=""` on both legs, the
+   KBR-262 contract) when the current config carries markers or is
+   missing/unreadable; readable config without markers → the backup is stale,
+   delete it, config untouched; no backup → no-op. Restore I/O failures print
+   one `Error:` line and exit 1 — there is no heuristic phase to fall
+   through to. *Why the unreadable-config verdict is the deliberate opposite
+   of `cleanup_launch`'s:* a live session must never guess, so it leaves an
+   unreadable file alone; `kitty cleanup` is an explicit repair request, so
+   the exact backup wins.
+
+**Accepted residuals** (both documented, both the same class Claude accepts):
+a crash of a from-scratch session (no pre-existing `kilo.json`) leaves the
+kitty-only file behind — cleanup cannot distinguish it from user-authored
+content without a backup; and damage from pre-fix kitty versions (or after a
+hand-deleted backup) needs a manual fix. **Rejected alternative** (product
+owner, 2026-09-18): a heuristic strip arm for backupless damage — rejected
+because a backupless heuristic could remove `provider.kitty` but could never
+restore the overwritten `model` key, i.e. it can only half-repair (minimal-fix
+precedent KBR-260).
+
 ## 3. Surviving an SSH disconnect: `--tmux` on the Claude Code agent
 
 ### 3.1 What Claude Code's own `--tmux` does (read from the v2.1.269 binary, checked against live sessions)
@@ -437,12 +506,14 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   `error` chunk on a raw-CC upstream now takes the in-stream failover arm
   (pre-emission) rather than the "error after content" arm — the same
   semantics the converted route has had since KBR-248. **Scope-out,
-  deliberate:** the hold lives in the plain-POST branch only; the
-  custom-transport branch this route re-dispatches into on cross-class
-  failover (KBR-254) synthesises its own CC stream and has no hold, so an
-  empty completion from a `use_custom_transport` failover target still
-  delivers the skeleton within the crossing bound — the same defect one
-  branch over, owned by its own ticket. **Usage note:** usage a discarded
+  deliberate (KBR-248 → KBR-276); closed by KBR-287:** the plain-POST
+  branch's hold covered the converted route and every raw Chat Completions
+  upstream; the `use_custom_transport` segment the KBR-254 cross-class
+  re-dispatch routes into synthesised its own CC stream and had no hold,
+  so an empty completion from a `use_custom_transport` failover target
+  still delivered the skeleton within the crossing bound. KBR-287 retired
+  that scope-out (the fix is recorded below). **Usage note:** usage a
+  discarded
   empty attempt carried is never attributed (the D4 exhaustion terminal
   logs no completion); pre-existing behaviour shared with the converted
   route. The reasoning asymmetry the KBR-248 record called deliberate is
@@ -496,8 +567,107 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   minted. Tests: `tests/bridge/test_raw_cc_empty_hold.py` (streaming,
   three new "does-not-fire" tests), `tests/bridge/test_empty_response_retry.py`
   (non-streaming unit + bridge twin), `tests/bridge/test_messages_translator.py`
-  (translator coercion), `tests/bridge/test_empty_response_reasoning_properties.py`
-  (agreement property extended to the three new axes).
+  (translator coercion), `tests/bridge/test_responses_translator.py`
+  (sibling-route coercion, Codex CLI), `tests/test_gemini_translator.py`
+  (sibling-route coercion, Gemini CLI),
+  `tests/bridge/test_empty_response_reasoning_properties.py` (agreement
+  property extended to the three new axes).
+- **KBR-287 closed the last leg — the `use_custom_transport` segment of
+  `_stream_chat_completions`** (grep anchor: `# Custom-transport providers
+  return Responses API SSE but CC clients`). A content-less completion from
+  Bedrock, Ollama Cloud, the Codex subscription — any adapter resolving
+  `use_custom_transport = True`, reached as the initial draw or through a
+  KBR-254 cross-class re-dispatch — had synthesised its own CC chunk
+  sequence and written it unconditionally: role chunk → finish → `[DONE]`,
+  the ladder unable to fire, the backend staying healthy while a balancing
+  pool kept routing to it. The branch now records its synthesised
+  payloads/lines and applies one up-front verdict through the shared
+  `_cc_chunk_carries_content` before any write: content-bearing → write
+  every line in synthesis order (byte-identical wire output); content-free →
+  write nothing and take the ladder. Four decisions the review settled,
+  each against a plausible alternative:
+  - *Judge-first, not an incremental hold-walk.* The plain-POST hold
+    buffers because a streaming branch does not know the future when its
+    first line arrives; this branch parses the entire upstream response
+    before emitting, so there is no unknown future to buffer against. A
+    `held` buffer here would be write-deferral with extra state, and the D5
+    `MAX_HELD_BYTES` cap could never fire (the only holdable lines are the
+    synthesised role/finish/`[DONE]`, tiny against 10 MiB) — the cap and
+    the non-JSON fail-open are satisfied **by construction**. This
+    deliberately simplifies the ticket's mechanism wording, which assumed
+    the plain-POST line-arrival shape.
+  - *The ladder ends in `empty_response`, not the ticket's
+    `cross_class_exhaustion`.* The ticket's acceptance named the cap-hit
+    terminal; reusing it would break §5.3 S8's promise that a client
+    branching on this route's `type` can tell the crossing-cap hit (a
+    pathological ping-pong — a configuration problem) apart from
+    `empty_response` (the upstream returned nothing — transient), and
+    would make the same all-attempts-empty failure carry different
+    discriminators depending on pool composition. The branch emits
+    `_NATIVE_EMPTY_REPLY_MESSAGE` + `type: "empty_response"` + `[DONE]`,
+    uniform with the plain-POST twin; the backend is not marked healthy
+    and no usage is logged (a discarded empty attempt is not a
+    completion).
+  - *The empty arm's backend selection is class-agnostic, mirroring the
+    plain-POST idiom* (grep anchor: `Check for empty response
+    (pass-through: no content bytes written)`). A custom-first tier pair
+    was rejected: empties never mark a backend unhealthy, so a mixed pool
+    [custom-empty, plain-good] would have spent every attempt re-selecting
+    among customs and never tried the plain backend — worst exactly in the
+    cross-class scenario this ticket exists for. The selected provider's
+    class decides: custom → re-normalise + refresh the
+    `_resolved_key`/`_provider_config` keys + next attempt; plain → pop
+    the three custom keys + the branch's fall-through (grep anchor:
+    `Cross-mode failover: entering standard streaming path`). The
+    custom→plain crossing is uncapped like the exception path's arm;
+    termination is bounded by the reverse direction — only plain→custom
+    crossings `continue` the dispatch loop, capped at `(2 * n_backends) +
+    1`, and a custom→plain fall-through happens at most once per pass.
+  - *The attempt bound is `n_backends + len(_EMPTY_FINAL_DELAYS)`, not the
+    plain-POST `(_MAX_RETRIES + 1) * n_backends + len(...)`.* The
+    plain-POST bound bakes in that branch's transport-error ladder (6
+    attempts on a single-backend pool with `_MAX_RETRIES = 3`); the custom
+    branch's transport errors ladder within `n_backends` via its own
+    exception path (grep anchor: `Custom-transport failover: attempt`),
+    so its "original" budget is the failover walk and only the empty
+    ladder extends it (3 attempts single-backend, all against the same
+    provider — empties never mark a backend unhealthy). The
+    final-delay prologue mirrors the plain-POST loop's (grep anchor:
+    `Empty upstream response: final retry in`); the exception path's
+    `attempt < n_backends - 1` gate keeps its meaning.
+  Two structural facts the next reader needs: the synthesis projects only
+  `content` and `tool_calls` — neither parser surfaces
+  `reasoning_content`, so a reasoning-only completion from a custom
+  transport synthesises the empty shape and ladders (the reasoning was
+  never delivered pre-fix either; the projection gap is not this ticket's
+  to close); and of KBR-285's widening set only the **list-content**
+  clause is reachable here (refusal and legacy dict `function_call` are
+  never projected), consumed at the same predicate the plain-POST branch
+  uses — one classifier, both branches, lockstep by construction. Usage
+  logging is log-on-release: the content path logs exactly as today,
+  including on client disconnect (the branch parses atomically, so usage
+  is fully known regardless of client state; the plain-POST
+  never-log-on-disconnect is a structural consequence of incremental
+  arrival, not a policy to copy). Tests:
+  `tests/bridge/test_custom_transport_empty_hold.py`
+  (the KBR-276 harness shape, canned bytes through the branch's real
+  parse step, parametrised over `BedrockAdapter` / `OllamaCloudAdapter` /
+  `OpenAISubscriptionAdapter`; the ticket's `vertex` mention is a ticket
+  correction — `VertexAIAdapter` is a plain-POST OpenAI-compatible
+  passthrough on this tree and was already held by KBR-276). **The CI
+  round-1 review closed a second gap in the same change:** Bedrock's
+  `stream_request` emits translated CC-SSE bytes, which the branch's
+  Responses-SSE fallback cannot read — so every Bedrock completion
+  parsed content-free, pre-KBR-287 the bridge answered with a content-free
+  skeleton regardless of the completion's real content, and the first
+  KBR-287 cut made that a guaranteed ladder-to-terminal failure.
+  `BedrockAdapter.parse_stream_to_cc_response` (mirroring
+  `OllamaCloudAdapter`'s) is the fix: the branch now judges Bedrock's
+  real content, the botocore harness's bridge-driven test
+  (`test_a_streamed_request_via_the_bridge_yields_content_and_finish_reason`)
+  asserts content and finish_reason reach the client, and the same
+  single-predicate rule holds — the parser feeds `_cc_chunk_carries_content`
+  through the synthesis like every other adapter.
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
@@ -1063,3 +1233,141 @@ kbr158_delete_dead_profile_base_url.md` carries the same note for the next reade
   post-deletion state.
 
 
+
+## 11. Credential store
+
+Traces to [KBR-87](https://shelpuk.atlassian.net/browse/KBR-87) (T-G12, §6.2.4's `keyring`
+row + the KBR-154 scope addition). This section is the To Be state of
+`src/kitty/credentials/`; TEST_SUITE.md §6.2.4 owns the dependency-contract test for
+`keyring`.
+
+### 11.1 Components
+
+- **`store.py`** — `CredentialBackend` (abstract `get`/`set`/`delete`), `CredentialError`,
+  `CredentialNotFoundError`, and `CredentialStore`: a fallback chain; `get` returns the
+  first non-`None` result (`.strip()`ped); `resolve` raises `CredentialNotFoundError` when
+  every backend returns `None`. **A backend error is a stop, not a miss:**
+  `CredentialStore.get` catches nothing, so `None` advances the fallback chain while a
+  raised `CredentialError` aborts it. With today's single-backend chains the difference is
+  unobservable; the invariant is recorded so the ticket that wires a second backend
+  inherits it rather than rediscovers it.
+- **`file_backend.py`** — `FileBackend`: JSON `{ref: base64}` under
+  `platformdirs.user_config_dir("kitty")/credentials.json` (or an explicit path), guarded
+  by a `filelock` (5 s timeout, F38), written atomically (`mkstemp` + `os.replace`) with
+  POSIX `0600`/`0700`. F37: a file that is not valid **JSON** is backed up
+  (`*.corrupt.<ts>.<pid>`) and the store restarts empty behind a CRITICAL log. **The F37
+  guarantee is narrower than "file corruption":** a valid-JSON-non-dict file is silently
+  treated as `{}` (no backup, no log) and an invalid-UTF-8 file raises `UnicodeDecodeError`
+  out of `read_text`, which no handler catches. Both are pre-existing KBR-154 residuals,
+  recorded here rather than silently absorbed into this ticket's contract.
+- **`keyring_backend.py`** — `KeyringBackend`: delegates to the `keyring` package with
+  service name `"kitty"`. `get` swallows every exception to `None`; `set` wraps failures in
+  `CredentialError` (F39 — headless Linux without D-Bus raises `NoKeyringError`); `delete`
+  suppresses `keyring.errors.PasswordDeleteError` only. **Dormant by construction:** no
+  production site wires it into a `CredentialStore` — every construction site uses
+  `CredentialStore(backends=[FileBackend(...)])`. It is the exported OS-native option; the
+  §6.2.4 contract pins what it would get from `keyring` the day it is wired.
+
+### 11.2 The corruption contract (KBR-87)
+
+`FileBackend.get` distinguishes **absent** from **corrupt**:
+
+- ref not in the store → `None` ("no credential");
+- ref present but the stored value is not decodable → `CredentialError` naming the ref,
+  chained (`raise ... from`) from the cause. Undecodable means one of the four measured
+  shapes: not valid base64 (`binascii.Error`), a non-ASCII string (`ValueError` — raised
+  by `b64decode`'s ASCII-encode step, independent of the `validate=` flag), decoded bytes
+  not valid UTF-8 (`UnicodeDecodeError`), or a non-string stored value (`TypeError` — the
+  file is user-editable JSON). An explicit JSON `null` value is the **absent** spelling,
+  not corruption: `set()` never writes it and `data.get(ref)` returns `None` for it, so
+  it takes the absent branch by construction — pinned by test. `binascii.Error` and
+  `UnicodeDecodeError` both subclass
+  `ValueError`, so the handler is `except (ValueError, TypeError)` — exactly as narrow as
+  naming the subtypes, and complete over every measured shape.
+
+**Where the signal lands — per call site.** The raise is only half the contract; a signal
+nobody receives is a traceback on every startup path:
+
+- **`egress_store.resolve_egress`** — catches `CredentialError` around the stored-gateway
+  password read and re-raises its existing `ValueError` (chained, cause text included).
+  This is load-bearing: `cli/main.py` wraps `resolve_egress` in `except ValueError` with a
+  deliberate carve-out keeping `kitty egress` / `kitty cleanup` reachable when the stored
+  gateway is broken — without this receiver, `kitty egress`, the very command the message
+  tells the user to run, would die at startup.
+- **`bridge_runner.py`** (both branches — single profile and balancing members) — the
+  same `Error: …` + exit treatment as `cli/main.py`; this is the background-bridge
+  startup path, where the child's output lands in the service journal and a raw
+  traceback is precisely the diagnostic failure the contract exists to prevent.
+  (Added in review round 1 — the first receiver survey grepped `cli/` only and missed
+  these two sites; the omission was an oversight, not a scoping decision.)
+- **`cli/launcher.py`** — the launch path's `except CredentialNotFoundError` widens to
+  include `CredentialError`: same clean `Error: …` + exit 1.
+- **`cli/main.py`** (three profile-resolution sites) — `cred_store.get` is wrapped so the
+  corruption message replaces what would otherwise be a raw traceback where today a clean
+  `No API key found for profile X` + exit fires.
+- **`cli/profile_cmd._find_reusable_auth_ref`** — a corrupt profile is skipped (treated as
+  not reusable) so the setup wizard stays reachable; re-entry *is* the recovery.
+- **`cli/doctor_cmd.py`** (both credential checks) — corruption is reported as a failed
+  check with the corruption message; the diagnostic tool must not crash on the condition it
+  exists to diagnose.
+
+**Why fail-loud rather than warn-and-return-None.** Collapsing "damaged" into "absent"
+surfaces both as `CredentialNotFoundError` ("no API key for profile X"), which sends the
+user to re-enter a key they already have — the KBR-134/KBR-154 diagnostic family, where the
+misleading message costs more than the underlying fault. A CRITICAL-log precedent already
+exists for file-level corruption (F37); per-ref corruption now raises through the same
+exception hierarchy `KeyringBackend.set` already uses (F39). *Product owner decision,
+2026-09-19 (raise `CredentialError`; warn-and-None and a sentinel result type were the
+rejected alternatives — the former is indistinguishable at the boundary, the latter breaks
+the `str | None` interface at five call sites).*
+
+**Why `validate=True`.** `set` writes pure base64 alphabet, so `validate=True` accepts
+everything the store itself writes and rejects hand-edited or damaged values that the
+default silently truncates into plausible garbage. The load-bearing arm is pinned by
+test: `"ab@=="` strips to the length-valid `"ab=="` and silently decodes to the
+single byte `b"i"` under `validate=False` — corruption read back as a plausible
+single-character credential — while `validate=True` rejects it outright.
+
+### 11.3 The keyring dependency contract
+
+§6.2.4's rule for a dependency whose behaviour varies by platform **by design** ("where no
+stable neighbour exists") is to record which mechanism was chosen. For `keyring` the
+chosen mechanism is: the declared floor `>=23.0` **plus a contract on the resolution
+mechanics**, not on live native services. `tests/test_keyring_backend_contract.py` (L2)
+pins, all measured against the installed release:
+
+1. the module-level API (`get_password`/`set_password`/`delete_password`) delegates to
+   `keyring.get_keyring()` — so pinning `get_keyring()` pins where credentials go;
+2. `PYTHON_KEYRING_BACKEND` selects the backend (`keyring.core.load_env()` — a public
+   module function — is pinned, not the private `_detect_backend` ordering);
+3. resolution always lands on a `keyring.backends.*` class — on every platform, including
+   headless Linux where it is the `fail.Keyring` fallback;
+4. per-platform native class where the native service is reachable: macOS Keychain
+   (developer machines only unless pyobjc is installed — the bare `keyring>=23.0`
+   dependency does not carry it, so on the macOS CI leg this arm skips with a stated
+   reason rather than pretending coverage), Windows Credential Manager (pywin32-ctypes is
+   a base dependency, so the Windows leg genuinely asserts);
+5. `keyring.errors.PasswordDeleteError` ⊂ `KeyringError` — the exception family
+   `KeyringBackend.delete` suppresses.
+
+**Deliberately not asserted:** a specific native class on Linux unconditionally. On a
+D-Bus-equipped developer box the SecretService backend classifies and resolution lands on
+the chainer, not `fail.Keyring`; asserting the fallback unconditionally would be red for
+environmental, not contract, reasons — the mirrored form of the trap the ipaddress
+contract's docstring records. The fallback is asserted only behind a SecretService-
+unavailable guard.
+
+### 11.4 Verification
+
+- `tests/test_keyring_backend_contract.py` (L2) — the five §6.2.4 pins above plus the
+  no-op self-guard (sync-test count floor; the aiohttp twin's guard counts coroutine
+  methods and does not transfer verbatim).
+- `tests/test_credential_store.py::TestFileBackend` — the corruption arms (parametrised:
+  invalid base64, non-ASCII string, invalid UTF-8, non-string), absent-vs-corrupt, and
+  per-ref isolation; the F37 backup tests in
+  `tests/credentials/test_stage7_credentials.py` are unchanged and stay green.
+- `tests/test_egress_store.py` — the corrupt stored gateway password raises the documented
+  `ValueError` (chained, naming `kitty egress`), the twin of the existing
+  missing-credential test.
+- `tests/test_doctor_cmd.py` / the profile-wizard reuse scan — corruption reported, flow
+  stays reachable.
