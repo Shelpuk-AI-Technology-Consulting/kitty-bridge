@@ -652,6 +652,14 @@ async def test_an_exhausted_custom_transport_empty_ladder_ends_in_the_d4_termina
     error_events = [event for event in _parse_data_lines(client_body) if event.get("type") == "error"]
     assert any(event.get("code") == "empty_response" for event in error_events)
     assert _NATIVE_EMPTY_REPLY_MESSAGE in client_body
+    # The D4 arm synthesizes the lifecycle closer with ``status: incomplete``
+    # before EOF — the Codex client expects the full lifecycle even when
+    # every attempt was empty, so a half-open lifecycle (error event with no
+    # closing ``response.completed``) would leave the conversation corrupt.
+    completed_events = [
+        event for event in _parse_data_lines(client_body) if event.get("type") == "response.completed"
+    ]
+    assert any(event.get("response", {}).get("status") == "incomplete" for event in completed_events)
     # The held synthesis was discarded, not flushed: no content on the wire,
     # and no raw Chat Completions chunk either.
     assert _responses_text_deltas(client_body) == []
