@@ -2506,28 +2506,38 @@ Feature: The upstream provider cannot tell Kitty Bridge is there
 
 Feature: Configured egress cannot be bypassed
 
+  # Delivered by KBR-109 (T-J3) at tests/acceptance/features/egress.feature.
+  # The L4 wording below reflects what shipped: EG-0 exercises the bridge's
+  # own aiohttp serving path rather than "each supported transport" — the
+  # per-transport matrix stays at L3 (T-E3 curl_cffi, T-E4 botocore, T-E5
+  # provider-aiohttp) per the §2.2 allocation rule. "The provider" reads as
+  # "the recording upstream" in the shipped scenarios because the harness
+  # stands the provider in with a recorder.
+
   Scenario: EG-0  The destination is reachable directly when egress is off
     Given no egress gateway configured
-    When kitty sends a request on each supported transport
-    Then the provider records the connection
+    When a turn is sent through the bridge serving path
+    Then the recording upstream records the connection
+    And the egress proxy saw no connection attempt
     # Control. Without it, EG-2 can pass because nothing could ever arrive.
 
   Scenario: EG-1  Every request arrives through the gateway
     Given a configured egress gateway
     When Claude Code runs a session through kitty
-    Then every connection the provider accepts arrived through the gateway
+    Then every connection the recording upstream accepted arrived through the gateway
 
   Scenario: EG-2  Traffic stops rather than leaks
     Given a configured egress gateway that has become unreachable
     When Claude Code sends a turn through kitty
     Then the turn fails with a clear error
-    And the provider receives nothing
+    And the recording upstream receives nothing
 
   Scenario: EG-3  An unproxyable profile stops the launch
     Given a configured egress gateway
     And a profile whose transport cannot honour it
     When the user runs kitty
-    Then kitty refuses to start and names the profile
+    Then kitty refuses to start
+    And the refusal names the profile
 ```
 
 **One scenario carries an assertion-level exemption.** The Acceptance job gates every PR (§8), so

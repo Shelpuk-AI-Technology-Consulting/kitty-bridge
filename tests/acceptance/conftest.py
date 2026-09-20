@@ -32,11 +32,55 @@ is the route.
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 from harness.bridge import BridgeFixture, WireFormat, transport
+from harness.connect_proxy import CertFiles, proxy_config
+from harness.containment import SealedNetwork
+from harness.containment import WireFormat as ContainmentFormat
 from teardown import teardown_clean_path
+
+from kitty.egress import EgressConfig
+
+#: The profile name the EG-3 scenario uses; asserted in the stderr check.
+EG3_PROFILE_NAME = "bedrock-sso"
+
+#: bpo-44011: aiohttp's TLS-in-TLS over stdlib asyncio landed in Python 3.11.
+#: The EG-1 / EG-2 scenarios drive the proxied (TLS-in-TLS) shape, so the
+#: same guard the L3 slice applies (``_AIOHTTP_NEEDS_311`` in
+#: tests/harness/test_aiohttp_containment_slice.py) is mirrored here — the
+#: alternative on 3.10 is a CI leg that fails on a known dependency shape.
+_AIOHTTP_NEEDS_311 = sys.version_info < (3, 11)
+
+
+def pytest_bdd_apply_tag(tag: str, function: object) -> object:
+    """Map the ``@needs_python_311`` Gherkin tag to a version skipif.
+
+    pytest-bdd calls this hook once per tagged scenario during collection,
+    so the skip is a *collection-time* decision — no drive runs on 3.10
+    and fails on the known bpo-44011 shape.
+
+    Args:
+        tag: The Gherkin tag above the scenario.
+        function: The generated test function the tag applies to.
+
+    Returns:
+        The (possibly marker-decorated) test function.
+    """
+    if tag == "needs_python_311":
+        return pytest.mark.skipif(
+            _AIOHTTP_NEEDS_311,
+            reason="aiohttp requires Python 3.11 for TLS-in-TLS over stdlib asyncio (bpo-44011)",
+        )(function)  # type: ignore[operator]
+    # Any other tag falls through unchanged — pytest-bdd's default
+    # treatment applies (markers not recognised by this hook are still
+    # recorded on the test item, so ``-m @tag`` selection works). Adding
+    # a new branch here is the right path when a future scenario needs
+    # a tag-to-marker mapping.
+    return function
 
 
 @pytest.fixture
@@ -82,3 +126,141 @@ def bridge_session() -> Iterator[tuple[asyncio.AbstractEventLoop, BridgeFixture]
         #   inner try block — the loop is always the conftest's, never the
         #   bridge's, and would strand itself otherwise.
         loop.close()
+
+
+# ── T-J3 (KBR-109) fixtures: sealed network + refusing-profile start path ─
+
+
+@pytest.fixture
+def sealed_network(
+    certs: CertFiles,
+    aiohttp_trusts_test_ca: None,
+) -> Iterator[tuple[asyncio.AbstractEventLoop, SealedNetwork]]:
+    """Yield ``(loop, started SealedNetwork)`` for one EG scenario.
+
+    The loop is owned here, not by pytest-asyncio: pytest-bdd's generated
+    tests are synchronous, and the sealed network's aiohttp servers are bound
+    to the loop that started them — the same constraint
+    :func:`bridge_session` documents for the bridge fixture. A
+    pytest-asyncio-managed fixture would run on a loop that is closed by the
+    time the sync step body executes, stranding every subsequent drive.
+
+    Args:
+        certs: The harness throwaway TLS certificates (from
+            ``harness.connect_proxy``, exposed suite-wide via
+            ``pytest_plugins`` in tests/conftest.py).
+        aiohttp_trusts_test_ca: The harness fixture that points the
+            bridge's aiohttp client trust store at the harness CA. Without
+            it the bridge's outbound TLS handshake to the recorder fails
+            with ``ClientConnectorCertificateError`` — measured, not
+            assumed: the first EG run without it timed out through three
+            blip retries.
+
+    Yields:
+        The asyncio loop and the running harness — proxy + recording
+        upstream sharing :data:`harness.connect_proxy.HARNESS_UPSTREAM_HOST`.
+        Function-scoped on purpose: each EG scenario gets a fresh recorder,
+        so a phase-1 peer-port row cannot leak into a phase-2 "zero
+        connections" assertion across scenarios (the same trap T-E2
+        documents in tests/harness/test_aiohttp_containment_slice.py).
+    """
+    loop = asyncio.new_event_loop()
+    net = SealedNetwork(ContainmentFormat.ANTHROPIC_MESSAGES, certs=certs)
+    try:
+        loop.run_until_complete(net.start())
+        yield loop, net
+    finally:
+        try:
+            loop.run_until_complete(net.stop())
+        finally:
+            loop.close()
+
+
+@pytest.fixture
+def egress_for_sealed_network(
+    sealed_network: tuple[asyncio.AbstractEventLoop, SealedNetwork],
+) -> Iterator[EgressConfig]:
+    """An :class:`EgressConfig` pointed at the sealed network's proxy.
+
+    Args:
+        sealed_network: The ``(loop, net)`` tuple the
+            :func:`sealed_network` fixture yields; only ``net`` is read.
+
+    Yields:
+        The egress configuration the EG-1 and EG-2 steps hand to
+        ``BridgeServer``. Built from the proxy the sealed network is
+        already running so the two fixtures share one source of truth
+        (the proxy URL the recorder expects is the proxy URL the bridge
+        dials).
+    """
+    _, net = sealed_network
+    yield proxy_config(net.proxy.port)
+
+
+@pytest.fixture
+def refusing_profile_start_path(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict]:
+    """Patch every collaborator ``bridge_runner.main`` reads for one EG-3 scenario.
+
+    Mirrors :func:`tests.test_egress_start_path.start_path`. The duplication
+    is deliberate: tests/acceptance/ has no ``l3`` job, and importing the L3
+    fixture across the layer boundary would couple the pytest-bdd binding to
+    that fixture's monkeypatch lifetime.
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture; the patches revert on
+            teardown.
+
+    Yields:
+        A dict the EG-3 step consults: ``captured`` records
+        ``BridgeServer.__init__`` calls, ``egress`` is the egress config
+        the guard rejects against, and ``profile_name`` is the asserted
+        stderr substring.
+    """
+    from kitty import bridge_runner
+
+    egress = EgressConfig(proxy_url="http://proxy.example:1234", username="u", password="s3cr3tpw")
+    # ``main()`` re-resolves egress from the environment or the on-disk store
+    # (bridge_runner.py line 113), so the fixture patches the resolver itself.
+    monkeypatch.setattr("kitty.egress_store.resolve_egress", lambda **kwargs: egress)
+    monkeypatch.setattr("kitty.egress._egress", egress, raising=False)
+
+    captured = {"bridge_server_init_calls": 0}
+
+    class _FakeProfileStore:
+        def get_backend(self, name: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                name=EG3_PROFILE_NAME,
+                provider="bedrock",
+                provider_config={"region": "us-east-1"},
+                auth_ref="dummy-ref",
+                model="anthropic.claude-3-sonnet",
+            )
+
+    class _FakeCredentialStore:
+        def __init__(self, backends: object = None) -> None:
+            pass
+
+        def get(self, ref: str) -> str:
+            # SSO-shaped marker: makes BedrockAdapter.supports_egress return
+            # False, which is what the guard refuses on.
+            return "sso"
+
+    class _BridgeServerSpy:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured["bridge_server_init_calls"] += 1
+
+        async def start_async(self) -> int:
+            raise SystemExit(0)
+
+        async def stop_async(self) -> None:
+            pass
+
+    monkeypatch.setattr("kitty.profiles.store.ProfileStore", _FakeProfileStore)
+    monkeypatch.setattr("kitty.credentials.store.CredentialStore", _FakeCredentialStore)
+    # ``BridgeServer`` is imported at bridge_runner module level, so patch the
+    # binding bridge_runner resolves against, not the source module.
+    monkeypatch.setattr(bridge_runner, "BridgeServer", _BridgeServerSpy)
+    monkeypatch.setattr(bridge_runner.asyncio, "run", lambda coro: coro.close())
+    monkeypatch.setattr(sys, "argv", ["bridge_runner", "--profile", EG3_PROFILE_NAME])
+
+    yield {"captured": captured, "egress": egress, "profile_name": EG3_PROFILE_NAME}
