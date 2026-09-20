@@ -232,12 +232,14 @@ class TestKeyringBackend:
 class TestFileLevelCorruption:
     """KBR-291: `FileBackend.get` surfaces file-level damage as `CredentialError`.
 
-    Shape (b) — invalid-UTF-8 bytes: today `read_text` raises
-    `UnicodeDecodeError` uncaught (⊂ ValueError, not OSError), the launch
-    path crashes raw on every `kitty <profile> <agent>`.
-    Shape (a) — valid JSON that parses to a non-dict: today `_read_raw`
-    silently returns `{}`, no backup, no log; the next `set` destroys the
-    original.
+    Two residuals SYSTEM_DESIGN.md §11.1 recorded as "not fixed" after
+    KBR-87 closed the per-ref half: the file's bytes are not valid UTF-8
+    (shape b — previously raised `UnicodeDecodeError` uncaught on every
+    launch), and its JSON parses to a non-dict (shape a — previously
+    silently returned `{}` so the next `set` destroyed the original).
+    Both now raise at the same boundary (`FileBackend.get`) per-ref
+    corruption already raises from, so the KBR-87 receiver map (§11.2)
+    produces the existing clean message at every call site.
     """
 
     def test_invalid_utf8_bytes_raise_credential_error(self, tmp_path, caplog):
@@ -302,6 +304,45 @@ class TestFileLevelCorruption:
     @pytest.mark.parametrize(
         "payload",
         [
+            b"\xff\xfe\xfd",  # shape (b) — invalid UTF-8
+            b'["not", "a", "dict"]',  # shape (a) — non-dict JSON
+        ],
+    )
+    def test_write_path_forgives_without_a_preceding_get(self, tmp_path, caplog, payload):
+        """D6 pin: `set` swallows the file-level raise via
+        ``_read_raw_for_write`` so the recovery command stays reachable.
+
+        Critically, no ``backend.get(...)`` runs first — without D6, this
+        test would fail with ``CredentialError`` on the ``set`` itself,
+        re-creating the KBR-154 diagnostic family this ticket exists to
+        eliminate. The preceding-``get`` variants in
+        ``test_invalid_utf8_then_set_does_not_lose_the_backup`` and
+        ``test_valid_json_non_dict_then_set_preserves_the_backup`` pass
+        even if ``_read_raw_for_write`` were removed, because the first
+        ``get`` already resets the file to ``{}``; this test is the one
+        that fails without D6.
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        with caplog.at_level(logging.CRITICAL, logger="kitty.credentials.file_backend"):
+            backend.set("new-ref", "new-value")  # must not raise
+
+        # The CRITICAL log + backup fired from the write path's first
+        # ``_read_raw`` before the raise was swallowed.
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert len(backups) == 1, "Write path must back up the corrupt file"
+        assert backups[0].read_bytes() == payload
+        assert any(r.levelno >= logging.CRITICAL for r in caplog.records), (
+            "Write path must log CRITICAL even though it swallowed the raise"
+        )
+        # The write succeeded — the new ref reads back.
+        assert backend.get("new-ref") == "new-value"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
             b'["not", "a", "dict"]',  # top-level list
             b'"just a string"',  # top-level string
             b"42",  # top-level number
@@ -312,12 +353,12 @@ class TestFileLevelCorruption:
     def test_valid_json_non_dict_raises_credential_error(self, tmp_path, caplog, payload):
         """Shape (a): JSON that parses to a non-dict raises `CredentialError`.
 
-        Today this returns `{}` silently — no backup, no log — and the
-        next `set` overwrites the file with no trace of the original.
-        The CRITICAL log names both the file path and the backup path
-        (AC7); the exception message matches the file path so the
-        per-ref template ("Credential for ref …") cannot be silently
-        reused (AC8).
+        Before KBR-291 this returned `{}` silently — no backup, no log
+        — and the next `set` overwrote the file with no trace of the
+        original. The CRITICAL log names both the file path and the
+        backup path (AC7); the exception message matches the file path
+        so the per-ref template ("Credential for ref …") cannot be
+        silently reused (AC8).
         """
         path = tmp_path / "creds.json"
         path.write_bytes(payload)
@@ -356,8 +397,8 @@ class TestFileLevelCorruption:
         backup stays untouched — the recovered record.
 
         This is the acceptance-criterion-2 arm: without the backup, the
-        next `set` would silently overwrite the original (the §11.1
-        recorded residual).
+        next `set` would have silently overwritten the original (the
+        §11.1 recorded residual).
         """
         path = tmp_path / "creds.json"
         payload = b'["not", "a", "dict"]'

@@ -103,7 +103,11 @@ class FileBackend(CredentialBackend):
 
         Returns:
             The parsed ``{ref: base64}`` dict, or an empty dict when the
-            file is absent.
+            file is absent or its JSON is invalid (the F37 path: invalid
+            JSON is backed up to ``*.corrupt.<ts>.<pid>``, the store
+            resets to ``{}``, and ``get`` returns ``None`` — a
+            deliberately different signal from the file-level raises
+            below).
 
         Raises:
             CredentialError: When the file exists but is damaged — its
