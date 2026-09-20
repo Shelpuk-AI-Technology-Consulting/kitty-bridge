@@ -738,6 +738,47 @@ class TestTranslateResponse:
         assert tb["name"] == "get_weather"
         assert tb["input"] == {"city": "London"}
 
+    def test_legacy_function_call_response_maps_to_tool_use(self):
+        """KBR-285 — the deprecated dict ``function_call`` becomes one tool_use block.
+
+        Pre-fix the block was dropped (no code read ``function_call``), so a
+        legacy-function_call-only reply rendered as the generic fallback text
+        instead of the tool call — reachable once the widened detector stops
+        retrying such replies.
+        """
+        cc_response = {
+            "id": "chatcmpl-legacy",
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "function_call": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "London"}',
+                        },
+                    },
+                    "finish_reason": "function_call",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+        }
+        result = self.t.translate_response(cc_response)
+        assert result["stop_reason"] == "tool_use"
+        tool_blocks = [b for b in result["content"] if b["type"] == "tool_use"]
+        assert len(tool_blocks) == 1
+        assert tool_blocks[0]["name"] == "get_weather"
+        assert tool_blocks[0]["input"] == {"city": "London"}
+        # The call was content: the generic fallback did not fire beside it.
+        fallback_texts = [
+            b["text"]
+            for b in result["content"]
+            if b["type"] == "text" and "Kitty Bridge" in b.get("text", "")
+        ]
+        assert fallback_texts == []
+
     def test_stop_reason_mapping(self):
         for finish_reason, expected in [("stop", "end_turn"), ("tool_calls", "tool_use"), ("length", "max_tokens")]:
             cc_response = {
@@ -1133,6 +1174,150 @@ class TestTranslateStreamChunk:
         assert "/clear" in event_blob
         assert "retry" in event_blob.lower()
         assert "message_stop" in event_blob
+
+    # KBR-285: a raw-CC upstream may stream the widened classifier's new
+    # shapes at a Messages client; translate_stream_chunk must carry each of
+    # them as renderable Messages events instead of dropping them into the
+    # generic fallback (or worse, writing a non-string onto the wire).
+
+    @staticmethod
+    def _delta_texts(events: list[str]) -> list[str]:
+        """Extract every ``text_delta`` payload from translated SSE events.
+
+        Args:
+            events: The translated SSE event strings.
+
+        Returns:
+            The ``text`` values, in emission order.
+        """
+        texts: list[str] = []
+        for event in events:
+            if "content_block_delta" not in event:
+                continue
+            payload = json.loads(event.split("data: ", 1)[1])
+            delta = payload.get("delta", {})
+            if delta.get("type") == "text_delta":
+                texts.append(delta["text"])
+        return texts
+
+    def test_refusal_delta_emits_the_refusal_text(self):
+        """KBR-285 — a refusal-only delta becomes the refusal text on the wire."""
+        msg_id = self._make_message_id()
+        chunk = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": None, "refusal": "I can't help with that."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+
+        events = self.t.translate_stream_chunk(msg_id, "claude-3-opus", chunk)
+        finish_events = self.t.translate_stream_chunk(
+            msg_id,
+            "claude-3-opus",
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        )
+
+        assert self._delta_texts(events + finish_events) == ["I can't help with that."]
+        # The refusal was content: no generic fallback fired at finish.
+        assert "/clear" not in "\n".join(finish_events)
+
+    def test_list_content_delta_emits_joined_text_string(self):
+        """KBR-285 — a list of multimodal parts becomes joined string deltas, not a raw list."""
+        msg_id = self._make_message_id()
+        chunk = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": [
+                            {"type": "text", "text": "here is the chart"},
+                            {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        }
+
+        events = self.t.translate_stream_chunk(msg_id, "claude-3-opus", chunk)
+
+        texts = self._delta_texts(events)
+        assert texts == ["here is the chart"]
+        # Every text_delta carried a str — no raw list leaked onto the wire.
+        assert all(isinstance(t, str) for t in texts)
+
+    def test_legacy_function_call_stream_builds_one_tool_use_block(self):
+        """KBR-285 — legacy dict ``function_call`` deltas open one tool_use block, arguments accumulate."""
+        msg_id = self._make_message_id()
+        model = "claude-3-opus"
+
+        open_events = self.t.translate_stream_chunk(
+            msg_id,
+            model,
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"function_call": {"name": "read_file", "arguments": '{"path": '}},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+        )
+        arg_events = self.t.translate_stream_chunk(
+            msg_id,
+            model,
+            {
+                "choices": [
+                    {"index": 0, "delta": {"function_call": {"arguments": '"a"}'}}, "finish_reason": None}
+                ],
+            },
+        )
+        finish_events = self.t.translate_stream_chunk(
+            msg_id,
+            model,
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "function_call"}]},
+        )
+
+        # Exactly one tool_use block opened, at a tool_use block_start.
+        starts = [
+            json.loads(e.split("data: ", 1)[1])
+            for e in open_events
+            if "content_block_start" in e
+        ]
+        tool_starts = [s for s in starts if s.get("content_block", {}).get("type") == "tool_use"]
+        assert len(tool_starts) == 1
+        assert tool_starts[0]["content_block"]["name"] == "read_file"
+        # The arguments accumulated across the two deltas into one input_json_delta stream.
+        json_deltas = [
+            json.loads(e.split("data: ", 1)[1])
+            for e in open_events + arg_events
+            if "content_block_delta" in e
+        ]
+        joined = "".join(
+            d["delta"].get("partial_json", "") for d in json_deltas if d["delta"].get("type") == "input_json_delta"
+        )
+        assert json.loads(joined) == {"path": "a"}
+        # The call was content: no generic fallback fired at finish.
+        assert "/clear" not in "\n".join(finish_events)
+
+    def test_refusal_and_function_call_absent_still_falls_back(self):
+        """No regression: a content-free delta still takes the generic fallback at finish."""
+        msg_id = self._make_message_id()
+        chunk = {
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+        }
+        self.t.translate_stream_chunk(msg_id, "claude-3-opus", chunk)
+        finish_events = self.t.translate_stream_chunk(
+            msg_id,
+            "claude-3-opus",
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        )
+
+        assert "/clear" in "\n".join(finish_events)
 
     def test_finalize_interrupted_stream_closes_open_text_block(self):
         msg_id = self._make_message_id()

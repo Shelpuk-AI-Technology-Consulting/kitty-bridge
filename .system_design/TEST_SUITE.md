@@ -1914,6 +1914,7 @@ None`. `mutmut` closes that gap.
   | `kitty.providers.model_context.*` | Where the compaction budget is actually resolved since KBR-151. The `_get_max_context_chars*` row above now covers a dispatcher: it reads `_active_model` and hands both catalogs to `_resolve_catalog`. A mutation in the matcher — dropping the tail retry, collapsing ambiguity into a miss — changes every budget in the product and would not be caught by any target listed above |
   | `kitty.providers.openai_subscription._cc_to_responses*`, `_prepare_responses_body*`, `_convert_content_types*`, `_build_user_agent*` | P13–P17 and the F1 user-agent. These are where the subscription path's real body is built; omitting them lets the score stay healthy while nothing detects a regression in the mutations this design only just registered |
   | `kitty.providers.bedrock.BedrockAdapter._bedrock_body*` (KBR-89, T-H2) | P18 — the Converse body's `modelId`/`stream` pops. Lived inside the network methods before this row existed; the refactor pulled the body shaping into a pure builder so mutmut could reach it. Same per-adapter shape as the row above — a sibling, not a `provider_hooks` member |
+  | `kitty.bridge.server._cc_chunk_carries_content*`, `BridgeServer._is_empty_cc_response*` (KBR-285) | The streaming hold's release predicate and the non-streaming empty-response detector's Chat Completions arm — the byte-for-byte mirror between them (KBR-277) is the recorded decision; mutating both side-by-side catches any drift. The widening (refusal / legacy `function_call` / multimodal list `content`) moved both predicates into this scope and retired the §5.4 known-limit clause |
   | `kitty.egress`, `kitty.egress_guard` | I3, including the startup guard |
   | `kitty.bridge.tool_audit`, `kitty.profiles.*`, `kitty.validation` | Supporting correctness |
 
@@ -1966,14 +1967,20 @@ It was initially deferred because mutmut generates per-file and the
 unscoped mutated copy of `server.py` reached 354 MB without finishing
 generation; [KBR-266](https://shelpuk.atlassian.net/browse/KBR-266)
 narrows generation by marking every def/class in `server.py` except
-the seven `BridgeServer` methods the group names with
-`# pragma: no mutate block`. The marker scheme is pinned by
-`tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_seven`:
-a stray block-level pragma on one of the seven's def headers (or on
+the registry-named targets with `# pragma: no mutate block`. As of
+[KBR-285](https://shelpuk.atlassian.net/browse/KBR-285) the
+registered set is the seven `compaction_and_pairing` methods plus the
+two content predicates (`_cc_chunk_carries_content` and
+`BridgeServer._is_empty_cc_response`); the guard generalises — it
+derives the expected unmarked set from every registry row naming
+`kitty.bridge.server`, so un-marking a new scoped target is a registry
+edit, not a guard edit. The marker scheme is pinned by
+`tests/test_mutmut_scope.py::test_server_py_pragma_scheme_marks_everything_but_the_registered`:
+a stray block-level pragma on a registered target's def header (or on
 the `BridgeServer` class itself) silently shrinks the measured I1
 core, and a missing pragma elsewhere re-opens whole-file generation.
 The guard inspects block-level defs/classes only — a pragma placed
-*inside* one of the seven's bodies on a leading line of a nested
+*inside* a registered method's body on a leading line of a nested
 statement suppresses that branch's mutations without the guard
 noticing; mutmut's config-level `do_not_mutate_patterns` (a regex on
 source lines) is a parallel silent-shrink path the guard cannot see,
@@ -5882,6 +5889,42 @@ no longer reaching the client as a silent empty turn. Empty-response retries on 
 adapters now populate §4.3 C3(i) — T-I8's test obligation must be widened to name the
 raw-CC path alongside the native-passthrough one. Tests:
 `tests/bridge/test_raw_cc_empty_hold.py`.
+
+<<<**Completed by KBR-285 (2026-09-18):** the content-set gap KBR-276 made binding is closed.
+Both `_cc_chunk_carries_content` (the streaming hold's release predicate) and
+`BridgeServer._is_empty_cc_response` (the non-streaming detector's Chat Completions arm)
+now count six shapes — non-empty string `content`, non-empty list `content` (multimodal
+parts), non-empty `tool_calls` list, truthy dict legacy `function_call`, non-empty
+string `refusal`, non-empty string `reasoning_content`. A refusal-only Chat Completions
+reply succeeds on the first attempt on either route, and so does a legacy-function-call
+reply and a multimodal-list reply. On the `/v1/messages` translated route,
+`MessagesTranslator.translate_stream_chunk` coerces list `content` via
+`_extract_text_content`, treats `refusal` as text, and maps legacy `function_call` onto
+the `tool_calls` machinery with a synthesised index/id and accumulating arguments;
+`translate_response` maps a legacy `message.function_call` to one `tool_use` block.
+The two sibling translators that share the same widening path carry the same coercion:
+`ResponsesTranslator` (`/v1/responses`, Codex CLI) and `GeminiTranslator`
+(`/v1beta/...:streamGenerateContent`, Gemini CLI) — pre-fix, `/v1/responses`
+non-stream + list `content` crashed the handler's catch-all as `500 internal_error`
+(TypeError in `_strip_thinking_tags(content)` on a list), and `/v1/responses` +
+`/v1beta` streams + refusal-only or legacy-function_call-only replies still tripped the
+ladder (their `response_was_empty` counted only the pre-widening shapes). Both now carry
+the three shapes with per-translator parallel helpers matching the existing
+`_strip_thinking_tags` precedent.
+`TranslationEngine._FINISH_REASON_MAP` learned the legacy `"function_call"` value so its
+stop_reason maps to `"tool_use"` the same way `"tool_calls"` does; Gemini's
+`_CC_TO_GEMINI_FINISH` learned `"function_call": "STOP"` (Gemini v1beta ends tool turns
+on STOP). The two predicates stay
+as physical functions with the KBR-277 byte-for-byte mirror; both are now mutation-measured
+in the new `content_classifiers` group (the marker-scheme guard was generalised to derive
+the expected unmarked set from every registry row naming `kitty.bridge.server`). Tests:
+`tests/bridge/test_raw_cc_empty_hold.py` (streaming, three new "does-not-fire" tests),
+`tests/bridge/test_empty_response_retry.py` (non-streaming unit + bridge twin),
+`tests/bridge/test_messages_translator.py` (translator coercion),
+`tests/bridge/test_responses_translator.py` (sibling-route coercion, Codex CLI),
+`tests/test_gemini_translator.py` (sibling-route coercion, Gemini CLI),
+`tests/bridge/test_empty_response_reasoning_properties.py` (agreement property extended to
+the three new axes).
 
 **Completed by KBR-287 (2026-09-19):** the hold's last leg — the `use_custom_transport`
 segment of `_stream_chat_completions` (grep anchor: `# Custom-transport providers return

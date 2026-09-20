@@ -130,6 +130,16 @@ TARGET_GROUPS: dict[str, list[Target]] = {
         Target("kitty.egress", None, None),
         Target("kitty.egress_guard", None, None),
     ],
+    # The CC content predicates (KBR-285). The streaming hold's release
+    # predicate and the non-streaming detector's Chat Completions arm carry
+    # a deliberate byte-for-byte mirror (KBR-277); mutating both side-by-side
+    # is the divergence guard the mirror's docstrings cite. Like
+    # compaction_and_pairing, these live in server.py under the pragma
+    # scheme — only their pragmas are absent.
+    "content_classifiers": [
+        Target("kitty.bridge.server", None, "_cc_chunk_carries_content"),
+        Target("kitty.bridge.server", "BridgeServer", "_is_empty_cc_response"),
+    ],
     # Supporting correctness: tool auditing, profile schema/resolver,
     # response-time URL validation.
     "supporting": [

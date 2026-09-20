@@ -518,24 +518,60 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   logs no completion); pre-existing behaviour shared with the converted
   route. The reasoning asymmetry the KBR-248 record called deliberate is
   closed by KBR-277 below; pinned streaming-side by
-  `test_a_reasoning_only_raw_cc_prefix_releases_the_hold`. **Known limit,
-  deliberate for this ticket (KBR-285 owns the widening):** the widened hold
-  makes `_cc_chunk_carries_content`'s three-shape content set binding for
-  raw-CC chunks, and the set counts only non-empty string `content`, a
-  non-empty `tool_calls` list, and non-empty string `reasoning_content`. An
-  OpenAI **refusal-only** completion (`delta.refusal` carrying text,
-  `content` null) — a normal shape on the provider this ticket names first —
-  is therefore held as non-content, takes the ladder, and ends in the D4
-  terminal after the retry schedule, where pre-KBR-276 the refusal text
-  reached the client verbatim; legacy dict `function_call` deltas and
-  list-typed multimodal `content` deltas misclassify the same way. The
-  non-streaming detector `_is_empty_cc_response` shares the narrow set, so
-  the gap is consistent across the route rather than a new asymmetry —
-  widening the classifier is a product decision on what "content" means for
-  every Chat Completions route, the same class of trade KBR-248 deferred,
-  and is filed as KBR-285. Tests:
-  `tests/bridge/test_raw_cc_empty_hold.py` (raw-CC mirror of the KBR-248
-  suite).
+  `test_a_reasoning_only_raw_cc_prefix_releases_the_hold`. **KBR-285 closed the content-set gap on `/v1/chat/completions`.** Both
+  `_cc_chunk_carries_content` (the streaming hold's release predicate) and
+  `BridgeServer._is_empty_cc_response` (the non-streaming detector's Chat
+  Completions arm) widened from KBR-248/KBR-277's three-shape set to six:
+  non-empty string `content`, non-empty list `content` (multimodal parts),
+  non-empty `tool_calls` list, truthy dict legacy `function_call`, non-empty
+  string `refusal`, non-empty string `reasoning_content`. The two predicates
+  stayed as physical functions with a deliberate byte-for-byte mirror (the
+  KBR-277 pattern) — the mirror is the divergence guard, mutation-tested
+  side-by-side in the new `content_classifiers` group. On the
+  `/v1/messages` translated route, `MessagesTranslator` carries the same
+  six shapes: `translate_stream_chunk` coerces list `content` via
+  `_extract_text_content`, treats `refusal` as text, and maps legacy
+  `function_call` onto the `tool_calls` machinery with a synthesised
+  index/id and accumulating arguments; `translate_response` maps a legacy
+  `message.function_call` to one `tool_use` block. The auto-reviewer
+  surfaced that the **same consumer-side gap** lived on the two sibling
+  translators that share the same widening path — `ResponsesTranslator`
+  (`/v1/responses`, Codex CLI) and `GeminiTranslator`
+  (`/v1beta/...:streamGenerateContent`, Gemini CLI). Both are extended in
+  this PR with the same three-shape coercion, parallel
+  `translate_stream_chunk` / `translate_response` for each translator
+  (per-translator list-extract helpers, matching the existing
+  `_strip_thinking_tags` precedent). Pre-fix, `/v1/responses` non-stream
+  + list `content` would have crashed the handler's catch-all as `500
+  internal_error` (TypeError in `_strip_thinking_tags(content)` when
+  `content` is a list), and `/v1/responses` + `/v1beta` streams + refusal-
+  only or legacy-`function_call`-only replies would still have tripped the
+  ladder (their `response_was_empty` counted only the pre-widening shapes).
+  `TranslationEngine`'s `_FINISH_REASON_MAP` learned the legacy
+  `"function_call"` value so its stop_reason maps to `"tool_use"` the
+  same way `"tool_calls"` does; Gemini's `_CC_TO_GEMINI_FINISH` learned
+  `"function_call": "STOP"` (Gemini v1beta ends tool turns on STOP, so the
+  default mapping already lands right). **OpenAI-spec vs OpenAI-compat
+  tension:** OpenAI's first-party `ChatCompletionStreamResponseDelta`
+  declares `content: string | null` (list content is **not** in the
+  first-party spec); the widening's list-`content` clause rests on
+  OpenAI-*compatible* multimodal backends (vLLM serving image-capable
+  models, OpenRouter for image outputs). The two first-party shapes the
+  ticket names — `refusal` and the deprecated `function_call` — are
+  confirmed in OpenAI's OpenAPI schema. **Pre-existing drift kept,
+  deliberately:** the
+  non-streaming `content` clause uses `.strip()` (whitespace-only content
+  is empty) while the streaming predicate's `content` clause uses `!= ""`
+  (whitespace-only content is content). The widening's four new clauses
+  take the streaming-side spelling on both sides so no new drift is
+  minted. Tests: `tests/bridge/test_raw_cc_empty_hold.py` (streaming,
+  three new "does-not-fire" tests), `tests/bridge/test_empty_response_retry.py`
+  (non-streaming unit + bridge twin), `tests/bridge/test_messages_translator.py`
+  (translator coercion), `tests/bridge/test_responses_translator.py`
+  (sibling-route coercion, Codex CLI), `tests/test_gemini_translator.py`
+  (sibling-route coercion, Gemini CLI),
+  `tests/bridge/test_empty_response_reasoning_properties.py` (agreement
+  property extended to the three new axes).
 - **KBR-287 closed the last leg — the `use_custom_transport` segment of
   `_stream_chat_completions`** (grep anchor: `# Custom-transport providers
   return Responses API SSE but CC clients`). A content-less completion from
@@ -612,10 +648,8 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   including on client disconnect (the branch parses atomically, so usage
   is fully known regardless of client state; the plain-POST
   never-log-on-disconnect is a structural consequence of incremental
-  arrival, not a policy to copy). Known limit accepted with the same
-  trade KBR-276 made: until KBR-285 lands, a list-content multimodal
-  completion from a custom transport judges as empty and takes the
-  ladder. Tests: `tests/bridge/test_custom_transport_empty_hold.py`
+  arrival, not a policy to copy). Tests:
+  `tests/bridge/test_custom_transport_empty_hold.py`
   (the KBR-276 harness shape, canned bytes through the branch's real
   parse step, parametrised over `BedrockAdapter` / `OllamaCloudAdapter` /
   `OpenAISubscriptionAdapter`; the ticket's `vertex` mention is a ticket

@@ -533,6 +533,230 @@ class TestTranslateResponse:
         assert len(reasoning_items) == 1
 
 
+class TestKBR285WidenedShapes:
+    """KBR-285 — refusal / list ``content`` / legacy ``function_call`` on /v1/responses."""
+
+    def setup_method(self):
+        self.t = ResponsesTranslator()
+
+    @staticmethod
+    def _function_call_items(output: list[dict]) -> list[dict]:
+        return [o for o in output if o.get("type") == "function_call"]
+
+    @staticmethod
+    def _message_items(output: list[dict]) -> list[dict]:
+        return [o for o in output if o.get("type") == "message"]
+
+    # ── translate_response ──────────────────────────────────────────────
+
+    def test_refusal_only_response_becomes_the_refusal_text(self):
+        """Refusal-only CC reply renders the refusal text in an output_text part."""
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-refusal",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"content": None, "refusal": "I can't help with that."},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        msg_items = self._message_items(result["output"])
+        assert len(msg_items) == 1
+        assert any(
+            block.get("text") == "I can't help with that."
+            for block in msg_items[0].get("content", [])
+        )
+
+    def test_list_content_response_joins_text_parts(self):
+        """List ``content`` joins to one output_text — no raw list on the wire."""
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-mm",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "here is the chart"},
+                                {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                            ]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        msg_items = self._message_items(result["output"])
+        assert len(msg_items) == 1
+        texts = [
+            block["text"]
+            for block in msg_items[0].get("content", [])
+            if block.get("type") == "output_text"
+        ]
+        assert texts == ["here is the chart"]
+        assert all(isinstance(t, str) for t in texts)
+
+    def test_legacy_function_call_response_becomes_one_function_call_item(self):
+        """Legacy dict ``function_call`` becomes one function_call output item."""
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-legacy",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": None,
+                            "function_call": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "London"}',
+                            },
+                        },
+                        "finish_reason": "function_call",
+                    }
+                ],
+            }
+        )
+        fc_items = self._function_call_items(result["output"])
+        assert len(fc_items) == 1
+        fc = fc_items[0]
+        assert fc["name"] == "get_weather"
+        assert fc["arguments"] == '{"city": "London"}'
+        assert fc["status"] == "completed"
+
+    def test_legacy_function_call_non_string_arguments_serialise_as_json(self):
+        """A non-string ``arguments`` value ships as JSON, never a Python repr.
+
+        The detector widening makes any truthy dict ``function_call`` count
+        as content, so a reply like ``{"name": "x", "arguments": {"city": 1}}``
+        is reachable; ``str()`` of the dict would put single-quoted
+        non-JSON text on a wire typed ``arguments: string``.
+        """
+        result = self.t.translate_response(
+            {
+                "id": "chatcmpl-nonstr",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "content": None,
+                            "function_call": {"name": "x", "arguments": {"city": 1}},
+                        },
+                        "finish_reason": "function_call",
+                    }
+                ],
+            }
+        )
+        fc_items = self._function_call_items(result["output"])
+        assert len(fc_items) == 1
+        arguments = fc_items[0]["arguments"]
+        assert isinstance(arguments, str)
+        assert json.loads(arguments) == {"city": 1}
+        # No Python repr leaked: single quotes are never valid JSON.
+        assert "'" not in arguments
+
+    # ── translate_stream_chunk ──────────────────────────────────────────
+
+    @staticmethod
+    def _output_text_deltas(events: list[str]) -> list[str]:
+        """Extract the text payload of every output_text delta event."""
+        deltas: list[str] = []
+        for event in events:
+            if "response.output_text.delta" not in event:
+                continue
+            payload = json.loads(event.split("data: ", 1)[1])
+            deltas.append(payload["delta"])
+        return deltas
+
+    def test_refusal_delta_emits_the_refusal_text(self):
+        """Refusal-only delta streams the refusal text on the wire."""
+        chunk = {
+            "choices": [
+                {
+                    "delta": {"content": None, "refusal": "I can't help with that."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events = self.t.translate_stream_chunk("resp_test", chunk)
+        assert self._output_text_deltas(events) == ["I can't help with that."]
+
+    def test_list_content_delta_emits_joined_text(self):
+        """List ``content`` joins to a single output_text delta string."""
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": [
+                            {"type": "text", "text": "here is the chart"},
+                            {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        }
+        events = self.t.translate_stream_chunk("resp_test", chunk)
+        assert self._output_text_deltas(events) == ["here is the chart"]
+
+    def test_legacy_function_call_stream_accumulates_one_call(self):
+        """Legacy dict ``function_call`` deltas open one function_call item, args accumulate."""
+        open_chunk = {
+            "choices": [
+                {
+                    "delta": {"function_call": {"name": "get_weather", "arguments": '{"city": '}},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        arg_chunk = {
+            "choices": [
+                {
+                    "delta": {"function_call": {"arguments": '"London"}'}},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        finish_chunk = {
+            "choices": [{"delta": {}, "finish_reason": "function_call"}],
+        }
+        self.t.translate_stream_chunk("resp_test", open_chunk)
+        self.t.translate_stream_chunk("resp_test", arg_chunk)
+        events = self.t.translate_stream_chunk("resp_test", finish_chunk)
+        fc_items = [
+            json.loads(event.split("data: ", 1)[1])["item"]
+            for event in events
+            if "response.output_item.done" in event
+            and "function_call" in event
+        ]
+        assert len(fc_items) == 1
+        assert fc_items[0]["name"] == "get_weather"
+        assert json.loads(fc_items[0]["arguments"]) == {"city": "London"}
+
+    def test_refusal_only_stream_judges_non_empty(self):
+        """Refusal-only stream reaches the finish with ``response_was_empty`` False."""
+        refusal = {
+            "choices": [
+                {
+                    "delta": {"content": None, "refusal": "I can't help with that."},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        finish = {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+        }
+        self.t.translate_stream_chunk("resp_test", refusal)
+        self.t.translate_stream_chunk("resp_test", finish)
+        assert self.t.response_was_empty is False
+
+
 # ── translate_stream_start ──────────────────────────────────────────────
 
 

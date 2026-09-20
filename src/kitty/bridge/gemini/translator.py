@@ -100,10 +100,38 @@ def carry_gemini_tool_choice(gemini_request: dict, cc_request: dict) -> None:
 _CC_TO_GEMINI_FINISH: dict[str | None, str] = {
     "stop": "STOP",
     "tool_calls": "STOP",
+    # KBR-285: the legacy single-function wire finishes with
+    # ``function_call``; Gemini has no tool-call finish reason (v1beta ends
+    # tool turns on STOP), so the default mapping already lands right.
+    "function_call": "STOP",
     "length": "MAX_TOKENS",
     "content_filter": "SAFETY",
     None: "STOP",
 }
+
+
+def _extract_text_parts(content: list) -> str:
+    """Extract a joined text string from a multimodal parts list.
+
+    KBR-285: newer multimodal streaming on OpenAI-shaped backends carries
+    ``content`` as a list of content parts. Only text parts carry a string
+    the Gemini wire can hold; image parts have no output equivalent and are
+    dropped (the raw-CC route delivers them verbatim).
+
+    Args:
+        content: The parts list from ``delta.content`` / ``message.content``.
+
+    Returns:
+        The joined text of the list's text parts (empty string when the
+        list carries no text part).
+    """
+    text_parts = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            text_val = part.get("text")
+            if isinstance(text_val, str) and text_val.strip():
+                text_parts.append(text_val)
+    return "\n".join(text_parts)
 
 # ── Gemini role → Chat Completions role ──────────────────────────────────────
 
@@ -376,8 +404,19 @@ class GeminiTranslator:
         if reasoning:
             parts.append({"text": reasoning, "thought": True})
 
-        # Text content
+        # Text content. KBR-285: a raw-CC upstream may deliver content as a
+        # list of multimodal parts — coerce to a joined string — and a
+        # refusal-only reply carries the model's reply on ``refusal`` with
+        # ``content`` null, which becomes text too. A parts list with no
+        # text element coerces to "" and emits no text part: the Gemini wire
+        # has no image-delta equivalent.
         text = message.get("content")
+        if isinstance(text, list):
+            text = _extract_text_parts(text)
+        if not text:
+            refusal = message.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                text = refusal
         if text:
             parts.append({"text": text})
 
@@ -386,13 +425,34 @@ class GeminiTranslator:
             args_str = tc["function"]["arguments"]
             try:
                 args = json.loads(args_str)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
+                # TypeError: a malformed non-string ``arguments`` value
+                # (dict or number) — the detector widening makes the shape
+                # reachable on translated routes, so degrade to {} rather
+                # than a 500.
                 args = {}
             function_call: dict = {"name": tc["function"]["name"], "args": args}
             # Echo the upstream wire id when present; omit when absent (KBR-257).
             if tc.get("id") is not None:
                 function_call["id"] = tc["id"]
             parts.append({"functionCall": function_call})
+
+        # KBR-285: the deprecated single-dict ``function_call`` maps to one
+        # functionCall part, the same shape the ``tool_calls`` loop emits.
+        # No real upstream carries both; if one did, the loop above already
+        # ran and the legacy path appends a second part — the least-bad merge,
+        # recorded for the precondition.
+        function_call = message.get("function_call")
+        has_function_call = isinstance(function_call, dict) and bool(function_call)
+        if has_function_call:
+            try:
+                fc_args = json.loads(function_call.get("arguments", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                fc_args = {}
+            fc_part: dict = {"name": function_call.get("name", ""), "args": fc_args}
+            if function_call.get("id") is not None:
+                fc_part["id"] = function_call["id"]
+            parts.append({"functionCall": fc_part})
 
         if not parts:
             parts.append({"text": ""})
@@ -456,8 +516,17 @@ class GeminiTranslator:
                 )
             )
 
-        # Text delta
+        # Text delta. KBR-285: a raw-CC upstream may deliver content as a
+        # list of multimodal parts — coerce to a joined string — and a
+        # refusal-only delta carries the model's reply on ``refusal`` with
+        # ``content`` null, which becomes text too.
         text = delta.get("content")
+        if isinstance(text, list):
+            text = _extract_text_parts(text)
+        if not text:
+            refusal = delta.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                text = refusal
         if text:
             self._saw_content = True
             events.append(
@@ -473,8 +542,37 @@ class GeminiTranslator:
                 )
             )
 
-        # Tool call delta — buffer arguments
-        for tc in delta.get("tool_calls", []):
+        # Tool call delta — buffer arguments. KBR-285: the deprecated
+        # single-dict ``function_call`` maps onto the same machinery — the
+        # opening delta synthesises the index and carries the name, later
+        # deltas argument-append. The existing ``tool_calls`` branch handles
+        # both shapes unchanged. No real upstream carries both fields; if one
+        # did, a ``tool_calls`` list wins and a later legacy delta appends to
+        # the index-0 buffer that call opened.
+        tool_calls = delta.get("tool_calls") or []
+        if not tool_calls:
+            legacy_call = delta.get("function_call")
+            if isinstance(legacy_call, dict) and legacy_call:
+                if 0 in self._tool_call_meta:
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "function": {"arguments": legacy_call.get("arguments", "")},
+                        }
+                    ]
+                else:
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "id": f"call_{uuid.uuid4().hex[:24]}",
+                            "type": "function",
+                            "function": {
+                                "name": legacy_call.get("name", ""),
+                                "arguments": legacy_call.get("arguments", ""),
+                            },
+                        }
+                    ]
+        for tc in tool_calls:
             idx = tc.get("index", 0)
             func = tc.get("function", {})
 
