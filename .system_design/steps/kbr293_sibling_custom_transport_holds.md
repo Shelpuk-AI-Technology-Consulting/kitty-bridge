@@ -6,8 +6,8 @@ depends_on: [kbr287_custom_transport_empty_hold]
 # KBR-293 — Sibling custom-transport holds on `/v1/responses` and `/v1/gemini`
 
 Ticket: [KBR-293](https://shelpuk.atlassian.net/browse/KBR-293) (KBR-136 epic,
-label `found-by-kbr-287`). Design: `SYSTEM_DESIGN.md` §5.3 S10 (this change),
-§5.4 KBR-293 paragraph. Requirements: `.requirements/20260920T220520Z_kbr293_sibling_custom_transport_holds/REQUIREMENTS.md`.
+label `found-by-kbr-287`). Design: `SYSTEM_DESIGN.md` §5.4 KBR-293 paragraph.
+Requirements: `.requirements/20260920T220520Z_kbr293_sibling_custom_transport_holds/REQUIREMENTS.md`.
 
 ## What
 
@@ -52,3 +52,23 @@ parametrised over the three `use_custom_transport` adapters, content oracles
 parsed from the route's protocol events (never raw substrings — the KBR-249
 vacuous-oracle trap). Watched red pre-fix (the falsification the ticket
 requires), green post-fix.
+
+## Implementation notes (2026-09-20)
+
+- Landed on `fix/kbr-293-sibling-custom-transport-hold`. Falsification
+  baseline: 13/14 red on `/v1/responses`, 14/14 on `/v1/gemini` (the single
+  pre-fix green cell — subscription tool-calls on `/v1/responses` — is the
+  native passthrough satisfying the parsed oracle; its empty/usage defects
+  were red). Post-fix both files green plus KBR-287's 14 and the balancing
+  file's 59.
+- The design review (system-design-reviewer, no blockers) caught one real
+  test-oracle bug before it shipped: a raw `"role": "assistant"`
+  substring-absence check would have failed on the FIXED wire (the route's
+  lifecycle items carry that role) — replaced with the parsed
+  `object: "chat.completion.chunk"` absence check.
+- The one-function-scope mypy trap fired for real: the success-exit rewrite
+  dropped the `upstream_status: int | None` annotation and a later
+  `= None` in the plain path went red. Restored; mypy clean.
+- The 30 s `test_streaming_skips_backends_without_stream_request` slowness
+  (KBR-249-era, `/v1/messages`) is pre-existing — verified identical on
+  main's server.py; out of scope here.

@@ -289,6 +289,24 @@ def _cc_reasoning_only() -> bytes:
     )
 
 
+def _responses_reasoning_only() -> bytes:
+    """Return a reasoning-only Responses-SSE completion for the fallback parser.
+
+    Returns:
+        A reasoning-summary delta followed by a content-less completion. The
+        parser projects no reasoning, so this synthesises the empty shape.
+        Pre-fix the subscription's native passthrough DELIVERED this stream
+        (reasoning included); post-fix it is judged empty and the ladder runs
+        — the deliberate outcome change recorded in SYSTEM_DESIGN §5.4.
+    """
+    return _responses_sse(
+        [
+            {"type": "response.reasoning_summary_text.delta", "delta": "only reasoning"},
+            _responses_completed(),
+        ]
+    )
+
+
 #: The real custom-transport adapters on this tree, each with the empty and
 #: content-bearing canned bytes its real ``stream_request`` emits.
 _CUSTOM = [
@@ -477,9 +495,10 @@ async def test_an_empty_custom_transport_stream_fires_the_empty_ladder(
     assert status == 200
     assert calls == 2
     assert "hello" in _responses_text_deltas(client_body)
-    # The discarded first attempt wrote nothing — the synthesised role chunk
-    # (whose CC delta carries ``"role": "assistant"``) never reached the wire.
-    assert '"role": "assistant"' not in client_body
+    # The discarded first attempt wrote nothing — no raw Chat Completions
+    # chunk (the provider's native wire) ever reached the Responses client;
+    # every ``data:`` payload is a route-protocol event.
+    assert all(event.get("object") != "chat.completion.chunk" for event in _parse_data_lines(client_body))
 
 
 @pytest.mark.asyncio
@@ -551,20 +570,40 @@ async def test_a_tool_call_only_custom_transport_stream_releases_the_verdict(
 
 
 @pytest.mark.asyncio
-async def test_a_reasoning_only_custom_transport_completion_takes_the_ladder(monkeypatch):
+@pytest.mark.parametrize(
+    ("provider_factory", "reasoning_body", "hello_body"),
+    [
+        pytest.param(OllamaCloudAdapter, _cc_reasoning_only, _cc_hello, id="ollama_cloud"),
+        pytest.param(
+            OpenAISubscriptionAdapter,
+            _responses_reasoning_only,
+            _responses_hello,
+            id="openai_subscription",
+        ),
+    ],
+)
+async def test_a_reasoning_only_custom_transport_completion_takes_the_ladder(
+    provider_factory, reasoning_body, hello_body, monkeypatch
+):
     """KBR-293 AC-FR-8 — a reasoning-only completion is judged empty, not delivered.
 
     The synthesis projects only ``content`` and ``tool_calls`` — neither
-    parser surfaces ``reasoning_content`` — so a reasoning-only completion
-    synthesises the empty shape and the ladder runs, where pre-fix the raw
-    bytes (with the reasoning already unreadable to the route) reached the
-    client.
+    parser surfaces reasoning — so a reasoning-only completion synthesises
+    the empty shape and the ladder runs. For the subscription on this route
+    this is a deliberate outcome change, not a pure fix: pre-fix the native
+    passthrough delivered reasoning-only completions; post-fix they are
+    judged empty (recorded in SYSTEM_DESIGN §5.4 for the PO).
 
     Args:
+        provider_factory: Builds a custom-transport adapter.
+        reasoning_body: The canned bytes of a reasoning-only completion in
+            the adapter's native wire.
+        hello_body: The canned bytes of a content-bearing completion in the
+            same adapter's native wire (the ladder's recovery target).
         monkeypatch: Pytest fixture, collapses the retry backoff.
     """
     _server, status, client_body, calls, _bodies = await _stream(
-        OllamaCloudAdapter, [_cc_reasoning_only(), _cc_hello()], monkeypatch
+        provider_factory, [reasoning_body(), hello_body()], monkeypatch
     )
 
     assert status == 200
@@ -613,9 +652,10 @@ async def test_an_exhausted_custom_transport_empty_ladder_ends_in_the_d4_termina
     error_events = [event for event in _parse_data_lines(client_body) if event.get("type") == "error"]
     assert any(event.get("code") == "empty_response" for event in error_events)
     assert _NATIVE_EMPTY_REPLY_MESSAGE in client_body
-    # The held synthesis was discarded, not flushed: no content on the wire.
+    # The held synthesis was discarded, not flushed: no content on the wire,
+    # and no raw Chat Completions chunk either.
     assert _responses_text_deltas(client_body) == []
-    assert '"role": "assistant"' not in client_body
+    assert all(event.get("object") != "chat.completion.chunk" for event in _parse_data_lines(client_body))
     assert usage_log == []
 
 
@@ -723,4 +763,4 @@ async def test_an_empty_custom_transport_attempt_crosses_to_a_healthy_plain_back
     assert calls["n"] == 1  # the custom attempt; the ladder then crossed
     assert plain_calls["n"] == 1
     assert "hello" in _responses_text_deltas(client_body)
-    assert '"role": "assistant"' not in client_body
+    assert all(event.get("object") != "chat.completion.chunk" for event in _parse_data_lines(client_body))

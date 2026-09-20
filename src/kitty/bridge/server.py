@@ -3844,17 +3844,40 @@ class BridgeServer:
                 self._log_backend_selection()
 
                 n_backends = len(self._backends) if self._backends else 1
-                _bytes_written = False
+                # KBR-293: widen the attempt loop exactly as the
+                # `/v1/chat/completions` twin did (KBR-287): this branch's
+                # transport errors ladder within `n_backends` via the
+                # exception path, so its "original" budget is the failover
+                # walk and only the empty ladder extends it.
+                max_attempts = n_backends + len(_EMPTY_FINAL_DELAYS)
+                for attempt in range(max_attempts):
+                    # Final-delay prologue mirrors the plain-POST loop's
+                    # (grep anchor: "Empty upstream response: final retry
+                    # in"): attempts past the original `n_backends` walk
+                    # sleep the route's empty-ladder tail before their
+                    # upstream call.
+                    if attempt >= n_backends:
+                        delay = _EMPTY_FINAL_DELAYS[attempt - n_backends]
+                        logger.warning(
+                            "Empty upstream response on custom transport: final retry in %.1fs (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(delay)
+                    # KBR-293: collect, don't write. Pre-fix this branch piped
+                    # provider bytes straight to the client (`_tracked_write`),
+                    # so a content-less completion delivered a skeleton the
+                    # ladder could not retract and — for Bedrock/Ollama Cloud,
+                    # which emit Chat Completions SSE on every route — bytes
+                    # the Codex client cannot read at all.
+                    raw_chunks: list[bytes] = []
 
-                async def _tracked_write(data: bytes) -> None:
-                    nonlocal _bytes_written
-                    _bytes_written = True
-                    await sr.write(data)
+                    async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
+                        _raw_chunks.append(chunk)
 
-                for attempt in range(n_backends):
-                    _bytes_written = False
                     try:
-                        await self._active_provider.stream_request(cc_request, _tracked_write)
+                        await self._active_provider.stream_request(cc_request, _collect)
                     except Exception as exc:
                         logger.warning("Custom-transport stream failed: %s", exc)
                         if self._backends and self._current_backend_idx >= 0:
@@ -3864,13 +3887,11 @@ class BridgeServer:
                                 failure_kind=kind,
                                 cooldown=self._retry_after_from_exc(exc),
                             )
-                            # Once the provider wrote to the client, another backend
-                            # would append its attempt (§11 Q14(a)).
-                            if (
-                                not _bytes_written
-                                and self._any_healthy_backend(require_streaming=True)
-                                and attempt < n_backends - 1
-                            ):
+                            # KBR-293: the `_bytes_written` guard drops — the
+                            # branch collects bytes instead of writing them, so
+                            # a mid-stream failure has emitted nothing and
+                            # failover is always pre-emission (§11 Q14(a)).
+                            if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
                                 try:
                                     self._select_backend(require_streaming=True)
                                 except AllBackendsUnhealthyError as all_unhealthy:
@@ -3891,8 +3912,7 @@ class BridgeServer:
                                 )
                                 continue
                             # No custom-transport backend healthy — try cross-mode failover to standard backend.
-                            # Only safe when no bytes were emitted to sr yet.
-                            if not _bytes_written and self._any_healthy_backend() and attempt < n_backends - 1:
+                            if self._any_healthy_backend() and attempt < n_backends - 1:
                                 try:
                                     self._select_backend()
                                 except AllBackendsUnhealthyError:
@@ -3923,8 +3943,233 @@ class BridgeServer:
                         except (ConnectionResetError, BrokenPipeError, OSError):
                             logger.debug("Client disconnected before error event")
                         break
-                    upstream_status: int | None = 200
-                    break
+                    else:
+                        # KBR-293: judge-first. The branch parses the whole
+                        # upstream response before any write, so — exactly as
+                        # the `/v1/chat/completions` twin records (KBR-287) —
+                        # a single up-front verdict through the shared
+                        # predicate produces the plain-POST ladder's wire
+                        # behaviour, and the D5 ``MAX_HELD_BYTES`` cap and
+                        # the non-JSON fail-open are satisfied by
+                        # construction (nothing is withheld across writes;
+                        # the judge runs on fully-parsed bytes). The
+                        # synthesis is the KBR-287 shape ported physically
+                        # (the KBR-277/KBR-285 mirror-as-divergence-guard
+                        # convention): role chunk → content/tool_calls
+                        # deltas → finish chunk + usage → ``[DONE]`` slot.
+                        upstream_status: int | None = 200
+                        raw_bytes = b"".join(raw_chunks)
+                        if hasattr(self._active_provider, "parse_stream_to_cc_response"):
+                            cc_response = self._active_provider.parse_stream_to_cc_response(raw_bytes)
+                        else:
+                            from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
+
+                            cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
+
+                        # The parsed response's own id/created/model go into
+                        # the synthesised CC payloads (the translation reads
+                        # the model for ``response.completed``); the events
+                        # themselves use the route's ``response_id``, same
+                        # as the plain-POST path. Distinct names: rebinding
+                        # ``response_id`` here would corrupt the D4 arm's
+                        # synthesize call below (one-function-scope trap).
+                        cc_id = cc_response.get("id", "chatcmpl-sub")
+                        cc_created = cc_response.get("created", 0)
+                        cc_model = cc_response.get("model", "")
+
+                        payloads: list[dict | None] = []
+
+                        def _cc_record(
+                            delta: dict,
+                            fin: str | None = None,
+                            usage: dict | None = None,
+                            _response_id: str = cc_id,
+                            _created: int = cc_created,
+                            _model: str = cc_model,
+                        ) -> None:
+                            """Record one synthesised chunk (the KBR-287 payload shape).
+
+                            Args:
+                                delta: The chunk's ``choices[0].delta``.
+                                fin: The chunk's ``finish_reason``.
+                                usage: The chunk's ``usage`` block, when
+                                    the branch carries one.
+                                _response_id: The response id captured
+                                    from the parsed ``cc_response``.
+                                _created: The created timestamp captured
+                                    from the parsed ``cc_response``.
+                                _model: The model name captured from the
+                                    parsed ``cc_response``.
+                            """
+                            payload: dict = {
+                                "id": _response_id,
+                                "object": "chat.completion.chunk",
+                                "created": _created,
+                                "model": _model,
+                                "choices": [{"index": 0, "delta": delta, "finish_reason": fin}],
+                            }
+                            if usage is not None:
+                                payload["usage"] = usage
+                            payloads.append(payload)
+
+                        choice = (cc_response.get("choices") or [{}])[0]
+                        msg = choice.get("message", {})
+                        finish_reason = choice.get("finish_reason", "stop")
+
+                        # First chunk: role + content/tool_calls start —
+                        # the same synthesis KBR-287 ships on the CC twin.
+                        first_delta: dict = {"role": "assistant", "content": None}
+                        if msg.get("content"):
+                            first_delta["content"] = ""
+                        if msg.get("tool_calls"):
+                            first_delta["tool_calls"] = [
+                                {
+                                    "index": i,
+                                    "id": tc.get("id", f"call_{i}"),
+                                    "type": "function",
+                                    "function": {"name": tc["function"]["name"], "arguments": ""},
+                                }
+                                for i, tc in enumerate(msg["tool_calls"])
+                            ]
+                        _cc_record(first_delta)
+                        if msg.get("content"):
+                            _cc_record({"content": msg["content"]})
+                        for i, tc in enumerate(msg.get("tool_calls", [])):
+                            args = tc.get("function", {}).get("arguments", "")
+                            if args:
+                                _cc_record(
+                                    {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                                )
+                        _cc_record({}, fin=finish_reason, usage=cc_response.get("usage"))
+                        payloads.append(None)
+
+                        carries = any(
+                            payload is not None and _cc_chunk_carries_content(payload) for payload in payloads
+                        )
+                        if carries:
+                            # Content arm: translate the synthesis through
+                            # the route's translator — the step the CC twin
+                            # does not need (its synthesis IS the route's
+                            # wire). The lifecycle opening is written
+                            # unconditionally, not lazily: the verdict is
+                            # already known, and the plain path's laziness
+                            # exists only because it streams incrementally
+                            # (KBR-242/S7). Reusing the handler-level
+                            # translator is state-leak-safe by construction:
+                            # empty attempts never translate (the judge is
+                            # pre-emission), the plain→custom crossing sites
+                            # reset the translator before re-entry (KBR-254),
+                            # and this arm ends the request. Usage logging
+                            # sits outside the disconnect guard — log-on-
+                            # release, per the KBR-287 record.
+                            try:
+                                for start_event in translator.translate_stream_start(response_id, model):
+                                    await sr.write(start_event.encode())
+                                finish_events_cc: list[str] = []
+                                for payload in payloads:
+                                    if payload is None:
+                                        continue
+                                    events = translator.translate_stream_chunk(response_id, payload)
+                                    if self._chunk_has_finish_reason(payload):
+                                        finish_events_cc.extend(events)
+                                    else:
+                                        for event in events:
+                                            await sr.write(event.encode())
+                                for event in finish_events_cc:
+                                    await sr.write(event.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected during custom-transport emit")
+                            self._log_usage(cc_response.get("usage"))
+                            break
+                        # Empty attempt: ladder. Mirrors the
+                        # `/v1/chat/completions` twin's empty arm (KBR-287;
+                        # grep anchor: "Check for empty response
+                        # (pass-through: no content bytes written)") — one
+                        # class-agnostic ``_select_backend()``; if it lands
+                        # custom, stay in this branch and re-attempt; if
+                        # plain, fall through to the standard streaming
+                        # path below. Pool-less mode takes the exponential
+                        # backoff retry; exhaustion emits the route's
+                        # ``empty_response`` D4 terminal (discriminator
+                        # ``code``, uniform with the plain-POST twin — not
+                        # ``cross_class_exhaustion``, per §5.3 S8).
+                        if self._backends and self._current_backend_idx >= 0:
+                            if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                self._select_backend()
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                if self._active_provider.use_custom_transport:
+                                    # Stay custom: refresh the custom keys
+                                    # so the next attempt's stream_request
+                                    # finds them. ``_original_body`` stays
+                                    # set — the same request body ships.
+                                    cc_request["_resolved_key"] = self._active_key
+                                    cc_request["_provider_config"] = self._active_provider_config
+                                    logger.info(
+                                        "Responses stream empty response on custom transport: "
+                                        "re-selecting custom backend, attempt %d/%d",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    continue
+                                # Cross to plain: the dispatch-loop tail's
+                                # fall-through routes the plain provider
+                                # into the standard streaming path.
+                                cc_request.pop("_resolved_key", None)
+                                cc_request.pop("_provider_config", None)
+                                cc_request.pop("_original_body", None)
+                                logger.info(
+                                    "Responses stream empty response: crossing custom → plain, attempt %d/%d",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                break
+                        elif attempt < max_attempts - 1:
+                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                            logger.warning(
+                                "Responses stream empty response on custom transport: retrying in %.1fs (%d/%d)",
+                                delay,
+                                attempt + 1,
+                                max_attempts,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.warning(
+                            "Responses stream empty response after %d attempts on custom transport, "
+                            "emitting terminal error",
+                            max_attempts,
+                        )
+                        # D4 exhaustion terminal, uniform with the
+                        # plain-POST twin's ``empty_no_finish`` branch
+                        # (grep anchor: "D4 exhaustion: no prior emission"):
+                        # the error event, then response.completed(incomplete)
+                        # — this branch returns before the post-loop that
+                        # synthesizes it on the plain path, so it
+                        # synthesizes here. No lifecycle opening was ever
+                        # written (empty attempts translate nothing).
+                        error_event = responses_format_error(
+                            {
+                                "code": "empty_response",
+                                "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                            },
+                            seq=translator._next_seq(),
+                        )
+                        try:
+                            await sr.write(error_event.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before empty-response exhaustion error could be sent")
+                        try:
+                            for synthesize_event in translator.synthesize_completed_events(
+                                response_id, model, status="incomplete"
+                            ):
+                                await sr.write(synthesize_event.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before completion events")
+                        try:
+                            await sr.write_eof()
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before stream EOF")
+                        return sr
 
                 cc_request.pop("_resolved_key", None)
                 cc_request.pop("_provider_config", None)
@@ -6593,17 +6838,41 @@ class BridgeServer:
                 self._log_backend_selection()
 
                 n_backends = len(self._backends) if self._backends else 1
-                _bytes_written = False
+                # KBR-293: widen the attempt loop exactly as the
+                # `/v1/chat/completions` twin did (KBR-287): this branch's
+                # transport errors ladder within `n_backends` via the
+                # exception path, so its "original" budget is the failover
+                # walk and only the empty ladder extends it.
+                max_attempts = n_backends + len(_EMPTY_FINAL_DELAYS)
+                for attempt in range(max_attempts):
+                    # Final-delay prologue mirrors the plain-POST loop's
+                    # (grep anchor: "Empty upstream response: final retry
+                    # in"): attempts past the original `n_backends` walk
+                    # sleep the route's empty-ladder tail before their
+                    # upstream call.
+                    if attempt >= n_backends:
+                        delay = _EMPTY_FINAL_DELAYS[attempt - n_backends]
+                        logger.warning(
+                            "Empty upstream response on custom transport: final retry in %.1fs (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(delay)
+                    # KBR-293: collect, don't write. Pre-fix this branch piped
+                    # provider bytes straight to the client (`_tracked_write`)
+                    # — and on this route the wire is wrong for EVERY
+                    # custom-transport provider: Bedrock/Ollama Cloud emit
+                    # Chat Completions SSE on every route, and the Codex
+                    # subscription (no ``_original_body`` here) emits
+                    # Responses-API SSE. A Gemini client can read neither.
+                    raw_chunks: list[bytes] = []
 
-                async def _tracked_write(data: bytes) -> None:
-                    nonlocal _bytes_written
-                    _bytes_written = True
-                    await sr.write(data)
+                    async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
+                        _raw_chunks.append(chunk)
 
-                for attempt in range(n_backends):
-                    _bytes_written = False
                     try:
-                        await self._active_provider.stream_request(cc_request, _tracked_write)
+                        await self._active_provider.stream_request(cc_request, _collect)
                     except Exception as exc:
                         logger.warning("Custom-transport stream failed: %s", exc)
                         if self._backends and self._current_backend_idx >= 0:
@@ -6613,13 +6882,11 @@ class BridgeServer:
                                 failure_kind=kind,
                                 cooldown=self._retry_after_from_exc(exc),
                             )
-                            # Once the provider wrote to the client, another backend
-                            # would append its attempt (§11 Q14(a)).
-                            if (
-                                not _bytes_written
-                                and self._any_healthy_backend(require_streaming=True)
-                                and attempt < n_backends - 1
-                            ):
+                            # KBR-293: the `_bytes_written` guard drops — the
+                            # branch collects bytes instead of writing them, so
+                            # a mid-stream failure has emitted nothing and
+                            # failover is always pre-emission (§11 Q14(a)).
+                            if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
                                 translator.reset()  # F22: clear stale tool buffers before same-mode failover
                                 try:
                                     self._select_backend(require_streaming=True)
@@ -6641,8 +6908,7 @@ class BridgeServer:
                                 )
                                 continue
                             # No custom-transport backend healthy — try cross-mode failover to standard backend.
-                            # Only safe when no bytes were emitted to sr yet.
-                            if not _bytes_written and self._any_healthy_backend() and attempt < n_backends - 1:
+                            if self._any_healthy_backend() and attempt < n_backends - 1:
                                 try:
                                     self._select_backend()
                                 except AllBackendsUnhealthyError:
@@ -6670,6 +6936,211 @@ class BridgeServer:
                         except (ConnectionResetError, BrokenPipeError, OSError):
                             logger.debug("Client disconnected before error event")
                         break
+                    else:
+                        # KBR-293: judge-first. The branch parses the whole
+                        # upstream response before any write, so — exactly as
+                        # the `/v1/chat/completions` twin records (KBR-287) —
+                        # a single up-front verdict through the shared
+                        # predicate produces the plain-POST ladder's wire
+                        # behaviour, and the D5 ``MAX_HELD_BYTES`` cap and
+                        # the non-JSON fail-open are satisfied by
+                        # construction (nothing is withheld across writes;
+                        # the judge runs on fully-parsed bytes). The
+                        # synthesis is the KBR-287 shape ported physically
+                        # (the KBR-277/KBR-285 mirror-as-divergence-guard
+                        # convention): role chunk → content/tool_calls
+                        # deltas → finish chunk + usage → ``[DONE]`` slot.
+                        raw_bytes = b"".join(raw_chunks)
+                        if hasattr(self._active_provider, "parse_stream_to_cc_response"):
+                            cc_response = self._active_provider.parse_stream_to_cc_response(raw_bytes)
+                        else:
+                            from kitty.providers.openai_subscription import OpenAISubscriptionAdapter
+
+                            cc_response = OpenAISubscriptionAdapter._parse_sse_to_response(raw_bytes)
+
+                        cc_id = cc_response.get("id", "chatcmpl-sub")
+                        cc_created = cc_response.get("created", 0)
+                        cc_model = cc_response.get("model", "")
+
+                        payloads: list[dict | None] = []
+
+                        def _cc_record(
+                            delta: dict,
+                            fin: str | None = None,
+                            usage: dict | None = None,
+                            _response_id: str = cc_id,
+                            _created: int = cc_created,
+                            _model: str = cc_model,
+                        ) -> None:
+                            """Record one synthesised chunk (the KBR-287 payload shape).
+
+                            Args:
+                                delta: The chunk's ``choices[0].delta``.
+                                fin: The chunk's ``finish_reason``.
+                                usage: The chunk's ``usage`` block, when
+                                    the branch carries one.
+                                _response_id: The response id captured
+                                    from the parsed ``cc_response``.
+                                _created: The created timestamp captured
+                                    from the parsed ``cc_response``.
+                                _model: The model name captured from the
+                                    parsed ``cc_response``.
+                            """
+                            payload: dict = {
+                                "id": _response_id,
+                                "object": "chat.completion.chunk",
+                                "created": _created,
+                                "model": _model,
+                                "choices": [{"index": 0, "delta": delta, "finish_reason": fin}],
+                            }
+                            if usage is not None:
+                                payload["usage"] = usage
+                            payloads.append(payload)
+
+                        choice = (cc_response.get("choices") or [{}])[0]
+                        msg = choice.get("message", {})
+                        finish_reason = choice.get("finish_reason", "stop")
+
+                        # First chunk: role + content/tool_calls start —
+                        # the same synthesis KBR-287 ships on the CC twin.
+                        first_delta: dict = {"role": "assistant", "content": None}
+                        if msg.get("content"):
+                            first_delta["content"] = ""
+                        if msg.get("tool_calls"):
+                            first_delta["tool_calls"] = [
+                                {
+                                    "index": i,
+                                    "id": tc.get("id", f"call_{i}"),
+                                    "type": "function",
+                                    "function": {"name": tc["function"]["name"], "arguments": ""},
+                                }
+                                for i, tc in enumerate(msg["tool_calls"])
+                            ]
+                        _cc_record(first_delta)
+                        if msg.get("content"):
+                            _cc_record({"content": msg["content"]})
+                        for i, tc in enumerate(msg.get("tool_calls", [])):
+                            args = tc.get("function", {}).get("arguments", "")
+                            if args:
+                                _cc_record(
+                                    {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                                )
+                        _cc_record({}, fin=finish_reason, usage=cc_response.get("usage"))
+                        payloads.append(None)
+
+                        carries = any(
+                            payload is not None and _cc_chunk_carries_content(payload) for payload in payloads
+                        )
+                        if carries:
+                            # Content arm: translate the synthesis through
+                            # the route's translator — the step the CC twin
+                            # does not need (its synthesis IS the route's
+                            # wire), and on THIS route the step is what makes
+                            # content reachable at all: every custom-transport
+                            # provider emits a non-Gemini wire pre-fix. The
+                            # handler-level translator is state-leak-safe by
+                            # construction: empty attempts never translate
+                            # (the judge is pre-emission), the plain→custom
+                            # crossing sites reset the translator before
+                            # re-entry (KBR-254), and this arm ends the
+                            # request. Usage logging sits outside the
+                            # disconnect guard — log-on-release, per the
+                            # KBR-287 record.
+                            try:
+                                finish_events_cc: list[str] = []
+                                for payload in payloads:
+                                    if payload is None:
+                                        continue
+                                    events = translator.translate_stream_chunk(payload)
+                                    if self._chunk_has_finish_reason(payload):
+                                        finish_events_cc.extend(events)
+                                    else:
+                                        for event in events:
+                                            await sr.write(event.encode())
+                                for event in finish_events_cc:
+                                    await sr.write(event.encode())
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected during custom-transport emit")
+                            self._log_usage(cc_response.get("usage"))
+                            break
+                        # Empty attempt: ladder. Mirrors the
+                        # `/v1/chat/completions` twin's empty arm (KBR-287;
+                        # grep anchor: "Check for empty response
+                        # (pass-through: no content bytes written)") — one
+                        # class-agnostic ``_select_backend()``; if it lands
+                        # custom, stay in this branch and re-attempt; if
+                        # plain, fall through to the standard streaming
+                        # path below. Pool-less mode takes the exponential
+                        # backoff retry; exhaustion emits the route's
+                        # ``empty_response`` D4 terminal (discriminator
+                        # ``reason``, uniform with the plain-POST twin — not
+                        # ``cross_class_exhaustion``, per §5.3 S8).
+                        if self._backends and self._current_backend_idx >= 0:
+                            if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                self._select_backend()
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                if self._active_provider.use_custom_transport:
+                                    # Stay custom: refresh the custom keys
+                                    # so the next attempt's stream_request
+                                    # finds them.
+                                    cc_request["_resolved_key"] = self._active_key
+                                    cc_request["_provider_config"] = self._active_provider_config
+                                    logger.info(
+                                        "Gemini stream empty response on custom transport: "
+                                        "re-selecting custom backend, attempt %d/%d",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    continue
+                                # Cross to plain: the dispatch-loop tail's
+                                # fall-through routes the plain provider
+                                # into the standard streaming path.
+                                cc_request.pop("_resolved_key", None)
+                                cc_request.pop("_provider_config", None)
+                                logger.info(
+                                    "Gemini stream empty response: crossing custom → plain, attempt %d/%d",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                break
+                        elif attempt < max_attempts - 1:
+                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                            logger.warning(
+                                "Gemini stream empty response on custom transport: retrying in %.1fs (%d/%d)",
+                                delay,
+                                attempt + 1,
+                                max_attempts,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.warning(
+                            "Gemini stream empty response after %d attempts on custom transport, "
+                            "emitting terminal error",
+                            max_attempts,
+                        )
+                        # D4 exhaustion terminal, uniform with the
+                        # plain-POST twin's ``empty_no_finish`` branch
+                        # (grep anchor: "D4 exhaustion: no prior emission"):
+                        # the route's error event, then write_eof — no
+                        # lifecycle synthesize on this protocol.
+                        error_payload = {
+                            "error": {
+                                "code": 502,
+                                "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                "reason": "empty_response",
+                            }
+                        }
+                        error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                        try:
+                            await sr.write(error_sse.encode())
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before empty-response exhaustion error could be sent")
+                        try:
+                            await sr.write_eof()
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            logger.debug("Client disconnected before stream EOF")
+                        return sr
                     break
 
                 cc_request.pop("_resolved_key", None)

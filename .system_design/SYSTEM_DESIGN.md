@@ -668,6 +668,69 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   asserts content and finish_reason reach the client, and the same
   single-predicate rule holds — the parser feeds `_cc_chunk_carries_content`
   through the synthesis like every other adapter.
+- **KBR-293 closed the sibling legs — the `use_custom_transport` segments of
+  `_stream_responses` and `_stream_gemini`** (grep anchors:
+  `KBR-293: collect, don't write` in both handlers). The falsification the
+  ticket required came out worse than the skeleton class alone: on
+  `/v1/responses` the segments piped provider bytes through `_tracked_write`
+  unconditionally, so an empty completion from any of the three
+  custom-transport adapters delivered a skeleton with the ladder unable to
+  fire (13/14 pre-fix bridge-level tests red), and on `/v1/gemini` the wire
+  was wrong for **every** adapter — Bedrock/Ollama Cloud emit CC-SSE on all
+  routes, and the subscription (no `_original_body` on the Gemini route)
+  emits Responses-SSE — so even content-bearing completions never arrived as
+  Gemini events (14/14 red). Both segments now run the KBR-287 judge-first
+  shape — collect (`_collect`, not `_tracked_write`; the `_bytes_written`
+  guard drops as vacuous), parse (`parse_stream_to_cc_response` dispatch /
+  `_parse_sse_to_response` fallback), synthesise the CC chunk list (the
+  KBR-287 payload shape ported physically — the KBR-277/KBR-285
+  mirror-as-divergence-guard convention; no shared helper was extracted),
+  judge through the same `_cc_chunk_carries_content` call site — plus the
+  one step KBR-287 did not need: **the synthesis is translated through the
+  route's own translator** (`ResponsesTranslator.translate_stream_chunk` /
+  `GeminiTranslator.translate_stream_chunk`) before any write, because on
+  these routes the route's wire is Responses/Gemini events, not CC chunks.
+  The KBR-287 four review-settled decisions carry over verbatim: judge-first
+  not hold-walk; the ladder ends in the route's `empty_response` D4
+  discriminator (`code` on Responses via `responses_format_error` +
+  `synthesize_completed_events(status="incomplete")`, `reason` on Gemini via
+  the 502 error event — not `cross_class_exhaustion`, per §5.3 S8);
+  class-agnostic empty-arm select (custom → refresh keys + continue, keep
+  `_original_body` on Responses; plain → pop keys + the fall-through
+  `break`); attempt bound `n_backends + len(_EMPTY_FINAL_DELAYS)` with the
+  final-delay prologue. Usage is log-on-release (`_log_usage` outside the
+  disconnect guard); neither content arm marks the backend healthy (KBR-287
+  parity). Three facts make reusing the handler-level translator
+  state-leak-safe, and a future refactor must preserve all three: empty
+  attempts never translate (the judge is pre-emission), the plain→custom
+  crossing sites reset the translator before re-entry (KBR-254), and the
+  content arm ends the request — the lifecycle opening is written
+  unconditionally there, not lazily, because the verdict is already known.
+  **Fidelity callout the PO signed off via PR review:** `/v1/responses` ×
+  subscription was a native Responses-SSE passthrough pre-fix (reasoning
+  summaries included); post-fix it runs parse → synthesise → translate, and
+  `_parse_sse_to_response` drops reasoning. A **reasoning-only** completion
+  from the subscription on this route flips from *delivered* (pre-fix) to
+  *ladder → `empty_response` terminal* (post-fix) — deliberate, pinned by
+  `test_a_reasoning_only_custom_transport_completion_takes_the_ladder[openai_subscription]`;
+  the wire-aware passthrough alternative was rejected (two write paths, a
+  per-pair wire heuristic, and no empty-ladder guard for that cell).
+  Regaining fidelity later means lifting reasoning into the parse
+  projection — a parse-step widening, not a branch fork. **Recorded
+  asymmetries, deliberate:** the custom segments' transport-error terminal
+  (the `except` arm) still ships its error event without a lifecycle close,
+  unlike the plain path's catch-alls which fall through to the post-loop
+  synthesize — pre-existing, not this ticket's defect class; and
+  `/v1/messages`' custom segment (parse → `translate_response` → Messages
+  events) still has no emptiness gate, so a content-less completion there
+  delivers a content-less Messages turn — the smaller-class sibling defect,
+  deferred. KBR-254's sibling-test stubs were corrected to what real
+  adapters emit (`_fake_hello_cc_stream`; the Responses-SSE stub pinned what
+  the branch accepted, not what Bedrock writes). Tests:
+  `tests/bridge/test_responses_custom_transport_empty_hold.py`,
+  `tests/bridge/test_gemini_custom_transport_empty_hold.py` (the KBR-287
+  harness shape; content oracles parsed from route-protocol events, never
+  raw substrings — the KBR-249 vacuous-oracle trap).
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
