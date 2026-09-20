@@ -43,18 +43,25 @@ def test_mutmut_detected_reads_only_its_own_variable() -> None:
 
 
 def test_the_profile_suppresses_only_the_one_health_check() -> None:
-    """Narrowness is the property: everything else stays enforced.
+    """Narrowness is the property: the profile adds exactly one suppression.
 
-    ``differing_executors`` is the check whose condition mutmut's execution
-    model manufactures. The other health checks (too_slow, not_a_test_method,
-    filter_too_much, ...) still guard real test defects and must remain
-    active inside the profile. Against hypothesis's own defaults (nothing
-    suppressed) the union is exactly the one check; hypothesis normalises
-    the list to a tuple at settings construction, so compare as a set.
+    The assertion is relative to the ambient default, not an exact set:
+    whatever profile this session loaded (hypothesis's defaults on a
+    developer machine, ``kitty-bridge-ci`` under ``CI``, the mutmut profile
+    itself under mutmut) is the parent ``build_profile()`` layers from, and
+    its suppressions legitimately flow through. What must hold in every
+    environment is that the profile suppresses the ambient set plus
+    ``differing_executors`` and adds nothing beyond that. The first draft of
+    this test asserted an exact set and passed locally while failing every
+    CI leg -- the ambient default there was a loaded profile, and the union
+    it produced was the profile working, not a defect.
     """
-    profile = build_profile()
-    assert isinstance(profile, settings)
-    assert set(profile.suppress_health_check) == {HealthCheck.differing_executors}
+    parent = settings()  # child of the ambient default, whatever it is
+    profile = build_profile(parent=parent)
+    required = set(parent.suppress_health_check) | {HealthCheck.differing_executors}
+    assert required <= set(profile.suppress_health_check)
+    added = set(profile.suppress_health_check) - set(parent.suppress_health_check)
+    assert added <= {HealthCheck.differing_executors}
 
 
 def test_the_profile_layers_over_the_active_default() -> None:
