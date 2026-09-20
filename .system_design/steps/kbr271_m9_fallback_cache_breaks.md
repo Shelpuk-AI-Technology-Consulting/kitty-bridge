@@ -76,6 +76,68 @@ The change:
 
 ## Implementation notes
 
-(To be filled in after the implementation lands — the format is
-post-hoc, per the CLAUDE.md: "After completing an implementation task,
-append implementation notes to the step file.")
+### What landed (2026-09-21)
+
+1. `tests/harness/register.py`: two `MutationRow` entries after M9.
+   - **M9a** — `paths=(c.extra_path("cache_control"),)` (keyed literal, no
+     `_SHAPES` entry — P26's reason). Twin of M16's fourth path.
+   - **M9b** — `paths=(c.tool_path(c.WILDCARD, "cache_control"),
+     c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"))` (both patterns
+     already in `_SHAPES` for M16/P28). Twin of M16's three carrier paths;
+     adds the tool-declaration path the ticket's draft omitted — the CB-3
+     suite's `tool` site is the tool *declaration* (`("tools", 0)`), a
+     different address from the part carriers.
+   - Both rows: site `("kitty/bridge/server.py:_convert_native_to_cc_format",)`,
+     trigger `NON_NATIVE_UPSTREAM_WIRE`, `conditional=False`. Trigger
+     rationale per the design review: documentation symmetry with the hop-1
+     twins, not reachability — the fallback is native-route-only (all four
+     call sites gate on `_native_messages_request`), so the ROUTE-kind
+     trigger is false on the only path that reaches the site today; the
+     rows are anticipatory in P28's sense, and both overlap facts
+     (site-blind matching against M16; anticipatory) are stated in the
+     row comments so no future reader re-derives them from `oracle.py`.
+     The alternative trigger (`NATIVE_TOOL_USE_FORMAT_ERROR`) was rejected:
+     sharing M9's trigger forces `conditional=True` and owes a §3.3.2
+     assertion-2 complement no corpus entry can author.
+2. `TEST_SUITE.md`: §3.2.1 intro paragraph (23→25 request-path rows; 25→27
+   live), the two table rows after M9, §3.2.2's unconditional sentence
+   (M9a/M9b inserted adjacent to their trigger-family neighbours — the
+   parser reads the ids as a set, placement is for human-reader tracking),
+   and §9.2's open gap **G43** (not the ticket's G39 — taken by KBR-226)
+   recording the residual product defect plus the two drops the rows
+   cannot claim: the `system` carrier on `minimax_token`
+   (`forwards_thinking_signature=False`, native route, outside the
+   trigger's reach) and the nested `tool_result` block (residualises
+   before register matching; the §3.3.1a vocabulary has no path for it).
+3. Count pins (four): `test_register.py` total 77→79 with the docstring
+   provenance chain extended ("+2 over the pre-KBR-271 count is M9a and
+   M9b") and the stale "73 live rows / 48 provider-level" numbers
+   corrected in the same edit; `test_register_agreement.py` M-rows 25→27,
+   P-rows 52 unchanged, unconditional 46→48.
+4. Falsification-fragment drift prevention: the two `.replace()` literals
+   in `test_register_agreement.py`'s unconditional-list negative controls
+   hard-code the sentence's opening fragment; both updated to track the
+   new sentence (the §3.2.4 "second copy nothing compares" hazard, in
+   miniature — the negative controls went silently vacuous at first run
+   and the failures named the fragment, not the register).
+
+Gates: register suites + CB-3 wire suite 154 passed (watched red first:
+count pin 79≠77, "M9a unpublished", order divergence — all for the right
+reason); full `tests/harness/` suite 2526 passed / 2 skipped; register-
+adjacent guards 50 passed; markdown-consuming contract tests 194 passed.
+`scripts/regenerate_step_index.py` exit 0. A whole-suite background run
+was killed by the OS for memory, not by a failure; the targeted sweep
+covers every suite that reads the register or the design document.
+
+Design review: system-design-reviewer ran one round on REQUIREMENTS.md
+(no blockers; five concerns — trigger rationale inverted vs the
+reachability gate, "false I1 breach" framing unfireable, system-carrier
+scope-out wrong on minimax_token, nested tool_result silently unclaimed,
+KBR-285 provenance wrong — all folded in before implementation, plus
+three suggestions adopted: stale docstring numbers, §3.2.2 placement,
+the two overlap facts in the row comments).
+
+## Status
+
+Implemented (2026-09-21); PR [#245](https://github.com/Shelpuk-AI-Technology-Consulting/kitty-bridge/pull/245)
+open, awaiting CI + review.

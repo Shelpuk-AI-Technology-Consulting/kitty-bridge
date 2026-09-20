@@ -462,18 +462,20 @@ anywhere that reads a *value* out of `src/kitty` rather than a name.
 the document say the same thing, that every site named still exists, and that one row's paths
 match one allowlist and one published cell. A mutation the product performs and
 *neither* artifact records is invisible to all of them — only the wire-level guard can catch that,
-and it needs a recorder and an oracle. Eleven such omissions are already known and filed: G26
+and it needs a recorder and an oracle. Twelve such omissions are already known and filed: G26
 (P13's CC-origin twin), G28
 (`top_k` dropped off the Anthropic family), G29 (an empty `stop_sequences` omitted), G30
 (a string-form `stop` rewritten into a list), G31 (`metadata` dropped off the Anthropic family),
 G32 (tool-selection fields dropped where a wire has no field), G33 (Bedrock's `toolChoice: auto`
 written when the body forces nothing), G34 (`disable_parallel_tool_use: false` omitted), G35
 (a legal `tool_choice` omitted where carrying it would create a failure), G37 (the Anthropic
-family dropping a Chat Completions request's breakpoints) and G38 (a top-level `cache_control`
-dropped on the translated route). **None of the twelve was found by a guard** — the earlier ones
-by walking the subscription request path by hand, G28-G30 by the design and code reviews of
+family dropping a Chat Completions request's breakpoints), G38 (a top-level `cache_control`
+dropped on the translated route) and G43 (the M9 fallback converter's breakpoint drops —
+KBR-271). **None of the thirteen was found by a guard** — the earlier ones by walking the
+subscription request path by hand, G28-G30 by the design and code reviews of
 KBR-178, G31-G35 by writing and reviewing KBR-214's requirements, G37 and G38 by probing inputs for
-KBR-199 and its design review. That is the evidence for the sentence above, not a decoration on
+KBR-199 and its design review, and G43 by KBR-200's CB-3 suite pinning the M9 fallback's wire
+behaviour (triaged on KBR-263's closure). That is the evidence for the sentence above, not a decoration on
 it. (G36, found alongside G31-G35, is a gap in the harness rather than a mutation, so it is not
 counted here.)
 
