@@ -1,11 +1,14 @@
 """Tests for ``scripts/regenerate_step_index.py``, the step-graph validator.
 
-KBR-278. ``CLAUDE.md`` §"System-design discipline" mandates running the
-script after adding a step file and treats a zero exit as the proof that
-the ``.system_design/steps/`` dependency graph is honest. Before this
-script existed, every step file shipped with ``depends_on: []`` because
-the YAML could not be validated; this file pins the validator's contract
-so the mandate is a machine-checked one.
+KBR-278 mandates running the script after adding a step file and treats a
+zero exit as the proof that the ``.system_design/steps/`` dependency graph
+is honest. Before this script existed, every step file shipped with
+``depends_on: []`` because the YAML could not be validated; this file pins
+the validator's contract so the mandate is a machine-checked one.
+
+🔴 The citation that used to point at ``CLAUDE.md`` §"System-design
+discipline" predated KBR-286 — see the matching note in
+``scripts/regenerate_step_index.py``.
 
 The failure modes are exercised against **constructed fixture step
 files** in ``tmp_path``, not the committed tree: a committed-tree test

@@ -452,8 +452,8 @@ class TestTheWholeSuiteIsCoherent:
             # from this one and by someone else entirely.
             "tests/test_ipaddress_contract.py",
             # KBR-161. Two dependency-and-agreement guards: what curl_cffi
-            # promises the OpenAI subscription legs (§6.2.4, an unbounded
-            # pin), and that both legs present one identity from one source.
+            # promises the OpenAI subscription legs (§6.2.4, a pin bounded by
+            # KBR-283), and that both legs present one identity from one source.
             "tests/test_curl_cffi_transport_contract.py",
             "tests/test_oauth_leg_identity.py",
             # T-W6 (KBR-29). The corpus's *lint* reads three real artifacts --
@@ -534,6 +534,18 @@ class TestTheWholeSuiteIsCoherent:
             # per-request `proxy=None` cannot escape it -- the claim
             # `_session_for`'s containment design rests on.
             "tests/test_aiohttp_transport_contract.py",
+            # KBR-87 (T-G12). A §6.2.4 dependency behaviour contract, the
+            # keyring sibling of the curl_cffi/botocore/aiohttp files: it pins
+            # the resolution mechanics -- the public API delegates to the
+            # resolved backend; `PYTHON_KEYRING_BACKEND` selects via
+            # `keyring.core.load_env()`; resolution always lands on a
+            # `keyring.backends.*` class; the per-platform native class where
+            # the native service is reachable; the
+            # `PasswordDeleteError ⊂ KeyringError` errors surface.
+            # Deliberately does not assert an unconditional native class on
+            # Linux (D-Bus box → chainer, not fail.Keyring) -- the
+            # no-stable-neighbour rule from the ipaddress contract's row.
+            "tests/test_keyring_backend_contract.py",
             # KBR-278. The step-graph validator's contract, exercised
             # against constructed fixture step files rather than the
             # committed tree -- a committed-tree check would couple CI to
@@ -557,6 +569,21 @@ class TestTheWholeSuiteIsCoherent:
             "tests/test_route_registration_matrix.py",
             "tests/test_responses_normalizer.py",
             "tests/test_route_preflight.py",
+            # KBR-83 (T-G7). A §6.2.2 contract guard: the downstream SSE
+            # grammar state machine driven over a real BridgeFixture — every
+            # stream the bridge writes must classify as one of the five
+            # documented outcomes (complete_sentence / error_terminal /
+            # json_error / truncated / malformed). The grammar module itself
+            # stays at the l1 default; only this bridge-driven half claims l2.
+            "tests/bridge/test_sse_grammar.py",
+            # KBR-286. A §6.2.3 docs-vs-git guard: the project `CLAUDE.md` is
+            # the instruction every Claude Code session acts on, yet nothing
+            # imports it, so its presence, tracking, ignore-status, and the
+            # four mandated review-resolution behaviours would otherwise
+            # drift silently. The same shape as the docs-vs-code guards
+            # above, with two read artifacts (`CLAUDE.md` and git's view of
+            # it) held against each other in both directions.
+            "tests/test_project_claude_md_review_discipline.py",
         }
 
         actual = {

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kitty.cli.doctor_cmd import run_doctor
+from kitty.cli.doctor_cmd import _check_profile, _make_credential_check, run_doctor
+from kitty.credentials.file_backend import FileBackend
+from kitty.credentials.store import CredentialStore
 from kitty.profiles.schema import Profile
 from kitty.profiles.store import ProfileStore
 
@@ -119,6 +122,50 @@ class TestDoctorProfileFlag:
             exit_code = run_doctor(store, profile_name="nonexistent")
 
         assert exit_code != 0
+
+
+class TestDoctorCorruptCredentialReporting:
+    """KBR-87: the doctor surfaces a corrupt stored value as a failed check, never a crash.
+
+    The diagnostic tool exists to report the condition that corruption causes;
+    crashing on it would defeat the tool. The raise comes from a real FileBackend
+    so the test exercises the contract end to end (the unit-level raise is pinned
+    in ``tests/test_credential_store.py``).
+    """
+
+    def _corrupt_cred_store(self, tmp_path: object, ref: str) -> CredentialStore:
+        (tmp_path / "credentials.json").write_text(  # type: ignore[union-attr]
+            json.dumps({ref: "@@@ not base64 @@@"}), encoding="utf-8"
+        )
+        return CredentialStore(
+            backends=[FileBackend(path=tmp_path / "credentials.json")]  # type: ignore[arg-type]
+        )
+
+    def test_make_credential_check_reports_corruption(self, tmp_path: object) -> None:
+        profile = _make_profile()
+        cred_store = self._corrupt_cred_store(tmp_path, profile.auth_ref)
+
+        passed, message = _make_credential_check(cred_store, profile)()
+
+        assert passed is False
+        assert profile.auth_ref in message
+        assert "corrupt" in message
+
+    def test_check_profile_reports_corruption_as_a_failed_check(
+        self, tmp_path: object, store: ProfileStore, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        profile = _make_profile()
+        store.save(profile)
+        cred_store = self._corrupt_cred_store(tmp_path, profile.auth_ref)
+
+        failures = _check_profile(store, cred_store, profile.name)
+
+        # The provider check passes (zai_regular resolves), so exactly the
+        # credential check fails — a weaker bound would pass even if a regression
+        # broke the provider check too.
+        assert failures == 1
+        captured = capsys.readouterr()
+        assert "corrupt" in captured.out + captured.err
 
 
 class TestDoctorNoDefault:

@@ -100,10 +100,38 @@ def carry_gemini_tool_choice(gemini_request: dict, cc_request: dict) -> None:
 _CC_TO_GEMINI_FINISH: dict[str | None, str] = {
     "stop": "STOP",
     "tool_calls": "STOP",
+    # KBR-285: the legacy single-function wire finishes with
+    # ``function_call``; Gemini has no tool-call finish reason (v1beta ends
+    # tool turns on STOP), so the default mapping already lands right.
+    "function_call": "STOP",
     "length": "MAX_TOKENS",
     "content_filter": "SAFETY",
     None: "STOP",
 }
+
+
+def _extract_text_parts(content: list) -> str:
+    """Extract a joined text string from a multimodal parts list.
+
+    KBR-285: newer multimodal streaming on OpenAI-shaped backends carries
+    ``content`` as a list of content parts. Only text parts carry a string
+    the Gemini wire can hold; image parts have no output equivalent and are
+    dropped (the raw-CC route delivers them verbatim).
+
+    Args:
+        content: The parts list from ``delta.content`` / ``message.content``.
+
+    Returns:
+        The joined text of the list's text parts (empty string when the
+        list carries no text part).
+    """
+    text_parts = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            text_val = part.get("text")
+            if isinstance(text_val, str) and text_val.strip():
+                text_parts.append(text_val)
+    return "\n".join(text_parts)
 
 # ── Gemini role → Chat Completions role ──────────────────────────────────────
 
@@ -159,8 +187,15 @@ class GeminiTranslator:
             if text:
                 messages.append({"role": "system", "content": text})
 
-        # Translate contents → messages
-        for content in gemini_request.get("contents", []):
+        # Translate contents → messages. A non-list ``contents`` contributes
+        # no messages: iterating a scalar raises, and iterating a dict walks
+        # its keys, neither of which is a Content. Same posture as the
+        # generationConfig guard below (the conformance fuzzer generates
+        # scalars here too — KBR-82's run).
+        contents = gemini_request.get("contents")
+        if not isinstance(contents, list):
+            contents = []
+        for content in contents:
             msg = self._translate_content(content)
             if msg is not None:
                 if isinstance(msg, list):
@@ -198,9 +233,22 @@ class GeminiTranslator:
         return cc_request
 
     def _translate_content(self, content: dict) -> dict | list[dict] | None:
-        """Translate a single Gemini Content object to CC message(s)."""
+        """Translate a single Gemini Content object to CC message(s).
+
+        Malformed shapes are skipped, never raised: a ``content`` that is not
+        a dict, ``parts`` entries that are not dicts, and
+        ``functionResponse`` / ``functionCall`` objects without a ``name``
+        all contribute nothing. Schemathesis fuzzing (KBR-82's conformance
+        run) reaches every branch here with arbitrary JSON, and a body that
+        violates the Gemini schema is a 400-shaped input, not a 500.
+        """
+        if not isinstance(content, dict):
+            return None
         role = content.get("role", "user")
         parts = content.get("parts", [])
+        if not isinstance(parts, list):
+            parts = []
+        parts = [p for p in parts if isinstance(p, dict)]
         cc_role = _ROLE_MAP.get(role, role)
 
         # Check for functionResponse (tool result)
@@ -208,7 +256,7 @@ class GeminiTranslator:
             results = []
             for part in parts:
                 fr = part.get("functionResponse")
-                if fr:
+                if isinstance(fr, dict) and isinstance(fr.get("name"), str):
                     # Echo the inbound wire id; synthesise only when absent (KBR-195).
                     results.append(
                         {
@@ -226,7 +274,7 @@ class GeminiTranslator:
             thought_parts = []
             for part in parts:
                 fc = part.get("functionCall")
-                if fc:
+                if isinstance(fc, dict) and isinstance(fc.get("name"), str):
                     # Echo the inbound wire id; synthesise only when absent (KBR-195).
                     tool_calls.append(
                         {
@@ -261,10 +309,23 @@ class GeminiTranslator:
         return None
 
     def _translate_tools(self, gemini_tools: list[dict]) -> list[dict]:
-        """Convert Gemini functionDeclarations to CC tools."""
+        """Convert Gemini functionDeclarations to CC tools.
+
+        A ``tools`` value that is not a list, tools that are not dicts, and
+        declarations without a string ``name`` are skipped: a function tool
+        without a name is unusable on the CC wire, and dropping it beats
+        crashing the request (schemathesis reaches here with arbitrary JSON —
+        KBR-82's conformance run).
+        """
         cc_tools: list[dict] = []
+        if not isinstance(gemini_tools, list):
+            return cc_tools
         for tool in gemini_tools:
+            if not isinstance(tool, dict):
+                continue
             for fd in tool.get("functionDeclarations", []):
+                if not isinstance(fd, dict) or not isinstance(fd.get("name"), str):
+                    continue
                 cc_tools.append(
                     {
                         "type": "function",
@@ -279,8 +340,27 @@ class GeminiTranslator:
 
     @staticmethod
     def _extract_text(content: dict) -> str:
-        """Extract concatenated text from a Gemini Content object."""
-        return "\n".join(p.get("text", "") for p in content.get("parts", []) if "text" in p)
+        """Extract concatenated text from a Gemini Content object.
+
+        Calls ``parts[i].text`` for each entry of ``parts``. Schemathesis
+        fuzzing (KBR-82's conformance run) found that a malformed
+        ``systemInstruction`` can be any JSON value at all -- an integer, a
+        list -- and its ``parts`` can hold entries that are not ``dict``
+        instances; the unguarded ``.get`` raised ``AttributeError`` into the
+        request handler, which answered with a 500. Per the Gemini schema a
+        Content is always ``{parts: [{text: ...}, ...]}``; the fuzzer's job
+        is to find bodies that violate the schema, the translator's job is
+        to return no text from the ones that do. The 400 the rest of the
+        bridge returns for a malformed body is the right outcome, not a 500.
+        """
+        if not isinstance(content, dict):
+            return ""
+        parts = content.get("parts", [])
+        if not isinstance(parts, list):
+            return ""
+        return "\n".join(
+            p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p
+        )
 
     @staticmethod
     def _make_tool_call_id(name: str) -> str:
@@ -324,8 +404,19 @@ class GeminiTranslator:
         if reasoning:
             parts.append({"text": reasoning, "thought": True})
 
-        # Text content
+        # Text content. KBR-285: a raw-CC upstream may deliver content as a
+        # list of multimodal parts — coerce to a joined string — and a
+        # refusal-only reply carries the model's reply on ``refusal`` with
+        # ``content`` null, which becomes text too. A parts list with no
+        # text element coerces to "" and emits no text part: the Gemini wire
+        # has no image-delta equivalent.
         text = message.get("content")
+        if isinstance(text, list):
+            text = _extract_text_parts(text)
+        if not text:
+            refusal = message.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                text = refusal
         if text:
             parts.append({"text": text})
 
@@ -334,13 +425,34 @@ class GeminiTranslator:
             args_str = tc["function"]["arguments"]
             try:
                 args = json.loads(args_str)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
+                # TypeError: a malformed non-string ``arguments`` value
+                # (dict or number) — the detector widening makes the shape
+                # reachable on translated routes, so degrade to {} rather
+                # than a 500.
                 args = {}
             function_call: dict = {"name": tc["function"]["name"], "args": args}
             # Echo the upstream wire id when present; omit when absent (KBR-257).
             if tc.get("id") is not None:
                 function_call["id"] = tc["id"]
             parts.append({"functionCall": function_call})
+
+        # KBR-285: the deprecated single-dict ``function_call`` maps to one
+        # functionCall part, the same shape the ``tool_calls`` loop emits.
+        # No real upstream carries both; if one did, the loop above already
+        # ran and the legacy path appends a second part — the least-bad merge,
+        # recorded for the precondition.
+        function_call = message.get("function_call")
+        has_function_call = isinstance(function_call, dict) and bool(function_call)
+        if has_function_call:
+            try:
+                fc_args = json.loads(function_call.get("arguments", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                fc_args = {}
+            fc_part: dict = {"name": function_call.get("name", ""), "args": fc_args}
+            if function_call.get("id") is not None:
+                fc_part["id"] = function_call["id"]
+            parts.append({"functionCall": fc_part})
 
         if not parts:
             parts.append({"text": ""})
@@ -404,8 +516,17 @@ class GeminiTranslator:
                 )
             )
 
-        # Text delta
+        # Text delta. KBR-285: a raw-CC upstream may deliver content as a
+        # list of multimodal parts — coerce to a joined string — and a
+        # refusal-only delta carries the model's reply on ``refusal`` with
+        # ``content`` null, which becomes text too.
         text = delta.get("content")
+        if isinstance(text, list):
+            text = _extract_text_parts(text)
+        if not text:
+            refusal = delta.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                text = refusal
         if text:
             self._saw_content = True
             events.append(
@@ -421,8 +542,37 @@ class GeminiTranslator:
                 )
             )
 
-        # Tool call delta — buffer arguments
-        for tc in delta.get("tool_calls", []):
+        # Tool call delta — buffer arguments. KBR-285: the deprecated
+        # single-dict ``function_call`` maps onto the same machinery — the
+        # opening delta synthesises the index and carries the name, later
+        # deltas argument-append. The existing ``tool_calls`` branch handles
+        # both shapes unchanged. No real upstream carries both fields; if one
+        # did, a ``tool_calls`` list wins and a later legacy delta appends to
+        # the index-0 buffer that call opened.
+        tool_calls = delta.get("tool_calls") or []
+        if not tool_calls:
+            legacy_call = delta.get("function_call")
+            if isinstance(legacy_call, dict) and legacy_call:
+                if 0 in self._tool_call_meta:
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "function": {"arguments": legacy_call.get("arguments", "")},
+                        }
+                    ]
+                else:
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "id": f"call_{uuid.uuid4().hex[:24]}",
+                            "type": "function",
+                            "function": {
+                                "name": legacy_call.get("name", ""),
+                                "arguments": legacy_call.get("arguments", ""),
+                            },
+                        }
+                    ]
+        for tc in tool_calls:
             idx = tc.get("index", 0)
             func = tc.get("function", {})
 

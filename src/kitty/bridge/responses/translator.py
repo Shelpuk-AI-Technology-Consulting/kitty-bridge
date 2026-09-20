@@ -14,6 +14,7 @@ The translator emits the full Responses API streaming lifecycle:
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 
@@ -211,6 +212,30 @@ def _empty_assistant_fallback_text(context: dict | None = None) -> str:
 def _strip_thinking_tags(text: str) -> str:
     """Strip MiniMax-style interleaved thinking tags from content."""
     return _THINKING_TAG_RE.sub("", text).strip()
+
+
+def _extract_text_parts(content: list) -> str:
+    """Extract a joined text string from a multimodal parts list.
+
+    KBR-285: newer multimodal streaming on OpenAI-shaped backends carries
+    ``content`` as a list of content parts. Only text parts carry a string
+    the Responses wire can hold; image parts have no output equivalent and
+    are dropped (the raw-CC route delivers them verbatim).
+
+    Args:
+        content: The parts list from ``delta.content`` / ``message.content``.
+
+    Returns:
+        The joined text of the list's text parts (empty string when the
+        list carries no text part).
+    """
+    text_parts = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            text_val = part.get("text")
+            if isinstance(text_val, str) and text_val.strip():
+                text_parts.append(text_val)
+    return "\n".join(text_parts)
 
 
 class InvalidResponsesRequest(ValueError):
@@ -660,8 +685,19 @@ class ResponsesTranslator:
                 }
             )
 
-        # Text content
+        # Text content. KBR-285: a raw-CC upstream may deliver content as a
+        # list of multimodal parts — coerce to the string the Responses wire
+        # carries — and a refusal-only reply carries the model's reply on
+        # ``refusal`` with ``content`` null, which becomes text too. A parts
+        # list with no text element coerces to "" and emits no item: the
+        # Responses wire has no image-delta equivalent.
         content = message.get("content")
+        if isinstance(content, list):
+            content = _extract_text_parts(content)
+        if not content:
+            refusal = message.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                content = refusal
         if content:
             content = _strip_thinking_tags(content)
             if content:
@@ -684,6 +720,33 @@ class ResponsesTranslator:
                     "call_id": tc.get("id", f"call_{uuid.uuid4().hex}"),
                     "name": func.get("name", ""),
                     "arguments": func.get("arguments", "{}"),
+                    "status": "completed",
+                }
+            )
+
+        # KBR-285: the deprecated single-dict ``function_call`` maps to one
+        # function_call item, the same shape the ``tool_calls`` loop emits.
+        # No real upstream carries both; if one did, the ``tool_calls`` loop
+        # already ran and the legacy path appends a second item — the least-
+        # bad merge, recorded for the precondition. A non-string
+        # ``arguments`` value (the detector widening makes the shape
+        # reachable) serialises as JSON rather than shipping a Python repr.
+        function_call = message.get("function_call")
+        has_function_call = isinstance(function_call, dict) and bool(function_call)
+        if has_function_call:
+            raw_args = function_call.get("arguments", "{}")
+            if not isinstance(raw_args, str):
+                try:
+                    raw_args = json.dumps(raw_args)
+                except (TypeError, ValueError):
+                    raw_args = "{}"
+            output.append(
+                {
+                    "type": "function_call",
+                    "id": f"fc_{uuid.uuid4().hex[:24]}",
+                    "call_id": f"call_{uuid.uuid4().hex}",
+                    "name": function_call.get("name", ""),
+                    "arguments": raw_args,
                     "status": "completed",
                 }
             )
@@ -769,8 +832,19 @@ class ResponsesTranslator:
                 )
             self._accumulated_reasoning += reasoning_content
 
-        # Text delta
+        # Text delta. KBR-285: a raw-CC upstream may deliver content as a list of
+        # multimodal parts — coerce to the string the Responses wire carries —
+        # and a refusal-only delta carries the model's reply on ``refusal``
+        # with ``content`` null, which becomes text too. A parts list with no
+        # text element coerces to "" and emits no delta: the Responses wire
+        # has no image-delta equivalent.
         content = delta.get("content")
+        if isinstance(content, list):
+            content = _extract_text_parts(content)
+        if not content:
+            refusal = delta.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                content = refusal
         if content:
             # Lazily start text item on first content
             if not self._text_started:
@@ -812,8 +886,36 @@ class ResponsesTranslator:
                 )
             )
 
-        # Tool call delta
+        # Tool call delta. KBR-285: the deprecated single-dict ``function_call``
+        # maps onto the same machinery — the opening delta synthesises the
+        # id/index and carries the name, later deltas argument-append. The
+        # existing ``tool_calls`` branch handles both shapes unchanged. No
+        # real upstream carries both fields; if one did, a ``tool_calls``
+        # list wins and a later legacy delta appends to the index-0 buffer
+        # that call opened.
         tool_calls = delta.get("tool_calls")
+        if not tool_calls:
+            legacy_call = delta.get("function_call")
+            if isinstance(legacy_call, dict) and legacy_call:
+                if 0 in self._tool_call_meta:
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "function": {"arguments": legacy_call.get("arguments", "")},
+                        }
+                    ]
+                else:
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "id": f"call_{uuid.uuid4().hex[:24]}",
+                            "type": "function",
+                            "function": {
+                                "name": legacy_call.get("name", ""),
+                                "arguments": legacy_call.get("arguments", ""),
+                            },
+                        }
+                    ]
         if tool_calls:
             for tc_delta in tool_calls:
                 idx = tc_delta.get("index", 0)

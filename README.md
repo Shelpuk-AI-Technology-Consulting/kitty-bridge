@@ -728,16 +728,30 @@ distinguishable in logs from the ordinary "request too large" rejection.
 ### "Kitty Bridge received an empty reply from the upstream provider on every attempt"
 
 Applies to providers kitty talks to in Anthropic's own format: `anthropic`, `custom_anthropic`, `zai_coding`,
-`minimax_token`, and `opencode_go` for the models it serves on Anthropic's format — and to every provider kitty
-converts to Chat Completions. On the Anthropic-format side kitty holds back the start of each streamed reply until it
-carries text or a tool call, so a reply with nothing in it — or only thinking, up to 10 MiB of it — can be retried
-before your agent sees it; on the translated side — Chat Completions, Responses, and Gemini clients over a
-Messages-wire upstream — a streamed reply that carries no text, tool call, or reasoning takes the same ladder —
-whether or not it ends with a completion marker — with the same release rule on the first content-bearing delta. Both streaming and non-streaming routes treat a reasoning-only reply as a successful turn: the streamed hold releases on the first `reasoning_content` delta, and the non-streaming detector counts `message.reasoning_content` as content. A reasoning-only Chat Completions reply succeeds on the first attempt on either route. The exhaustion terminal itself is
-route-wide: a plain-POST Chat Completions-wire provider (OpenAI, OpenRouter, DeepSeek, or any other Chat Completions
-backend) whose every attempt comes back content-less lands on the same `type: "empty_response"` D4 event, because
-the empty ladder is what the terminal serves. This error means every attempt kitty made came back empty. Nothing
-reached the agent, so simply resend; if it persists, the provider or model is misbehaving.
+`minimax_token`, and `opencode_go` for the models it serves on Anthropic's format; to every provider kitty
+converts to Chat Completions; and to the custom-transport backends on `/v1/chat/completions` — Bedrock, Ollama
+Cloud, and the Codex/OpenAI subscription — whose native transport kitty drives itself. On the Anthropic-format side
+kitty holds back the start of each streamed reply until it carries text or a tool call, so a reply with nothing in
+it — or only thinking, up to 10 MiB of it — can be retried before your agent sees it; on the translated side —
+Chat Completions, Responses, and Gemini clients over a Messages-wire upstream — a streamed reply that carries no
+text, tool call, reasoning, refusal, legacy function call, or multimodal content parts takes the same ladder —
+whether or not it ends with a completion marker — with the same release rule on the first content-bearing delta. On
+the custom-transport side the branch synthesises the provider's translated Chat Completions reply and judges it
+through the same predicate, so a synthesised reply that carries no text, tool call, or reasoning takes the same
+ladder — a completion the branch's translation projects only `content` and `tool_calls` and whose parsers surface no
+reasoning cannot release the hold. Both streaming and non-streaming routes treat a reasoning-only reply as a
+successful turn when the reasoning reaches the client: the streamed hold releases on the first `reasoning_content`
+delta on the plain-POST side, and the non-streaming detector counts `message.reasoning_content` as content. A
+reasoning-only Chat Completions reply succeeds on the first attempt on the plain-POST route; over a custom-transport
+backend the reasoning is not projected by the translation and the reply synthesises as empty, taking the same
+ladder. A reply whose only payload is the model's refusal succeeds on the first attempt wherever the refusal
+reaches the client — on the plain-POST route and on the translated routes, whose translators carry it as text. The
+exhaustion terminal itself is route-wide: a plain-POST Chat Completions-wire provider (OpenAI, OpenRouter, DeepSeek,
+or any other Chat Completions backend) whose every attempt comes back content-less lands on the same
+`type: "empty_response"` D4 event, and the same terminal fires for the three custom-transport backends when every
+attempt on a custom-transport route comes back content-less. Both flavours use the empty ladder — the terminal is
+what the ladder serves. This error means every attempt kitty made came back empty. Nothing reached the agent, so
+simply resend; if it persists, the provider or model is misbehaving.
 
 The response is a `502` carrying `"reason": "empty_response"` for clients that expect JSON
 (`/v1/messages` non-stream and streamed). For streaming clients that expect SSE

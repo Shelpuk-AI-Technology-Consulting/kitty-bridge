@@ -10,7 +10,13 @@ from unittest.mock import patch
 
 import pytest
 
-from kitty.cli.cleanup_cmd import _detect_stale_env, _display_value, _load_backup, run_cleanup
+from kitty.cli.cleanup_cmd import (
+    _detect_stale_env,
+    _display_value,
+    _load_backup,
+    run_cleanup,
+    run_kilo_cleanup,
+)
 from kitty.launchers.claude import _atomic_write_text
 
 
@@ -547,3 +553,240 @@ class TestAtomicWriteText:
             assert target.read_bytes() == content.encode("utf-8"), (
                 f"_atomic_write_text wrote {target.read_bytes()!r}; expected {content.encode('utf-8')!r}"
             )
+
+
+class TestRunKiloCleanup:
+    """The Kilo arm of ``kitty cleanup`` (KBR-268): backup-only exact restore.
+
+    Mirrors ``TestBackupRestore`` for kilo.json. The backup is patched through
+    ``cleanup_cmd._get_kilo_backup_path`` (the lazy single-source reader) and
+    the config path is passed explicitly, so no test touches the real home.
+    """
+
+    @staticmethod
+    def _patched_kilo_markers_config() -> dict:
+        """Return a kilo.json body carrying both kitty markers."""
+        return {
+            "provider": {
+                "kitty": {"options": {"baseURL": "http://127.0.0.1:18080/v1"}},
+                "openai": {"options": {"apiKey": "user-key"}},
+            },
+            "model": "kitty/gpt-4o",
+        }
+
+    def test_restores_byte_exactly_and_removes_backup(self, tmp_path: Path) -> None:
+        """SIGKILL-style staging: backup + patched config → exact restore (AC-R4)."""
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup.json"
+
+        original = {
+            "provider": {"openai": {"options": {"apiKey": "user-key"}}},
+            "model": "opus",
+        }
+        backup_path.write_text(json.dumps(original))
+        kilo_path.write_text(json.dumps(self._patched_kilo_markers_config()))
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 0
+        assert json.loads(kilo_path.read_text()) == original
+        assert not backup_path.exists(), "kitty cleanup left the Kilo backup behind"
+
+    def test_restores_when_only_model_prefix_marker(self, tmp_path: Path) -> None:
+        """A ``kitty/`` model prefix alone still triggers the restore (AC-R4).
+
+        Kitty always writes the provider block and the model key as a pair, so
+        a model-only file is hand-trimmed crash damage.
+        """
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup.json"
+
+        original = {"provider": {"openai": {"options": {"apiKey": "user-key"}}}}
+        backup_path.write_text(json.dumps(original))
+        kilo_path.write_text(json.dumps({"model": "kitty/gpt-4o"}))
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 0
+        assert json.loads(kilo_path.read_text()) == original
+        assert not backup_path.exists()
+
+    def test_remote_url_provider_counts_as_stale(self, tmp_path: Path) -> None:
+        """A remote-URL ``provider.kitty`` alone is NOT a live kitty marker (AC-R4).
+
+        The stale-backup path fires instead: the backup is deleted, the user's
+        config is left alone — a user who named their own provider ``kitty``
+        must not have their config reverted.
+        """
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup.json"
+
+        backup_path.write_text(json.dumps({"model": "opus"}))
+        remote_only = {
+            "provider": {
+                "kitty": {"options": {"baseURL": "https://api.openai.com/v1"}},
+            },
+        }
+        kilo_path.write_text(json.dumps(remote_only))
+        kilo_bytes_before = kilo_path.read_bytes()
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 0
+        assert kilo_path.read_bytes() == kilo_bytes_before
+        assert not backup_path.exists(), "stale Kilo backup was not removed"
+
+    def test_resurrects_missing_kilo_json(self, tmp_path: Path) -> None:
+        """Backup present + no kilo.json → the file is resurrected (AC-R5)."""
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup.json"
+
+        original = {"provider": {"openai": {"options": {"apiKey": "user-key"}}}}
+        backup_path.write_text(json.dumps(original))
+        assert not kilo_path.exists()
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 0
+        assert json.loads(kilo_path.read_text()) == original
+        assert not backup_path.exists()
+
+    def test_unreadable_kilo_json_restores_from_backup(self, tmp_path: Path) -> None:
+        """An unparseable kilo.json counts as a crashed patch (AC-R6).
+
+        ``kitty cleanup`` is an explicit repair request, so the exact backup
+        wins — the deliberate opposite of the live session's
+        ``cleanup_launch``, which must never guess.
+        """
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup.json"
+
+        original = {"provider": {"openai": {"options": {"apiKey": "user-key"}}}}
+        backup_path.write_text(json.dumps(original))
+        kilo_path.write_text("not valid json {{{")
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 0
+        assert json.loads(kilo_path.read_text()) == original
+        assert not backup_path.exists()
+
+    def test_stale_backup_deleted_config_untouched(self, tmp_path: Path) -> None:
+        """Backup + clean current config → stale backup removed, config kept (AC-R7)."""
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup.json"
+
+        backup_path.write_text(json.dumps({"model": "opus"}))
+        clean = {"provider": {"openai": {"options": {"apiKey": "user-key"}}}}
+        kilo_path.write_text(json.dumps(clean))
+        kilo_bytes_before = kilo_path.read_bytes()
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 0
+        assert kilo_path.read_bytes() == kilo_bytes_before
+        assert not backup_path.exists()
+
+    def test_no_backup_is_noop_negative_control(self, tmp_path: Path) -> None:
+        """No backup + marker-bearing config → strict no-op (AC-R8).
+
+        The negative control for this harness (TEST_SUITE §6.3.2): pre-fix
+        legacy damage has no backup to restore, and the backup-only design
+        never strips without one — the config must be left exactly as staged.
+        """
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "absent-backup.json"
+        assert not backup_path.exists()
+
+        staged = self._patched_kilo_markers_config()
+        kilo_path.write_text(json.dumps(staged))
+        kilo_bytes_before = kilo_path.read_bytes()
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 0
+        assert kilo_path.read_bytes() == kilo_bytes_before
+
+    def test_unreadable_backup_reports_error(self, tmp_path: Path, capsys) -> None:
+        """A backup path that cannot be read → one Error line, exit 1 (AC-R9).
+
+        Staged as a directory: ``open()`` raises ``IsADirectoryError`` (an
+        ``OSError``) on every platform — ``chmod 000`` cannot stage this on
+        the Windows leg.
+        """
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup-dir"
+        backup_path.mkdir()
+
+        staged = self._patched_kilo_markers_config()
+        kilo_path.write_text(json.dumps(staged))
+        kilo_bytes_before = kilo_path.read_bytes()
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 1
+        assert kilo_path.read_bytes() == kilo_bytes_before
+        assert "Error" in capsys.readouterr().out
+
+    def test_restore_write_failure_reports_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+        """A failing restore write → one Error line, exit 1, backup kept (AC-R9).
+
+        The restore goes through ``_atomic_write_text`` (mkstemp + rename, not
+        ``Path.write_text``), so the seam is the source module attribute — the
+        lazy import inside ``run_kilo_cleanup`` resolves it at call time.
+        """
+        import kitty.launchers.claude as claude_mod
+
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup.json"
+
+        original = {"provider": {"openai": {"options": {"apiKey": "user-key"}}}}
+        backup_path.write_text(json.dumps(original))
+        kilo_path.write_text(json.dumps(self._patched_kilo_markers_config()))
+
+        real_write = claude_mod._atomic_write_text
+
+        def failing_write(path: Path, content: str) -> None:
+            if path == kilo_path:
+                raise OSError("simulated restore write failure")
+            real_write(path, content)
+
+        monkeypatch.setattr(claude_mod, "_atomic_write_text", failing_write)
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 1
+        assert backup_path.exists(), "backup was deleted despite the restore failure"
+        assert "Error" in capsys.readouterr().out
+
+    def test_restores_byte_exactly_from_crlf_backup(self, tmp_path: Path) -> None:
+        """A CRLF backup restores byte-exactly to kilo.json (AC-R11, KBR-262)."""
+        kilo_path = tmp_path / "kilo.json"
+        backup_path = tmp_path / "kilo-config-backup.json"
+
+        backup_bytes = (
+            b'{\r\n  "provider": {"openai": {"apiKey": "sk-original"}},\r\n'
+            b'  "model": "opus",\r\n'
+            b'  "comment": "user kept CRLF line endings"\r\n'
+            b"}\r\n"
+        )
+        backup_path.write_bytes(backup_bytes)
+        kilo_path.write_text(json.dumps(self._patched_kilo_markers_config()))
+
+        with patch("kitty.cli.cleanup_cmd._get_kilo_backup_path", return_value=backup_path):
+            exit_code = run_kilo_cleanup(settings_path=kilo_path)
+
+        assert exit_code == 0
+        assert kilo_path.read_bytes() == backup_bytes, (
+            f"restored kilo.json is {kilo_path.read_bytes()!r}; expected {backup_bytes!r}"
+        )
+        assert not backup_path.exists()

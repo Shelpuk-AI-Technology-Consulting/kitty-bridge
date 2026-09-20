@@ -1799,3 +1799,61 @@ class TestDeclaredIgnoredBlockFields:
         assert "citations" in text_ignored
         assert "transformations" not in text_ignored
         assert c.ignored_fields_for("thinking") == {}
+
+
+class TestNameRequired:
+    """A ``tool_use`` block whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers; KBR-281 aligns Anthropic on it. The site is
+    ``_read_block``, shared by the request turns, the reply content, and the
+    nested ``tool_result`` blocks, so these request-direction cases pin the
+    one line all three entries reach.
+    """
+
+    @staticmethod
+    def _body_with_tool_use(name: Any) -> dict[str, Any]:
+        """Return a request body whose one ``tool_use`` block carries ``name``.
+
+        ``None`` means the key is absent rather than an explicit ``null`` —
+        the absent form is the one the schema calls required.
+        """
+        block: dict[str, Any] = {
+            "type": "tool_use",
+            "id": PUBLISHED_TOOL_USE["id"],
+            "input": {"ticker": "^GSPC"},
+        }
+        if name is not None:
+            block["name"] = name
+        return _minimal(
+            messages=[
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": [block]},
+            ]
+        )
+
+    def test_missing_tool_use_name_raises(self) -> None:
+        """A ``tool_use`` block with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="tool_use"):
+            _read(self._body_with_tool_use(None))
+
+    def test_empty_tool_use_name_raises(self) -> None:
+        """A ``tool_use`` block with an empty ``name`` raises (KBR-281)."""
+        with pytest.raises(c.UnreadableBodyError, match="tool_use"):
+            _read(self._body_with_tool_use(""))
+
+    def test_non_string_tool_use_name_raises(self) -> None:
+        """A ``tool_use`` block with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="tool_use"):
+            _read(self._body_with_tool_use(42))
+
+    def test_named_tool_use_control_is_clean(self) -> None:
+        """Control — the published ``tool_use`` block projects cleanly."""
+        projected = _read(self._body_with_tool_use(PUBLISHED_TOOL_USE["name"]))
+
+        assert projected.residual == {}
+        tool_use = projected.conversation.turns[1].parts[0]
+        assert isinstance(tool_use, c.ToolUse)
+        assert tool_use.name == "get_stock_price"

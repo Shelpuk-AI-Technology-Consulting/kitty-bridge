@@ -357,3 +357,55 @@ class TestFalsification:
         assert "candidates[0].content.x_vendor_extra" in projected.residual
         with pytest.raises(c.ResidualFieldsError, match="x_vendor_extra"):
             c.verify_total(projected)
+
+
+class TestNameRequired:
+    """A ``functionCall`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers; KBR-281 aligns Gemini's reply direction on it.
+    The absent and non-string raises existed in the reader before KBR-281 but
+    were pinned by no test; the four cases below close that gap with the new
+    empty case.
+    """
+
+    @staticmethod
+    def _body_with_function_call(name: Any) -> dict[str, Any]:
+        """Return the published reply body whose one part carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent.
+        """
+        call: dict[str, Any] = {"args": {"city": "Toronto"}}
+        if name is not None:
+            call["name"] = name
+        body = json.loads(json.dumps(PUBLISHED_TEXT_RESPONSE))
+        body["candidates"][0]["content"]["parts"] = [{"functionCall": call}]
+        return body
+
+    def test_missing_function_call_name_raises(self) -> None:
+        """A ``functionCall`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="functionCall.name"):
+            gm.GeminiReplyProjection().read_reply(_reply(self._body_with_function_call(None)))
+
+    def test_empty_function_call_name_raises(self) -> None:
+        """A ``functionCall`` with an empty ``name`` raises (KBR-281)."""
+        with pytest.raises(c.UnreadableBodyError, match="functionCall.name"):
+            gm.GeminiReplyProjection().read_reply(_reply(self._body_with_function_call("")))
+
+    def test_non_string_function_call_name_raises(self) -> None:
+        """A ``functionCall`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="functionCall.name"):
+            gm.GeminiReplyProjection().read_reply(_reply(self._body_with_function_call(42)))
+
+    def test_named_function_call_control_is_clean(self) -> None:
+        """Control — a named ``functionCall`` projects cleanly."""
+        projected = gm.GeminiReplyProjection().read_reply(
+            _reply(self._body_with_function_call("get_weather"))
+        )
+
+        c.verify_total(projected)
+        part = projected.parts[0]
+        assert isinstance(part, c.ToolUse)
+        assert part.name == "get_weather"

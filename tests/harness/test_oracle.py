@@ -42,6 +42,7 @@ from harness.contract import (
 )
 from harness.oracle import (
     ConditionalRowFiredWithoutTriggerError,
+    ExpectedRoute,
     NativePassthroughKeyOrderError,
     OracleReport,
     UnclaimedMutationError,
@@ -852,7 +853,7 @@ def _valid_messages_body() -> bytes:
 
 
 class TestExpectedRoute:
-    """The ``expected_route`` parameter is accepted and recorded."""
+    """The ``expected_route`` parameter is accepted, asserted, and recorded."""
 
     def test_expected_route_none_does_not_raise(self) -> None:
         """``expected_route=None`` is the default; no raise on the routing side."""
@@ -867,18 +868,33 @@ class TestExpectedRoute:
         )
         assert report.expected_route is None
 
-    def test_expected_route_object_recorded_without_assertion(self) -> None:
-        """An arbitrary ``expected_route`` is recorded without assertion."""
+    def test_expected_route_matching_the_capture_is_accepted_and_reported(self) -> None:
+        """A matching ``ExpectedRoute`` is asserted and recorded.
+
+        T-D2 (KBR-52) turned the parameter from recorded-without-assertion
+        into asserted: an expectation that agrees with the captured route on
+        every component reaches the report, and one that disagrees raises
+        (the routing suite in ``test_oracle_routing.py`` owns the failure
+        cases). The oracle-level claim here is the plumbing — accepted,
+        returned unchanged.
+        """
         body = _valid_messages_body()
-        marker = object()
+        captured = _capture(body=body)
+        expected = ExpectedRoute(
+            method=captured.method,
+            scheme=captured.scheme,
+            host=captured.host,
+            path=captured.path,
+            query=captured.query,
+        )
         report = assert_no_unclaimed_mutation(
             inbound=_capture(body=body),
             inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-            captured=_capture(body=body),
+            captured=captured,
             captured_format=WireFormat.ANTHROPIC_MESSAGES,
             register=r.REGISTER,
             triggers_met=frozenset(),
-            expected_route=marker,
+            expected_route=expected,
         )
-        assert report.expected_route is marker
+        assert report.expected_route is expected
         assert isinstance(report, OracleReport)

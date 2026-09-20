@@ -7,7 +7,7 @@ import uuid
 
 import questionary
 
-from kitty.credentials.store import CredentialStore
+from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import (
     _NAME_PATTERN,
     PROVIDER_LABELS,
@@ -129,7 +129,13 @@ def _find_reusable_auth_ref(store: ProfileStore, cred_store: CredentialStore, pr
     """
     for profile in store.load_all():
         if profile.provider == provider:
-            key = cred_store.get(profile.auth_ref)
+            # KBR-87: a corrupt stored value is not reusable — skip the profile
+            # and let the wizard re-prompt. Re-entry is the recovery, so the
+            # reuse scan must stay reachable when one profile's value is damaged.
+            try:
+                key = cred_store.get(profile.auth_ref)
+            except CredentialError:
+                continue
             if key is not None:
                 return profile.auth_ref
     return None

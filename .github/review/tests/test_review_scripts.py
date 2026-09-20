@@ -883,10 +883,11 @@ class TestSelectRules(unittest.TestCase):
         fans out to `cli`: the coupling is real, not bookkeeping.
 
         🔴 `.gitignore` is here for a reason particular to this repository: it
-        excludes `.requirements/` and `CLAUDE.md` while leaving `.system_design/`
-        tracked, so it is what decides which documents reach a CI checkout and
-        therefore what the automated reviewer can read at all. A line added or
-        removed there silently widens or narrows every future review.
+        excludes `.requirements/` (and excluded `CLAUDE.md` until KBR-286
+        tracked it) while leaving `.system_design/` tracked, so it is what
+        decides which documents reach a CI checkout and therefore what the
+        automated reviewer can read at all. A line added or removed there
+        silently widens or narrows every future review.
         """
 
         for path in ("pyproject.toml", ".gitignore"):
@@ -1000,13 +1001,14 @@ class TestSelectRules(unittest.TestCase):
         the rules not covering it means in practice.
 
         The forward-looking half stands: `SYSTEM_DESIGN.md`, a per-module
-        design directory, `CLAUDE.md` and `AGENTS.md` are in no checkout --
-        `CLAUDE.md` is gitignored rather than absent, which is a distinction
-        this module turns on elsewhere --
-        and each pattern costs one comparison while covering the file the day
-        it appears. The alternative is a design document landing with no rule
-        file selected, which is the shape upstream recorded as a defect when a
-        397-file directory matched nothing for months. The leading `**/` is what
+        design directory and `AGENTS.md` are in no checkout, and each pattern
+        costs one comparison while covering the file the day it appears.
+        `CLAUDE.md` is no longer in that company: it left `.gitignore` with
+        KBR-286 and is now tracked, so its pattern is live rather than
+        forward-looking, and the assertion below still holds for it. The
+        alternative is a design document landing with no rule file selected,
+        which is the shape upstream recorded as a defect when a 397-file
+        directory matched nothing for months. The leading `**/` is what
         reaches a per-module set rather than only the root one.
         """
 
@@ -1028,13 +1030,11 @@ class TestSelectRules(unittest.TestCase):
     # silence.
     FORWARD_LOOKING_LITERALS = frozenset(
         {
-            # 🔴 `CLAUDE.md` is in this repository's `.gitignore`, so it is
-            # untracked BY DESIGN rather than merely absent. The pattern stays
-            # because a decision to start tracking it should not also silently
-            # decide that it selects no rules.
-            "CLAUDE.md",
-            # No agent-instructions file today. Same reasoning as above, minus
-            # the `.gitignore` entry: it would simply be a new file.
+            # No agent-instructions file today. It would simply be a new file,
+            # which is exactly the shape the pattern is here to cover. KBR-286
+            # tracked the existing `CLAUDE.md` and removed it from this set
+            # rather than letting the untracked-forever excuse outlive its
+            # reason -- the existence check below now asserts on it.
             "AGENTS.md",
         }
     )
@@ -1067,17 +1067,16 @@ class TestSelectRules(unittest.TestCase):
     def test_the_forward_looking_list_does_not_outlive_its_reason(self):
         """An entry that now exists should be asserted, not excused.
 
-        ⚠️ `CLAUDE.md` is the exception and is skipped: it is `.gitignore`d, so a
-        developer's own untracked copy makes it `exists()` on their machine and
-        not in CI. Excusing it there is the correct state, not a stale one.
+        KBR-286 removed this test's one-time exception (`CLAUDE.md`, which was
+        `.gitignore`d and so legitimately absent from CI) together with the
+        entry itself: a developer's own untracked copy made `exists()` true on
+        their machine and not in CI, which is why the skip existed. With the
+        file tracked the distinction is gone and the check runs for every
+        entry.
         """
 
         repo = Path(__file__).resolve().parents[3]
-        stale = [
-            p
-            for p in self.FORWARD_LOOKING_LITERALS
-            if p != "CLAUDE.md" and (repo / p).exists()
-        ]
+        stale = [p for p in self.FORWARD_LOOKING_LITERALS if (repo / p).exists()]
         self.assertFalse(
             stale,
             f"these exist now and should leave FORWARD_LOOKING_LITERALS: {stale}",
@@ -7894,13 +7893,15 @@ class ReplyConventionDocumentedTests(unittest.TestCase):
         """The convention, wherever this repository keeps it.
 
         🔴 Upstream asserts this against the repository-root ``CLAUDE.md``. Here
-        it is ``.github/review/README.md`` instead, and that is not a cosmetic
-        move: this repository's ``.gitignore`` lists ``/CLAUDE.md``, so the file
-        upstream relies on is **untracked here by design** and a contributor
-        cloning the repository would never see it. A convention nobody can read
-        is exactly the state the ``review_replies`` gate exists to prevent, so
-        the convention lives in a tracked file beside the workflow that enforces
-        it.
+        it is ``.github/review/README.md`` regardless: the convention belongs
+        beside the workflow that enforces it (``review_replies`` in
+        ``ci.yml``), so a change to the workflow without a change to the
+        convention breaks the gate without going red. KBR-286 tracked
+        ``CLAUDE.md`` in this repository too, but it carries agent workflow
+        instructions (review-resolution discipline), not the review-replies
+        convention -- keeping the convention in ``.github/review/README.md``
+        rather than folding it into ``CLAUDE.md`` is deliberate, because the
+        ``review_replies`` gate is what enforces it.
         """
         text = (self.ROOT / ".github" / "review" / "README.md").read_text(
             encoding="utf-8"
@@ -14372,14 +14373,16 @@ class NoDocumentClaimsTheRepositoryHasNoTestGateTests(unittest.TestCase):
         # The sentences the design-document fix writes. Each pairs a TRUE
         # statement about `.system_design/` with an exclusion verb somewhere
         # nearby, which is exactly the shape the two new rules must not report.
-        "🔴 It excludes `/.requirements/`, `/CLAUDE.md` and `/.references/`. **None of\n"
-        "those reaches a CI checkout**, which means none of them reaches the automated\n"
-        "reviewer either. `/.system_design/` is deliberately **not** excluded, so the\n"
-        "design documents do reach it",
+        "🔴 It excludes `/.requirements/` and `/.references/`. **Neither reaches a CI\n"
+        "checkout**, which means neither reaches the automated reviewer either.\n"
+        "`CLAUDE.md` left `.gitignore` with KBR-286 and is now tracked, so it does\n"
+        "reach the checkout — but it is agent workflow instructions, not part of the\n"
+        "reviewer's specification. `/.system_design/` is deliberately **not** excluded,\n"
+        "so the design documents do reach it",
         "`.system_design/` **is tracked and reaches a CI checkout.** `.requirements/` is\n"
         "still in `.gitignore`, so per-task requirement documents do not",
-        "`.requirements/` and `CLAUDE.md` are still excluded by `.gitignore`, so\n"
-        "nothing at those paths reaches a checkout.",
+        "`.requirements/` is still excluded by `.gitignore`, so nothing at that path reaches a\n"
+        "checkout.",
         "`.system_design` is no longer one of the excluded prefixes, so the pattern no\n"
         "longer forbids sending the reviewer there",
         "The class also now asserts `.system_design` is **absent** from the excluded\n"
@@ -15191,8 +15194,11 @@ class ReviewerIsPointedAtTheDesignDocumentsTests(unittest.TestCase):
 class GitignoredDocumentsAreNotPromisedTests(unittest.TestCase):
     """🔴 The reviewer must not be sent to a document that is not in the checkout.
 
-    `.gitignore` excludes `/.requirements/`, `/.references/` and `/CLAUDE.md`, so
-    none of them reaches CI. The prompt and the guide are
+    `.gitignore` excludes `/.requirements/` and `/.references/`, so neither
+    reaches CI. (`CLAUDE.md` left `.gitignore` with KBR-286 and is now
+    tracked; the prompt and the guide were updated to reflect that, and the
+    `FORWARD_LOOKING_LITERALS` / no-promise tests self-adapt to `.gitignore`'s
+    live content.) The prompt and the guide are
     written on a developer's machine, where every one of those directories DOES
     exist -- which is exactly how a sentence telling the reviewer to read one
     gets written and never noticed. On the runner the model then spends turns

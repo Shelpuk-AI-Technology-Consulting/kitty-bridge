@@ -36,14 +36,16 @@ reviewer that says "nothing stands" without qualifying the boundary has
 ignored it.
 
 ⚠️ **The reviewer's specification is `README.md` plus `.system_design/`.**
-`.gitignore` excludes `/.requirements/` and `/CLAUDE.md`, so neither exists in a
-CI checkout and the reviewer must not be pointed at them. `/.system_design/` was
-un-ignored when the design documents were first committed, and the selector
-already matched those paths, so a change under them is reviewed with rules
-loaded. The traceability target is therefore the README (the user-facing
-interface contract), the design documents (the internal one), and the pull
-request description — and `REVIEW_GUIDE.md` says exactly that rather than
-pointing at a document that is not there.
+`.gitignore` excludes `/.requirements/`, so it does not exist in a CI
+checkout and the reviewer must not be pointed at it. `CLAUDE.md` left
+`.gitignore` with KBR-286 and is now tracked, but it carries agent workflow
+instructions, not reviewer specifications. `/.system_design/` was un-ignored
+when the design documents were first committed, and the selector already
+matched those paths, so a change under them is reviewed with rules loaded.
+The traceability target is therefore the README (the user-facing interface
+contract), the design documents (the internal one), and the pull request
+description — and `REVIEW_GUIDE.md` says exactly that rather than pointing
+at a document that is not there.
 
 ---
 

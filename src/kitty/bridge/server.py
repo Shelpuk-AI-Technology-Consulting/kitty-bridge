@@ -1625,19 +1625,29 @@ def _append_sse_chunk(
 
 
 def _cc_chunk_carries_content(chunk: dict) -> bool:
-    # pragma: no mutate block
     """Decide whether one Chat Completions chunk carries client-visible content.
 
     The KBR-248 hold releases on the first content-bearing line, so a
     content-less completion stays pre-emission and the empty-response ladder
-    can fire. Content is what the client would render: text, a tool-call
-    delta, or reasoning. A role-only chunk, an empty ``content`` string (D6:
-    a blank text reply is still empty), the finish chunk, and ``[DONE]``
-    carry none.
+    can fire. Content is what the client would render. The six shapes the
+    predicate counts (KBR-285 widens KBR-248's three-shape set):
+
+    1. non-empty string ``content`` — the ordinary text reply
+    2. non-empty list ``content`` — multimodal parts (vLLM / OpenRouter
+       image-capable backends)
+    3. non-empty ``tool_calls`` list — parallel tool-call deltas
+    4. truthy dict legacy ``function_call`` — the deprecated single-dict
+       pre-``tool_calls`` shape (OpenAI still documents it)
+    5. non-empty string ``refusal`` — the moderation path's refusal-only
+       completion (content null, refusal text)
+    6. non-empty string ``reasoning_content`` — thinking text
+
+    A role-only chunk, an empty ``content`` string (D6: a blank text reply is
+    still empty), the finish chunk, and ``[DONE]`` carry none.
 
     Robust to arbitrary parsed upstream JSON: absent or empty ``choices``, an
-    absent or non-dict ``delta``, or a non-string/non-list content field all
-    return ``False`` rather than raise.
+    absent or non-dict ``delta``, or a non-string/non-list/non-dict value on
+    any of the content fields returns ``False`` rather than raise.
 
     Args:
         chunk: One parsed Chat Completions chunk payload.
@@ -1656,7 +1666,14 @@ def _cc_chunk_carries_content(chunk: dict) -> bool:
         return False
     if isinstance(delta.get("content"), str) and delta["content"] != "":
         return True
+    if isinstance(delta.get("content"), list) and delta["content"]:
+        return True
     if isinstance(delta.get("tool_calls"), list) and delta["tool_calls"]:
+        return True
+    function_call = delta.get("function_call")
+    if isinstance(function_call, dict) and function_call:
+        return True
+    if isinstance(delta.get("refusal"), str) and delta["refusal"] != "":
         return True
     return isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"] != ""
 
@@ -2620,7 +2637,6 @@ class BridgeServer:
 
     @staticmethod
     def _is_empty_cc_response(cc_response: dict) -> bool:
-        # pragma: no mutate block
         """Return True if a Chat Completions response has no content, tool calls, or reasoning.
 
         Used to detect empty upstream responses (HTTP 200 but no meaningful
@@ -2635,15 +2651,21 @@ class BridgeServer:
           retries — consistent with the streaming hold, which also does not
           release on a thinking block.
 
-        * **Chat-Completions-shaped** (default arm, KBR-277) — extends the
-          previous ``content`` + ``tool_calls`` check with a ``reasoning_content``
-          clause that is the **literal mirror** of the streaming predicate's
-          last clause (:func:`_cc_chunk_carries_content` at
-          ``server.py:1483``): ``isinstance(..., str) and ... != ""``. The
-          mirror is deliberate so mutation testing side-by-side catches any
-          divergence. A reasoning-only Chat Completions reply therefore
-          succeeds on the first attempt on both routes (KBR-248 streaming,
-          KBR-277 non-streaming).
+        * **Chat-Completions-shaped** (default arm, KBR-277; widened by KBR-285) — counts
+          the same six shapes the streaming predicate
+          (:func:`_cc_chunk_carries_content` at ``server.py:1679``) counts, in
+          the streaming predicate's clause order: non-empty string ``content``,
+          non-empty list ``content`` (multimodal parts), non-empty ``tool_calls``
+          list, truthy dict legacy ``function_call``, non-empty string ``refusal``,
+          non-empty string ``reasoning_content``. The ``reasoning_content``
+          clause is the **literal mirror** of the streaming predicate's last
+          clause (``isinstance(..., str) and ... != ""``); the four new clauses
+          carry no ``.strip()`` drift and take the streaming-side spelling on both
+          sides. The mirror is deliberate so mutation testing side-by-side catches
+          any divergence. A reply that carries only ``refusal``, only
+          ``function_call``, or only a list of content parts therefore succeeds
+          on the first attempt on both routes (KBR-248 + KBR-276 streaming,
+          KBR-277 + KBR-285 non-streaming).
 
         The ``content`` clause keeps ``.strip()`` (whitespace-only content
         is empty) while ``reasoning_content`` uses ``!= ""`` (whitespace-only
@@ -2682,13 +2704,29 @@ class BridgeServer:
         message = choices[0].get("message", {})
         content = message.get("content")
         tool_calls = message.get("tool_calls", [])
+        function_call = message.get("function_call")
+        refusal = message.get("refusal")
         reasoning_content = message.get("reasoning_content")
         has_text = isinstance(content, str) and content.strip()
-        # KBR-277: literal mirror of _cc_chunk_carries_content's last clause (server.py:1483).
+        # KBR-285: the four clauses below mirror _cc_chunk_carries_content's
+        # widened set in its clause order (server.py:1665-1679). They take the
+        # streaming-side spelling on both sides — only the string-``content``
+        # clause above keeps the documented ``.strip()`` drift.
+        has_multimodal = isinstance(content, list) and bool(content)
+        has_function_call = isinstance(function_call, dict) and bool(function_call)
+        has_refusal = isinstance(refusal, str) and refusal != ""
+        # KBR-277: literal mirror of _cc_chunk_carries_content's last clause (server.py:1679).
         # Mirror byte-for-byte so mutation testing on the two predicates side-by-side catches
         # any divergence.
         has_reasoning = isinstance(reasoning_content, str) and reasoning_content != ""
-        return not has_text and not tool_calls and not has_reasoning
+        return not (
+            has_text
+            or has_multimodal
+            or tool_calls
+            or has_function_call
+            or has_refusal
+            or has_reasoning
+        )
 
     @staticmethod
     def _is_non_retryable_reply(cc_response: dict) -> bool:
@@ -7784,7 +7822,30 @@ class BridgeServer:
                 self._log_backend_selection()
 
                 n_backends = len(self._backends) if self._backends else 1
-                for attempt in range(n_backends):
+                # KBR-287: widen the attempt loop from `range(n_backends)` to
+                # cover the empty ladder (the plain-POST twin's bound is
+                # `(_MAX_RETRIES + 1) * n_backends + len(_EMPTY_FINAL_DELAYS)`
+                # because that branch's transport-error ladder bakes its
+                # retries into the bound; this branch's transport errors
+                # ladder within `n_backends` via the exception path, so its
+                # "original" budget is the failover walk and only the empty
+                # ladder extends it).
+                max_attempts = n_backends + len(_EMPTY_FINAL_DELAYS)
+                for attempt in range(max_attempts):
+                    # Final-delay prologue mirrors the plain-POST loop's
+                    # (grep anchor: "Empty upstream response: final retry
+                    # in"): attempts past the original `n_backends` walk
+                    # sleep the route's empty-ladder tail before their
+                    # upstream call.
+                    if attempt >= n_backends:
+                        delay = _EMPTY_FINAL_DELAYS[attempt - n_backends]
+                        logger.warning(
+                            "Empty upstream response on custom transport: final retry in %.1fs (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(delay)
                     raw_chunks: list[bytes] = []
 
                     async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
@@ -7865,7 +7926,26 @@ class BridgeServer:
                         created = cc_response.get("created", 0)
                         model = cc_response.get("model", "")
 
-                        def _cc_chunk(
+                        # KBR-287: judge-first hold. The branch parses the
+                        # whole upstream response before any write, so the
+                        # plain-POST hold's incremental state has no unknown
+                        # future to buffer against; a single up-front verdict
+                        # through the shared predicate produces the same wire
+                        # bytes the plain-POST hold walk does (order preserved
+                        # because the branch only writes if the verdict is
+                        # True). The D5 ``MAX_HELD_BYTES`` cap and the
+                        # non-JSON fail-open are satisfied by construction:
+                        # no synthesised line is withheld across writes, and
+                        # the only held class (role/finish/``[DONE]``) is
+                        # bounded by the synthesised line size — well under
+                        # the 10 MiB cap. The classifier widening KBR-285
+                        # owns is consumed here at the same predicate the
+                        # plain-POST twin uses, so both branches move in
+                        # lockstep at one call site.
+                        payloads: list[dict | None] = []
+                        lines: list[bytes] = []
+
+                        def _cc_record(
                             delta: dict,
                             fin: str | None = None,
                             usage: dict | None = None,
@@ -7873,6 +7953,25 @@ class BridgeServer:
                             _created: int = created,
                             _model: str = model,
                         ) -> bytes:
+                            """Record one synthesised chunk (payload + line).
+
+                            Args:
+                                delta: The chunk's ``choices[0].delta``.
+                                fin: The chunk's ``finish_reason``.
+                                usage: The chunk's ``usage`` block, when
+                                    the branch carries one.
+                                _response_id: The response id captured
+                                    from the parsed ``cc_response``.
+                                _created: The created timestamp captured
+                                    from the parsed ``cc_response``.
+                                _model: The model name captured from the
+                                    parsed ``cc_response``.
+
+                            Returns:
+                                The encoded ``data:`` line — the same
+                                bytes the previous unconditional-write path
+                                emitted.
+                            """
                             payload: dict = {
                                 "id": _response_id,
                                 "object": "chat.completion.chunk",
@@ -7882,7 +7981,10 @@ class BridgeServer:
                             }
                             if usage is not None:
                                 payload["usage"] = usage
-                            return f"data: {json.dumps(payload)}\n\n".encode()
+                            line = f"data: {json.dumps(payload)}\n\n".encode()
+                            payloads.append(payload)  # noqa: B023
+                            lines.append(line)  # noqa: B023
+                            return line
 
                         choice = (cc_response.get("choices") or [{}])[0]
                         msg = choice.get("message", {})
@@ -7902,31 +8004,114 @@ class BridgeServer:
                                 }
                                 for i, tc in enumerate(msg["tool_calls"])
                             ]
-                        try:
-                            await sr.write(_cc_chunk(first_delta))
+                        _cc_record(first_delta)
+                        if msg.get("content"):
+                            _cc_record({"content": msg["content"]})
+                        for i, tc in enumerate(msg.get("tool_calls", [])):
+                            args = tc.get("function", {}).get("arguments", "")
+                            if args:
+                                _cc_record(
+                                    {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
+                                )
+                        _cc_record({}, fin=finish_reason, usage=cc_response.get("usage"))
+                        payloads.append(None)
+                        lines.append(b"data: [DONE]\n\n")
 
-                            # Content delta
-                            if msg.get("content"):
-                                await sr.write(_cc_chunk({"content": msg["content"]}))
-
-                            # Tool call argument deltas
-                            for i, tc in enumerate(msg.get("tool_calls", [])):
-                                args = tc.get("function", {}).get("arguments", "")
-                                if args:
-                                    await sr.write(
-                                        _cc_chunk(
-                                            {"tool_calls": [{"index": i, "function": {"arguments": args}}]},
-                                        )
+                        carries = any(
+                            payload is not None and _cc_chunk_carries_content(payload) for payload in payloads
+                        )
+                        if carries:
+                            try:
+                                # ``synth_line``, not ``line``: the name
+                                # ``line`` is a *str* in the plain-POST
+                                # branch's SSE loops below (same function
+                                # scope), and rebinding it as bytes here
+                                # breaks mypy's inference for those loops.
+                                for synth_line in lines:
+                                    await sr.write(synth_line)
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                logger.debug("Client disconnected during custom-transport emit")
+                            # Usage log-on-release: the branch parses
+                            # atomically, so usage is fully known regardless
+                            # of client state — and the plain-POST
+                            # never-log-on-disconnect is a structural
+                            # consequence of incremental arrival there, not
+                            # a policy to copy.
+                            self._log_usage(cc_response.get("usage"))
+                            break
+                        # Empty attempt: ladder. Mirrors the plain-POST
+                        # empty arm (grep anchor: "Check for empty response
+                        # (pass-through: no content bytes written)") — one
+                        # class-agnostic
+                        # ``_select_backend()``; if it lands custom, stay in
+                        # this branch and re-attempt; if plain, fall through
+                        # to the standard streaming path below (the
+                        # custom→plain crossing is uncapped like the
+                        # exception path's arm and bounded by the reverse
+                        # direction's ``(2 * n_backends) + 1`` cap on
+                        # plain→custom crossings). Pool-less mode falls
+                        # straight to the exponential backoff retry; ladder
+                        # exhaustion emits the route's ``empty_response``
+                        # D4 terminal, uniform with the plain twin (the
+                        # ticket's ``cross_class_exhaustion`` wording is
+                        # deliberately corrected here — see SYSTEM_DESIGN §5.4
+                        # for the discriminator-contract reasoning).
+                        if self._backends and self._current_backend_idx >= 0:
+                            if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                self._select_backend()
+                                self._normalize_model(cc_request)
+                                self._active_provider.normalize_request(cc_request)
+                                if self._active_provider.use_custom_transport:
+                                    # Stay custom: refresh the custom keys
+                                    # so the next attempt's stream_request
+                                    # finds them.
+                                    cc_request["_resolved_key"] = self._active_key
+                                    cc_request["_provider_config"] = self._active_provider_config
+                                    logger.info(
+                                        "CC stream empty response on custom transport: "
+                                        "re-selecting custom backend, attempt %d/%d",
+                                        attempt + 1,
+                                        max_attempts,
                                     )
-
-                            # Finish
-                            await sr.write(
-                                _cc_chunk({}, fin=finish_reason, usage=cc_response.get("usage")),
+                                    continue
+                                # Cross to plain: the branch's fall-through
+                                # idiom (the check at the bottom of this
+                                # while-pass routes the plain provider into
+                                # the standard streaming path).
+                                cc_request.pop("_resolved_key", None)
+                                cc_request.pop("_provider_config", None)
+                                cc_request.pop("_original_body", None)
+                                logger.info(
+                                    "CC stream empty response: crossing custom → plain, attempt %d/%d",
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                break
+                        elif attempt < max_attempts - 1:
+                            delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                            logger.warning(
+                                "CC stream empty response on custom transport: retrying in %.1fs (%d/%d)",
+                                delay,
+                                attempt + 1,
+                                max_attempts,
                             )
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.warning(
+                            "CC stream empty response after %d attempts on custom transport, emitting terminal error",
+                            max_attempts,
+                        )
+                        error_payload = {
+                            "error": {
+                                "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                "type": "empty_response",
+                            }
+                        }
+                        try:
+                            await sr.write(f"data: {json.dumps(error_payload)}\n\n".encode())
                             await sr.write(b"data: [DONE]\n\n")
                         except (ConnectionResetError, BrokenPipeError, OSError):
-                            logger.debug("Client disconnected during custom-transport emit")
-                        self._log_usage(cc_response.get("usage"))
+                            logger.debug("Client disconnected before empty-response exhaustion error could be sent")
                         break
 
                 cc_request.pop("_resolved_key", None)
@@ -8013,13 +8198,17 @@ class BridgeServer:
                     # native Messages passthrough. KBR-248 gated the hold on
                     # ``stream_converter is not None`` and deliberately left the
                     # raw-CC upstreams' skeleton behaviour alone; KBR-276
-                    # removed the gate, so a completion the classifier judges
-                    # content-free (``_cc_chunk_carries_content``) from any
-                    # plain-POST provider is now pre-emission and the ladder
-                    # fires. The classifier's set is the KBR-285 follow-up's
-                    # scope: ``refusal``/legacy ``function_call``/list
-                    # ``content`` deltas do not count today (§5.4 known
-                    # limit). Capped at ``MAX_HELD_BYTES`` (D5): an upstream
+                    # removed the gate, so a content-less completion — one the
+                    # classifier judges content-free
+                    # (``_cc_chunk_carries_content``) — from any plain-POST
+                    # provider is pre-emission and the ladder fires. KBR-285
+                    # widened the classifier's set to six shapes (text,
+                    # multimodal list, tool calls, legacy ``function_call``,
+                    # ``refusal``, reasoning); the translated routes'
+                    # translators (Messages, Responses, and Gemini) carry the
+                    # widened set too, and the custom-transport branch judges
+                    # its synthesis through the same predicate (KBR-287).
+                    # Capped at ``MAX_HELD_BYTES`` (D5): an upstream
                     # that trickles empty-content deltas forever must not grow
                     # ``held`` without limit.
                     held: list[bytes] = []

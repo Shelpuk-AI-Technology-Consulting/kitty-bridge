@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kitty.credentials.file_backend import FileBackend
-from kitty.credentials.store import CredentialStore
+from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.launchers.claude import ClaudeAdapter
 from kitty.launchers.codex import CodexAdapter
 from kitty.launchers.discovery import discover_binary
@@ -143,7 +143,12 @@ def _make_credential_check(cred_store: CredentialStore, profile: Profile):
     """Create a check function for a profile's credentials."""
 
     def check() -> tuple[bool, str]:
-        key = cred_store.get(profile.auth_ref)
+        # KBR-87: a corrupt stored value is a finding to report, not a crash —
+        # the doctor exists to diagnose exactly this state.
+        try:
+            key = cred_store.get(profile.auth_ref)
+        except CredentialError as exc:
+            return False, str(exc)
         if key is not None:
             return True, f"resolved ({len(key)} chars)"
         return False, f"auth_ref {profile.auth_ref!r} not found"
@@ -192,8 +197,15 @@ def _check_profile(store: ProfileStore, cred_store: CredentialStore, name: str) 
         print_error(f"  Provider {profile.provider!r}: unknown provider type")
         failures += 1
 
-    # Check credentials
-    key = cred_store.get(profile.auth_ref)
+    # Check credentials (KBR-87: corruption surfaces as a failed check with the
+    # corruption message — the diagnostic tool must not crash on the condition
+    # it exists to diagnose).
+    try:
+        key = cred_store.get(profile.auth_ref)
+    except CredentialError as exc:
+        print_error(f"  Credentials for {profile.name!r}: {exc}")
+        failures += 1
+        return failures
     if key is not None:
         print_status(f"  Credentials for {profile.name!r}: resolved ({len(key)} chars)")
     else:

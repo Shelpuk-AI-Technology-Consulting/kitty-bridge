@@ -13,7 +13,14 @@ class CredentialBackend(ABC):
 
     @abstractmethod
     def get(self, ref: str) -> str | None:
-        """Retrieve a credential by reference. Returns None if not found."""
+        """Retrieve a credential by reference.
+
+        Returns:
+            The credential value, or ``None`` when the reference is absent.
+            ``None`` means absent; implementations raise :class:`CredentialError`
+            when the reference exists but its stored value is undecodable, so
+            store damage is distinguishable from a missing key (KBR-87).
+        """
 
     @abstractmethod
     def set(self, ref: str, value: str) -> None:
@@ -39,7 +46,13 @@ class CredentialStore:
         self._backends = backends
 
     def get(self, ref: str) -> str | None:
-        """Try each backend in order. Returns the first non-None result."""
+        """Try each backend in order. Returns the first non-None result.
+
+        A backend's :class:`CredentialError` is not swallowed: ``None`` advances
+        the fallback chain, a raised error stops it — a backend error is a stop,
+        not a miss (KBR-87). Callers that need to distinguish absent from
+        corrupt at a higher layer rely on this invariant.
+        """
         for backend in self._backends:
             value = backend.get(ref)
             if value is not None:

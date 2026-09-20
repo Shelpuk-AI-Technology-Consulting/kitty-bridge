@@ -2187,11 +2187,9 @@ class TestEveryOptionalLeafFailsClosed:
             "tools[0].functionDeclarations[0].parameters",
             lambda p: p.conversation.tools[0].schema is None,
         ),
-        "functionCall.name": (
-            {"contents": [{"parts": [{"functionCall": {"name": 7}}]}]},
-            "contents[0].parts[0].functionCall.name",
-            lambda p: p.conversation.turns[0].parts[0] == c.ToolUse(name=""),
-        ),
+        # `functionCall.name` left this table in KBR-281: the tool-call name
+        # raises on absent/empty/non-string (TestNameRequired), the settled
+        # §7.4.2 rule-7 row-2 posture for the four strict readers.
         "blob.data undecodable": (
             {"contents": [{"parts": [{"inlineData": {"mimeType": "image/png", "data": "aGk=\n"}}]}]},
             "contents[0].parts[0].inlineData.data",
@@ -2625,8 +2623,10 @@ class TestUnionMemberValues:
       `Thinking` have no absent value in the grammar, and `Text("")` would
       fabricate an empty part the agent never sent, which is meaningful here
       because P5e and P8 both inject one. T-A1 agrees.
-    - **A required *field* of a part** — a `name` — residualises and the part is
-      still projected. §3.3.1b settles it in those words. T-A3 agrees.
+    - **A required *field* of a part** — since KBR-281 the tool-call `name`
+      raises on absent/empty/non-string (§7.4.2 rule 7 row 2's settled rule;
+      `TestNameRequired`), while `fileData.fileUri` keeps the residualise +
+      opaque-digest identity rule (KBR-192).
     - **An undecodable payload** — base64 that does not decode — residualises
       the leaf and the part keeps its place, because `Image.digest` is
       `str | None` and §7.4.1 says "raising is the other wrong answer".
@@ -2641,16 +2641,6 @@ class TestUnionMemberValues:
         """`Text` *is* its value, so there is no partial part to salvage."""
         with pytest.raises(c.UnreadableBodyError):
             project_untotalled({"contents": [{"parts": [{"text": {"a": 1}}]}]})
-
-    def test_a_function_call_with_no_name_still_projects(self) -> None:
-        """The call keeps its place; the residual names what was missing."""
-        projected = project_untotalled({"contents": [{"parts": [{"text": "a"}, {"functionCall": {"args": {"q": 1}}}]}]})
-
-        assert projected.conversation.turns[0].parts == (
-            c.Text("a"),
-            c.ToolUse(name="", arguments={"q": 1}),
-        )
-        assert projected.residual == {"contents[0].parts[1].functionCall.name": None}
 
     def test_line_wrapped_base64_residualises_instead_of_killing_the_request(self) -> None:
         """A single newline in one blob must not abort the whole projection.
@@ -2690,7 +2680,11 @@ class TestUnionMemberValues:
                 "contents": [
                     {
                         "parts": [
-                            {"functionCall": {"args": {}}},
+                            # KBR-281: an absent functionCall name now raises,
+                            # so the residualise-and-project filler here is a
+                            # wrongly-typed `args` — same branch shape (the
+                            # leaf residualises, the part keeps its place).
+                            {"functionCall": {"name": "f", "args": 7}},
                             {"inlineData": {"data": "aGk=\n"}},
                             {"text": "last"},
                         ]
@@ -2838,3 +2832,59 @@ class TestSingletonRepeatedFields:
         """R2.5's container rule, on the field whose message says both forms."""
         with pytest.raises(c.UnreadableBodyError):
             project_untotalled({"tools": value})
+
+
+class TestNameRequired:
+    """A ``functionCall`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers; KBR-281 aligns Gemini's request direction on it
+    (the reply direction's site is pinned in ``test_reader_gemini_reply.py``).
+    The residualising ``_read_required_name`` helper keeps serving
+    ``FunctionDeclaration`` names, whose residualise posture is deliberate
+    (§3.3.1b, T-A3) — declaration pins stay green untouched.
+    """
+
+    @staticmethod
+    def _body_with_function_call(name: Any) -> dict[str, Any]:
+        """Return a Gemini request body whose one ``functionCall`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published examples never show and the schema calls required.
+        """
+        call: dict[str, Any] = {"args": {"city": "Toronto"}}
+        if name is not None:
+            call["name"] = name
+        return {
+            "contents": [
+                {"role": "user", "parts": [{"text": "weather?"}]},
+                {"role": "model", "parts": [{"functionCall": call}]},
+            ]
+        }
+
+    def test_missing_function_call_name_raises(self) -> None:
+        """A ``functionCall`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="functionCall.name"):
+            project_untotalled(self._body_with_function_call(None))
+
+    def test_empty_function_call_name_raises(self) -> None:
+        """A ``functionCall`` with an empty ``name`` raises (KBR-281)."""
+        with pytest.raises(c.UnreadableBodyError, match="functionCall.name"):
+            project_untotalled(self._body_with_function_call(""))
+
+    def test_non_string_function_call_name_raises(self) -> None:
+        """A ``functionCall`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="functionCall.name"):
+            project_untotalled(self._body_with_function_call(42))
+
+    def test_named_function_call_control_is_clean(self) -> None:
+        """Control — a named ``functionCall`` projects cleanly."""
+        projected = project(self._body_with_function_call("get_weather"))
+
+        tool_use = projected.conversation.turns[1].parts[0]
+        assert isinstance(tool_use, c.ToolUse)
+        assert tool_use.name == "get_weather"
+        assert tool_use.arguments == {"city": "Toronto"}
