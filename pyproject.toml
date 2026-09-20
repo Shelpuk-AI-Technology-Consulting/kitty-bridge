@@ -350,7 +350,7 @@ only_mutate = [
     "src/kitty/bridge/gemini/*",
     "src/kitty/bridge/engine.py",
     "src/kitty/bridge/tool_audit.py",
-    # ``server.py`` carries the section-6.1 registry-named targets — the
+    # ``server.py`` carries the section-6.1 registry-named targets: the
     # seven ``compaction_and_pairing`` methods plus KBR-285's two content
     # predicates (``_cc_chunk_carries_content`` and
     # ``BridgeServer._is_empty_cc_response``); every other def/class in it
