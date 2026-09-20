@@ -1115,16 +1115,46 @@ def _wire_identity_digest(value: Any) -> str:
         return c.image_digest(repr(value).encode("utf-8"))
 
 
+def _require_tool_call_name(name: Any, path: str) -> str:
+    """Validate and return a ``toolUse``'s ``name``; raise on absent / empty / wrong type.
+
+    The strict name-required rule, mirroring Ollama's
+    :func:`_require_tool_call_name` (``reader_ollama.py:1007``) and Gemini's
+    (``reader_gemini.py:1330``) per-module copies so the readers' strict-name
+    helpers grep together (§7.4.1's within-module anti-drift rule). ``""`` for
+    a name is not a lossless projection (``contract.py:935-941``): it claims a
+    tool *named* empty-string, and a call nobody can name cannot be paired
+    with its result or addressed by a register row (KBR-281 settled the rule
+    for four readers; KBR-292 extends it here).
+
+    Args:
+        name: The ``toolUse``'s raw ``name`` value.
+        path: The name's path from the body root, used as the error-message
+            prefix.
+
+    Returns:
+        The validated, non-empty name.
+
+    Raises:
+        UnreadableBodyError: When ``name`` is absent, empty, or not a string.
+    """
+    if not isinstance(name, str) or not name:
+        raise c.UnreadableBodyError(f"{path} must be a non-empty string name")
+    return name
+
+
 def _read_tool_use(
     raw: Any, prefix: str, residual: dict[str, Any]
 ) -> c.ToolUse:
     """Project a :class:`ToolUseBlock` into :class:`~harness.contract.ToolUse`.
 
     The schema publishes ``toolUseId``, ``name``, ``input`` (``Document``)
-    as required. The reader carries ``id`` through; ``name`` and ``input``
-    are required — a missing or wrong-typed value residualises at its
-    path AND the part is produced (KBR-251 / §7.4 rule 7 row 3), so the
-    position is occupied and the indices of every later part do not shift.
+    as required. The reader carries ``id`` through; a missing or wrongly-typed
+    ``name`` raises (§7.4.2 rule 7 row 2, the strict posture KBR-281 settled
+    for four readers and KBR-292 extended here), while ``toolUseId`` and
+    ``input`` residualise at their path AND the part is produced
+    (KBR-251 / §7.4 rule 7 row 3), so the position is occupied and the indices
+    of every later part do not shift.
 
     A non-Mapping ``raw`` — the member itself is wrong, the schema says
     an object and the wire sent a scalar — raises
@@ -1137,10 +1167,10 @@ def _read_tool_use(
         residual: The reader's accumulator, mutated here.
 
     Returns:
-        The :class:`~harness.contract.ToolUse`. A wrongly-typed leaf does
-        not yield ``None`` — the part is always produced, identity from
-        a sentinel ``name`` (``""``) and ``id`` (``None``) when those
-        leaves are wrong, and the wire's own bytes for the rest.
+        The :class:`~harness.contract.ToolUse`. A wrongly-typed leaf other
+        than ``name`` does not yield ``None`` — the part is always produced,
+        identity from a sentinel ``id`` (``None``) or the wire's own bytes
+        for the rest.
     """
     if not isinstance(raw, Mapping):
         # The member itself is wrong (§7.4 rule 7 row 2) — the schema
@@ -1150,17 +1180,7 @@ def _read_tool_use(
             f"{prefix} must be an object, got {type(raw).__name__}"
         )
 
-    name = raw.get("name")
-    if isinstance(name, str):
-        name_value = name
-    else:
-        residual[f"{prefix}.name"] = name
-        # §7.4 rule 7: occupy the position. An empty-string name is a
-        # wire-format breach, but the call still needs an address — it
-        # cannot be paired with its result otherwise (§3.3.1b's
-        # test-the-projection-can-represent-the-absence-losslessly rule
-        # names the same trade-off).
-        name_value = ""
+    name_value = _require_tool_call_name(raw.get("name"), f"{prefix}.name")
 
     tool_use_id = raw.get("toolUseId")
     if tool_use_id is None or isinstance(tool_use_id, str):

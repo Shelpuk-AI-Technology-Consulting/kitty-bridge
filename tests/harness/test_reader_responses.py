@@ -1167,18 +1167,75 @@ class TestFunctionCall:
 
         assert projected.residual == {"input[0].arguments": {"a": 1}}
 
-    def test_a_wrongly_typed_call_id_or_name_residualises_rather_than_being_coerced(self) -> None:
-        """`str(7)` and `str(None)` invent a value the agent never sent.
+    def test_a_wrongly_typed_call_id_residualises_rather_than_being_coerced(self) -> None:
+        """`str(7)` invents a value the agent never sent.
 
         `verify_total` cannot see a nested coercion, because `consumed` covers
-        top-level keys only — so a silent `"None"` would be a projection the
-        oracle trusts and nobody can falsify.
+        top-level keys only — so a silent `"7"` would be a projection the
+        oracle trusts and nobody can falsify. (The wrongly-typed *name* half
+        this test once carried moved to `TestNameRequired` — KBR-292 settled
+        that posture on raise, §7.4.2 rule 7 row 2.)
         """
         projected = r.ResponsesProjection().read_request(
-            captured({"input": [{"type": "function_call", "call_id": 7, "name": None, "arguments": "{}"}]})
+            captured({"input": [{"type": "function_call", "call_id": 7, "name": "ping", "arguments": "{}"}]})
         )
 
-        assert set(projected.residual) == {"input[0].call_id", "input[0].name"}
+        assert set(projected.residual) == {"input[0].call_id"}
+
+
+class TestNameRequired:
+    """A ``function_call`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers, KBR-281 for Chat Completions / Gemini / Anthropic;
+    KBR-292 extends it here (§7.4.2 rule 7 row 2, seven strict readers). The
+    ``FunctionTool`` declaration branch keeps the residualise posture by
+    design.
+    """
+
+    @staticmethod
+    def _body_with_function_call(name: Any) -> dict[str, Any]:
+        """Return a Responses body whose one ``function_call`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published schema calls required and no published example shows.
+        """
+        call: dict[str, Any] = {
+            "type": "function_call",
+            "call_id": "call_1",
+            "arguments": '{"city": "Toronto"}',
+        }
+        if name is not None:
+            call["name"] = name
+        return {"input": [call]}
+
+    def test_missing_function_call_name_raises(self) -> None:
+        """A ``function_call`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"input\[0\].name"):
+            project(self._body_with_function_call(None))
+
+    def test_empty_function_call_name_raises(self) -> None:
+        """A ``function_call`` with an empty ``name`` raises (KBR-292)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"input\[0\].name"):
+            project(self._body_with_function_call(""))
+
+    def test_non_string_function_call_name_raises(self) -> None:
+        """A ``function_call`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"input\[0\].name"):
+            project(self._body_with_function_call(42))
+
+    def test_named_function_call_control_is_clean(self) -> None:
+        """Control — a named ``function_call`` projects cleanly."""
+        projected = project(self._body_with_function_call("get_weather"))
+
+        tool_use = projected.conversation.turns[0].parts[0]
+        assert isinstance(tool_use, c.ToolUse)
+        assert tool_use.name == "get_weather"
+        assert tool_use.arguments == {"city": "Toronto"}
+        assert tool_use.id == "call_1"
 
 
 class TestFunctionCallOutput:

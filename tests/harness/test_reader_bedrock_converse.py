@@ -1518,23 +1518,6 @@ class TestEveryOptionalLeafFailsClosed:
         assert part.media_type == "7"
         assert part.digest == c.image_digest(b"x")
 
-    def test_a_non_string_tool_use_name_residualises(self) -> None:
-        """``toolUse.name`` must be a string."""
-        projected = project_untotalled(
-            {
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {"toolUse": {"toolUseId": "x", "name": 42, "input": {}}}
-                        ],
-                    }
-                ]
-            }
-        )
-
-        assert "messages[0].content[0].toolUse.name" in projected.residual
-
     def test_an_unknown_tool_result_status_residualises(self) -> None:
         """``status`` outside the enum residualises; ``is_error`` stays False."""
         projected = project_untotalled(
@@ -1557,6 +1540,56 @@ class TestEveryOptionalLeafFailsClosed:
         )
 
         assert "messages[0].content[0].toolResult.status" in projected.residual
+
+
+class TestNameRequired:
+    """A ``toolUse`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` (``contract.py:935-941``) is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers, KBR-281 for Chat Completions / Gemini / Anthropic;
+    KBR-292 extends it here (§7.4.2 rule 7 row 2, seven strict readers). The
+    ``toolSpec`` declaration branch keeps the residualise posture by design.
+    """
+
+    @staticmethod
+    def _body_with_tool_use(name: Any) -> dict[str, Any]:
+        """Return a Converse body whose one ``toolUse`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published examples never show and the schema calls required.
+        """
+        tool_use: dict[str, Any] = {"toolUseId": "call_1", "input": {"city": "Toronto"}}
+        if name is not None:
+            tool_use["name"] = name
+        return {"messages": [{"role": "assistant", "content": [{"toolUse": tool_use}]}]}
+
+    def test_missing_tool_use_name_raises(self) -> None:
+        """A ``toolUse`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="toolUse.name"):
+            project_untotalled(self._body_with_tool_use(None))
+
+    def test_empty_tool_use_name_raises(self) -> None:
+        """A ``toolUse`` with an empty ``name`` raises (KBR-292)."""
+        with pytest.raises(c.UnreadableBodyError, match="toolUse.name"):
+            project_untotalled(self._body_with_tool_use(""))
+
+    def test_non_string_tool_use_name_raises(self) -> None:
+        """A ``toolUse`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="toolUse.name"):
+            project_untotalled(self._body_with_tool_use(42))
+
+    def test_named_tool_use_control_is_clean(self) -> None:
+        """Control — a named ``toolUse`` projects cleanly."""
+        projected = project(self._body_with_tool_use("get_weather"))
+
+        tool_use = projected.conversation.turns[0].parts[0]
+        assert isinstance(tool_use, c.ToolUse)
+        assert tool_use.name == "get_weather"
+        assert tool_use.arguments == {"city": "Toronto"}
+        assert tool_use.id == "call_1"
 
 
 # --------------------------------------------------------------------------
