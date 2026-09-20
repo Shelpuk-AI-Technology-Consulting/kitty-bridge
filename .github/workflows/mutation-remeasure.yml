@@ -72,6 +72,31 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      # Resume support, and why: hosted runners are ephemeral, so every run
+      # re-pays the ~20-minute stats phase and loses whatever per-mutant work
+      # a previous run completed before its cap. mutmut resumes from a cached
+      # `mutants/` tree, so the latest artifact of the same name (uploaded by
+      # the always()-guarded step below, success or timeout) is restored here
+      # when one exists. A missing artifact is the normal first-run case, not
+      # an error. The artifact from an older commit is safe to restore: mutmut
+      # keys its cache on source content, and changed files re-generate.
+      - name: Restore the previous mutants tree, if any
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: mutants-${{ inputs.group || 'compaction_and_pairing' }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}" --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty')" || true
+          if [ -z "${ARTIFACT_ID:-}" ]; then
+            echo "No previous ${ARTIFACT_NAME} artifact -- starting a fresh tree."
+            exit 0
+          fi
+          echo "Restoring artifact ${ARTIFACT_ID} (${ARTIFACT_NAME})."
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > "${RUNNER_TEMP}/mutants.zip"
+          mkdir -p mutants
+          unzip -q "${RUNNER_TEMP}/mutants.zip" -d mutants
+          echo "Restored $(find mutants -name '*.meta' | wc -l) per-mutant result files."
+
       # The scope registry is the machine-readable form of TEST_SUITE.md §6.1;
       # the patterns come from it rather than being copied here, so the
       # registry and the measured run cannot drift apart. The input reaches
@@ -121,6 +146,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mutants-${{ inputs.group }}
+          # The same `||` fallback as the resolve step: on a push event
+          # `inputs.group` is empty, and the restore step looks this name up.
+          name: mutants-${{ inputs.group || 'compaction_and_pairing' }}
           path: mutants/
           retention-days: 14
