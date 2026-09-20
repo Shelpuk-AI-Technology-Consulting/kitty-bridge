@@ -86,6 +86,25 @@ class FileBackend(CredentialBackend):
             ) from exc
 
     def set(self, ref: str, value: str) -> None:
+        """Persist a credential under ``ref``.
+
+        Reads the current store via :meth:`_read_raw_for_write`, which
+        forgives file-level damage when the backup succeeded and
+        propagates the underlying :class:`CredentialError` when the
+        backup failed — so the recovery command the error names reports
+        the failure honestly rather than silently overwriting the
+        still-damaged original.
+
+        Args:
+            ref: Opaque credential reference.
+            value: Plaintext credential value; stored base64-encoded
+                behind POSIX 0600 permissions.
+
+        Raises:
+            CredentialError: When the credentials file is damaged and
+                the backup rename failed. The original remains at
+                ``self._path``; see :meth:`_read_raw_for_write`.
+        """
         with self._lock:
             data = self._read_raw_for_write()
             data[ref] = base64.b64encode(value.encode("utf-8")).decode("ascii")
@@ -93,6 +112,20 @@ class FileBackend(CredentialBackend):
             self._set_permissions()
 
     def delete(self, ref: str) -> None:
+        """Remove the credential stored under ``ref``, if any.
+
+        Reads the current store via :meth:`_read_raw_for_write`; the
+        same backup-failed propagation contract as :meth:`set` applies
+        so a write cannot silently destroy a still-damaged original.
+
+        Args:
+            ref: Opaque credential reference. A missing ref is a no-op
+                (consistent with ``dict.pop(ref, None)``).
+
+        Raises:
+            CredentialError: When the credentials file is damaged and
+                the backup rename failed.
+        """
         with self._lock:
             data = self._read_raw_for_write()
             data.pop(ref, None)
@@ -130,37 +163,27 @@ class FileBackend(CredentialBackend):
         except UnicodeDecodeError as exc:
             ts = time.strftime("%Y%m%d-%H%M%S")
             backup = self._path.with_suffix(f".json.corrupt.{ts}.{os.getpid()}")
-            logger.critical(
-                "Credentials file %s is corrupt (not valid UTF-8). "
-                "Backing up to %s. All previously stored API keys may be lost!",
+            backed_up = self._back_up_damaged_file(backup, "not valid UTF-8")
+            raise _file_corrupt_error(
                 self._path,
+                f"not valid UTF-8: {exc}",
                 backup,
-            )
-            with contextlib.suppress(OSError):
-                os.replace(self._path, backup)
-            raise CredentialError(
-                f"Credentials file {self._path} is corrupt "
-                f"(not valid UTF-8: {exc}). "
-                "Run 'kitty setup' to reconfigure stored credentials; "
-                f"the original bytes are preserved at {backup}."
+                backed_up,
             ) from exc
 
         # Parse JSON. F37: back up the corrupt file before returning empty
-        # so the next write cannot silently overwrite it.
+        # so the next write cannot silently overwrite it. When the backup
+        # itself fails (read-only mount), do NOT write `{}` over the
+        # damaged original — raise instead, the same signal shape as the
+        # two newer file-level raises.
         try:
             result = json.loads(raw)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             ts = time.strftime("%Y%m%d-%H%M%S")
             backup = self._path.with_suffix(f".json.corrupt.{ts}.{os.getpid()}")
-            logger.critical(
-                "Credentials file %s is corrupt (not valid JSON). "
-                "Backing up to %s and starting fresh. "
-                "All previously stored API keys may be lost!",
-                self._path,
-                backup,
-            )
-            with contextlib.suppress(OSError):
-                os.replace(self._path, backup)
+            backed_up = self._back_up_damaged_file(backup, "not valid JSON")
+            if not backed_up:
+                raise _file_corrupt_error(self._path, "not valid JSON", backup, backed_up) from exc
             # Create a fresh empty file so future writes never overwrite the
             # corrupt original (which now lives at backup path).
             with contextlib.suppress(OSError):
@@ -184,23 +207,45 @@ class FileBackend(CredentialBackend):
         if not isinstance(result, dict):
             ts = time.strftime("%Y%m%d-%H%M%S")
             backup = self._path.with_suffix(f".json.corrupt.{ts}.{os.getpid()}")
-            logger.critical(
-                "Credentials file %s is corrupt (top-level %s, expected object). "
-                "Backing up to %s. All previously stored API keys may be lost!",
+            backed_up = self._back_up_damaged_file(backup, f"top-level {type(result).__name__}, expected object")
+            raise _file_corrupt_error(
                 self._path,
-                type(result).__name__,
+                f"top-level {type(result).__name__}, expected object",
                 backup,
-            )
-            with contextlib.suppress(OSError):
-                os.replace(self._path, backup)
-            raise CredentialError(
-                f"Credentials file {self._path} is corrupt "
-                f"(top-level {type(result).__name__}, expected object). "
-                "Run 'kitty setup' to reconfigure stored credentials; "
-                f"the original is preserved at {backup}."
+                backed_up,
             )
 
         return result
+
+    def _back_up_damaged_file(self, backup: Path, reason: str) -> bool:
+        """Move the damaged credentials file aside and log the damage.
+
+        Args:
+            backup: Destination path for the damaged original
+                (``*.json.corrupt.<ts>.<pid>``).
+            reason: Human-readable damage description for the CRITICAL
+                log line (e.g. ``"not valid JSON"``).
+
+        Returns:
+            ``True`` when the rename succeeded (the original now lives
+            at ``backup``); ``False`` when ``os.replace`` failed (e.g.
+            a read-only mount) and the damaged file remains at
+            ``self._path``.
+        """
+        logger.critical(
+            "Credentials file %s is corrupt (%s). Backing up to %s. All previously stored API keys may be lost!",
+            self._path,
+            reason,
+            backup,
+        )
+        try:
+            os.replace(self._path, backup)
+        except OSError:
+            # Read-only mount, stale permissions, etc. The damaged file
+            # stays at self._path; the caller must not treat the backup
+            # as having happened.
+            return False
+        return True
 
     def _read_raw_for_write(self) -> dict[str, str]:
         """Read for the write path: a damaged file reads as empty.
@@ -258,6 +303,31 @@ class FileBackend(CredentialBackend):
                 os.chmod(self._path.parent, 0o700)
             except OSError:
                 pass
+
+
+def _file_corrupt_error(path: Path, reason: str, backup: Path, backed_up: bool) -> CredentialError:
+    """Build a file-level damage ``CredentialError`` whose message is
+    honest about whether the backup actually succeeded.
+
+    The same exception type (``CredentialError``) is raised by all three
+    file-level damage shapes — KBR-87's receiver map catches it and
+    produces the existing clean user-facing message at every call site.
+    What changes between the success and the failure branches is the
+    message: "the original is preserved at {backup}" is only true when
+    the rename actually moved the bytes; "could not be backed up" makes
+    the read-only-mount case visible to the user.
+    """
+    if backed_up:
+        return CredentialError(
+            f"Credentials file {path} is corrupt ({reason}). "
+            "Run 'kitty setup' to reconfigure stored credentials; "
+            f"the original is preserved at {backup}."
+        )
+    return CredentialError(
+        f"Credentials file {path} is corrupt ({reason}) and could not "
+        f"be backed up. The damaged file is still at the path; restore "
+        f"write access to the directory before rerunning 'kitty setup'."
+    )
 
 
 __all__ = ["FileBackend"]

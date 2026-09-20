@@ -1353,9 +1353,29 @@ backup that does not exist. The next `set` swallowing the exception would overwr
 damaged original with no backup anywhere — silent credential loss accompanied by a
 confident false promise. `_read_raw_for_write` checks `self._path.exists()` after the
 raise: present (backup failed) → propagate, the recovery command reports the failure;
-absent (backup succeeded) → return `{}`, the write proceeds. The shape (a) arm does not
-write `{}` after backup precisely so this guard can distinguish "backup succeeded" from
-"backup failed" at a single file-system check.
+absent (backup succeeded) → return `{}`, the write proceeds. Neither the shape (a) arm
+nor the shape (b) arm writes `{}` after the backup — shape (a) because doing so would
+erase the `self._path.exists()` signal the guard reads, and shape (b) because the bytes
+cannot be decoded and recreating `{}` adds nothing. Both rely on that single file-system
+check to distinguish "backup succeeded" from "backup failed".
+
+**Why the F37 path also raises on backup failure.** F37's success branch (invalid JSON
+with a successful backup) is unchanged: `get` returns `None`, the file is reset to
+`{}`, no raise. The failure branch (invalid JSON with a failed backup) now raises
+`CredentialError` rather than writing `{}` over the still-damaged original — the same
+silent-loss argument as the file-level guards, applied to the pre-existing F37 path.
+The `_back_up_damaged_file` helper returns the rename's success; F37 only writes
+`{}` and returns when the rename succeeded. Acceptance criterion 3's "F37 unchanged"
+holds for the success branch; this paragraph records the explicit failure-branch
+contract change.
+
+**Why wizard `cred_store.set` sites wrap `CredentialError`.** The seven wizard set
+sites (`setup_cmd.py`, `profile_cmd.py`, `auth_cmd.py`, `egress_cmd.py`) wrap
+`cred_store.set(...)` in `try/except CredentialError: print_error(...); exit`. Without
+the wrappers, a backup-failed raise would propagate as a Python traceback at the
+recovery command — the KBR-154 diagnostic family on the very path the error names.
+The wrappers produce the same clean `Error: …` + exit the receiver map produces for
+every `get` site.
 
 ### 11.3 The keyring dependency contract
 
@@ -1400,7 +1420,11 @@ unavailable guard.
   `UnicodeDecodeError`) and valid-JSON-non-dict payloads (shape a, parametrised over
   list/string/number/bool/null, no chaining), backup content + CRITICAL log pinning
   path and backup path, `set`/`delete` after damage (the write-path forgiveness),
-  and the F37 unchanged regression pin.
+  the write-path propagation when the backup rename fails (read-only-mount case,
+  `os.replace` monkeypatched to raise, `set` must not overwrite the damaged
+  original), the F37 backup-failure raise (the round-3 contract change — F37 no
+  longer silently resets when the rename failed), the success-branch message naming
+  the real backup path, and the F37 unchanged regression pin.
 - `tests/test_egress_store.py` — the corrupt stored gateway password raises the documented
   `ValueError` (chained, naming `kitty egress`), the twin of the existing
   missing-credential test.

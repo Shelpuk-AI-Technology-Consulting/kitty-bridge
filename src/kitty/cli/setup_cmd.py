@@ -7,7 +7,7 @@ import uuid
 
 import questionary
 
-from kitty.credentials.store import CredentialStore
+from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import _NAME_PATTERN, PROVIDER_LABELS, PROVIDER_SECTIONS, RESERVED_NAMES, Profile
 from kitty.profiles.store import ProfileStore
 from kitty.tui.display import print_error, print_section, print_status, print_step, print_warning, status_spinner
@@ -103,14 +103,26 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
                     print_error("API key cannot be empty")
                     raise ValueError("API key cannot be empty")
                 auth_ref = str(uuid.uuid4())
-                cred_store.set(auth_ref, api_key)
+                try:
+                    cred_store.set(auth_ref, api_key)
+                except CredentialError as exc:
+                    # The credentials file is damaged and the backup
+                    # rename failed — surface the error and stop the
+                    # wizard rather than crashing raw on the recovery
+                    # write path (KBR-291 round-3 review).
+                    print_error(str(exc))
+                    raise SystemExit(1) from exc
         else:
             api_key = prompt_secret("Enter API key: ")
             if not api_key:
                 print_error("API key cannot be empty")
                 raise ValueError("API key cannot be empty")
             auth_ref = str(uuid.uuid4())
-            cred_store.set(auth_ref, api_key)
+            try:
+                cred_store.set(auth_ref, api_key)
+            except CredentialError as exc:
+                print_error(str(exc))
+                raise SystemExit(1) from exc
 
     # Step 3: Model
     print_step(3, 7, "Model selection")

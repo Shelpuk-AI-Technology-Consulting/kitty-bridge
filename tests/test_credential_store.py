@@ -486,9 +486,7 @@ class TestFileLevelCorruption:
             b'["not", "a", "dict"]',  # shape (a) — non-dict JSON
         ],
     )
-    def test_write_path_propagates_when_backup_could_not_be_made(
-        self, tmp_path, monkeypatch, payload
-    ):
+    def test_write_path_propagates_when_backup_could_not_be_made(self, tmp_path, monkeypatch, payload):
         """Pin the read-only-mount fallback: when ``os.replace`` fails
         inside ``_read_raw``, the file remains at ``self._path`` and
         the user was promised the original was preserved at the
@@ -513,7 +511,7 @@ class TestFileLevelCorruption:
         monkeypatch.setattr("kitty.credentials.file_backend.os.replace", _raise_oserror)
 
         # `get` still raises (the read-path signal is intact).
-        with pytest.raises(CredentialError):
+        with pytest.raises(CredentialError, match="could not be backed up"):
             backend.get("any-ref")
 
         # The damaged file is still at the path — the message claims
@@ -531,3 +529,71 @@ class TestFileLevelCorruption:
         # hand once write access is restored.
         assert path.exists()
         assert path.read_bytes() == payload
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b'["not", "a", "dict"]',  # shape (a) — non-dict JSON
+            b"\xff\xfe\xfd",  # shape (b) — invalid UTF-8
+            b"not json at all {{{",  # F37 — invalid JSON (deliberate unchanged path)
+        ],
+    )
+    def test_success_branch_message_names_the_backup(self, tmp_path, payload):
+        """The success-branch message claims 'the original is preserved
+        at {backup}' — verify it names the real backup path and that the
+        backup actually exists at that path (no false promise).
+
+        The F37 case here hits the success branch (backup succeeds), so
+        ``get`` still returns ``None`` (acceptance criterion 3 — F37 is
+        unchanged in the normal case).
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        if payload == b"not json at all {{{":
+            # F37's success branch returns None, not raise.
+            assert backend.get("any-ref") is None
+        else:
+            with pytest.raises(CredentialError) as excinfo:
+                backend.get("any-ref")
+            message = str(excinfo.value)
+            backups = list(tmp_path.glob("creds.json.corrupt.*"))
+            assert backups, "Expected backup to exist"
+            assert str(backups[0]) in message, f"Success-branch message must name the backup path: {message!r}"
+            assert "could not be backed up" not in message
+
+    def test_f37_backup_failure_now_raises_instead_of_silent_reset(self, tmp_path, monkeypatch, caplog):
+        """F37 regression-plus-fix: invalid JSON with a FAILED backup
+        must raise `CredentialError` (honest message), not silently
+        write `{}` over the damaged original.
+
+        The acceptance criterion 3 contract — F37 behaves exactly as
+        today — holds for the normal (backup-succeeds) case, which
+        `test_f37_invalid_json_path_is_unchanged` and the stage-7 suite
+        pin. This test pins the round-3 fix for the failure branch:
+        when the rename fails, `_write_raw({})` would overwrite the
+        still-damaged original with no backup anywhere; the raise is
+        the only honest signal.
+        """
+        path = tmp_path / "creds.json"
+        original = b"not json at all {{{"
+        path.write_bytes(original)
+        backend = FileBackend(path=path)
+
+        def _raise_oserror(src: object, dst: object) -> None:
+            raise OSError("simulated read-only mount")
+
+        monkeypatch.setattr("kitty.credentials.file_backend.os.replace", _raise_oserror)
+
+        with (
+            caplog.at_level(logging.CRITICAL, logger="kitty.credentials.file_backend"),
+            pytest.raises(CredentialError, match="could not be backed up"),
+        ):
+            backend.get("any-ref")
+
+        # The damaged original survived — no silent overwrite.
+        assert path.read_bytes() == original
+        assert any(r.levelno >= logging.CRITICAL for r in caplog.records), (
+            "Expected CRITICAL log even in the backup-failed branch"
+        )

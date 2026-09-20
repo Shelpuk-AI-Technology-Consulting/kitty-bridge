@@ -42,10 +42,17 @@ honesty document already named them.
   `UnicodeDecodeError`); (b) parse JSON (F37 path verbatim); (c) validate
   shape (`isinstance(result, dict)` — non-dict backs up via `os.replace`
   and raises `CredentialError` with no chain because the JSON parsed
-  cleanly). The F37 invalid-JSON path is unchanged. Both new shapes
-  emit a CRITICAL line naming the file path and the backup path.
-  Shape (a) does **not** write `{}` after the backup (D3's no-write-
-  empty pattern extends to shape a — see the gotcha below);
+  cleanly). Both new shapes emit a CRITICAL line naming the file path
+  and the backup path. Neither shape (a) nor shape (b) writes `{}` after
+  the backup (D3's no-write-empty pattern extends to shape a — see the
+  gotcha below). A `_back_up_damaged_file` helper centralises the rename
+  and returns whether it succeeded; `_file_corrupt_error` builds the
+  exception with an honest message ("preserved at {backup}" when the
+  rename succeeded, "could not be backed up" when it didn't). The F37
+  invalid-JSON path also detects a failed rename and raises
+  `CredentialError` instead of silently writing `{}` over the still-
+  damaged original — acceptance criterion 3's "F37 unchanged" holds for
+  the success branch only.
   `_read_raw_for_write()` private helper swallows the file-level
   `CredentialError` for the write path when the backup succeeded
   (`self._path` is absent), but propagates when the backup failed
@@ -53,8 +60,24 @@ honesty document already named them.
   case). `set`/`delete` proceed from `{}` on the success branch; on
   the failure branch, the recovery command sees the honest message
   rather than silently overwriting the user's data with no backup
-  anywhere. `FileBackend.get` lets the exception propagate to the
-  KBR-87 receiver map.
+  anywhere. `set` and `delete` carry Google-style docstrings with
+  `Args:` / `Raises:` documenting the new contract.
+- Wizard receiver map (seven sites): `cli/setup_cmd.py` (2),
+  `cli/profile_cmd.py` (3), `cli/auth_cmd.py` (1), `cli/egress_cmd.py`
+  (1) now wrap `cred_store.set(...)` in `try/except CredentialError:
+  print_error(...); exit` so the backup-failed raise produces the same
+  clean `Error: …` + exit the read-path receivers already produce
+  (KBR-291 round-3 review).
+- `tests/test_credential_store.py::TestFileLevelCorruption` — 22 L1
+  tests in the class (up from 15). New pins: `test_write_path_propagates_when_backup_could_not_be_made`
+  (parametrised over shapes a/b and a F37 case — but F37 takes a
+  different code path so the parametrise is documented), `test_f37_backup_failure_now_raises_instead_of_silent_reset`,
+  `test_success_branch_message_names_the_backup` (parametrised over
+  shapes a/b and F37).
+- `SYSTEM_DESIGN.md` §11.1/§11.2/§11.4 updated: drop the residuals
+  paragraph, add the F37 backup-failure contract change, record the
+  wizard receiver map (seven sites) for the propagation contract,
+  update §11.4 with the new L1 coverage.
 - `tests/test_credential_store.py::TestFileLevelCorruption` (L1) —
   shape (b) `CredentialError` + chain pin + backup + CRITICAL log
   content (path + backup path) + `set` after damage; shape (a)

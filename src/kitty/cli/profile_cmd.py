@@ -217,14 +217,25 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
                     print_error("API key cannot be empty")
                     raise ValueError("API key cannot be empty")
                 auth_ref = str(uuid.uuid4())
-                cred_store.set(auth_ref, api_key)
+                try:
+                    cred_store.set(auth_ref, api_key)
+                except CredentialError as exc:
+                    # Damage-and-no-backup: surface the error cleanly
+                    # instead of crashing raw on the wizard's own write
+                    # (KBR-291 round-3 review).
+                    print_error(str(exc))
+                    raise SystemExit(1) from exc
         else:
             api_key = prompt_secret("Enter API key: ")
             if not api_key:
                 print_error("API key cannot be empty")
                 raise ValueError("API key cannot be empty")
             auth_ref = str(uuid.uuid4())
-            cred_store.set(auth_ref, api_key)
+            try:
+                cred_store.set(auth_ref, api_key)
+            except CredentialError as exc:
+                print_error(str(exc))
+                raise SystemExit(1) from exc
 
     # Step 3: Model
     _default_models = {"openai_subscription": "gpt-5.3-codex"}
@@ -381,7 +392,11 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
                 # The old credential entry is left untouched so other profiles sharing
                 # the same auth_ref continue to work.
                 new_auth_ref = str(uuid.uuid4())
-                cred_store.set(new_auth_ref, new_key)
+                try:
+                    cred_store.set(new_auth_ref, new_key)
+                except CredentialError as exc:
+                    print_error(str(exc))
+                    raise SystemExit(1) from exc
                 updates["auth_ref"] = new_auth_ref
 
     if field == "Backup":
