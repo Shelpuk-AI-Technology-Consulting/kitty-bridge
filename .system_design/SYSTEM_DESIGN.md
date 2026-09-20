@@ -1255,14 +1255,16 @@ row + the KBR-154 scope addition). This section is the To Be state of
   `platformdirs.user_config_dir("kitty")/credentials.json` (or an explicit path), guarded
   by a `filelock` (5 s timeout, F38), written atomically (`mkstemp` + `os.replace`) with
   POSIX `0600`/`0700`. F37: a file that is not valid **JSON** is backed up
-  (`*.corrupt.<ts>.<pid>`) and the store restarts empty behind a CRITICAL log. KBR-291
-  extends the same guarantee to the other two file-level damage shapes: an
-  invalid-UTF-8 file and a valid-JSON-non-dict file are backed up the same way; `get`
-  raises `CredentialError` at the boundary (below), while `set`/`delete` proceed from
-  `{}` — the write path forgives because the recovery command the error names
-  (`kitty setup`) reaches a `set` call, and raising there would crash the very
-  command the message points at. The CRITICAL log + backup fire on both paths, so
-  nothing is silent.
+  (`*.corrupt.<ts>.<pid>`); on the success branch the store restarts empty behind a
+  CRITICAL log, on the failure branch (read-only mount, etc.) it raises
+  `CredentialError` instead of silently writing `{}` over the damaged original —
+  same silent-loss argument as the file-level guards, applied to F37. KBR-291 extends
+  the same guarantee to the other two file-level damage shapes: an invalid-UTF-8 file
+  and a valid-JSON-non-dict file are backed up the same way; `get` raises
+  `CredentialError` at the boundary, while `set`/`delete` proceed from `{}` — the
+  write path forgives because the recovery command the error names reaches a `set`
+  call, and raising there would crash the very command the message points at. The
+  CRITICAL log + backup fire on both paths, so nothing is silent.
 - **`keyring_backend.py`** — `KeyringBackend`: delegates to the `keyring` package with
   service name `"kitty"`. `get` swallows every exception to `None`; `set` wraps failures in
   `CredentialError` (F39 — headless Linux without D-Bus raises `NoKeyringError`); `delete`
@@ -1291,8 +1293,11 @@ row + the KBR-154 scope addition). This section is the To Be state of
   to a non-dict (top-level list, string, number, bool, null) — both raise
   `CredentialError` naming the file at the backend boundary. Shape (b) chains from
   the `UnicodeDecodeError`; shape (a) does not chain (the JSON parsed cleanly, so
-  there is no underlying exception). F37 (invalid JSON) is unchanged: `get` returns
-  `None`, the file is reset to `{}` behind a CRITICAL log.
+  there is no underlying exception). F37 (invalid JSON) has a two-branch contract:
+  the success branch (backup rename succeeded) is unchanged — `get` returns `None`,
+  the file is reset to `{}` behind a CRITICAL log; the failure branch raises
+  `CredentialError` honestly rather than writing `{}` over the still-damaged
+  original.
 
 **Where the signal lands — per call site.** The raise is only half the contract; a signal
 nobody receives is a traceback on every startup path:

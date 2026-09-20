@@ -136,21 +136,23 @@ class FileBackend(CredentialBackend):
 
         Returns:
             The parsed ``{ref: base64}`` dict, or an empty dict when the
-            file is absent or its JSON is invalid (the F37 path: invalid
+            file is absent (no store) or when its JSON is invalid and
+            the backup rename succeeded (the F37 success path: invalid
             JSON is backed up to ``*.corrupt.<ts>.<pid>``, the store
             resets to ``{}``, and ``get`` returns ``None`` — a
-            deliberately different signal from the file-level raises
-            below).
+            deliberately different signal from the raises below).
 
         Raises:
             CredentialError: When the file exists but is damaged — its
-                bytes are not valid UTF-8 (shape b, KBR-291) or its JSON
-                parses to a non-dict (shape a, KBR-291). The corrupt
-                file is backed up to ``*.corrupt.<ts>.<pid>`` before
-                raising, so the next write cannot silently destroy it.
-                ``FileBackend.set`` / ``delete`` swallow this via
-                :meth:`_read_raw_for_write`; ``get`` lets it propagate
-                so the KBR-87 receiver map produces the clean message.
+                bytes are not valid UTF-8 (shape b, KBR-291), its JSON
+                parses to a non-dict (shape a, KBR-291), or its JSON
+                is invalid and the backup rename failed (the F37
+                failure path). The corrupt file is backed up to
+                ``*.corrupt.<ts>.<pid>`` before raising, so the next
+                write cannot silently destroy it. ``FileBackend.set`` /
+                ``delete`` swallow this via :meth:`_read_raw_for_write`
+                when the backup succeeded; ``get`` lets it propagate so
+                the KBR-87 receiver map produces the clean message.
         """
         # Read the file as UTF-8 text. A UnicodeDecodeError means the bytes
         # themselves are damaged — F37's gap for shape (b). os.replace is
@@ -276,8 +278,9 @@ class FileBackend(CredentialBackend):
         silent.
 
         The one exception: if the file is still at ``self._path`` after
-        the raise, the backup failed (``os.replace`` is wrapped in
-        ``contextlib.suppress(OSError)`` for the read-only-mount case).
+        the raise, the backup rename failed (``_back_up_damaged_file``
+        catches ``OSError`` for the read-only-mount case and the F37 /
+        shape-a arms raise honestly in that case).
         Letting the write proceed would overwrite the still-damaged
         original with no backup anywhere — the user was promised the
         original is preserved, and would silently lose it. Surface the
