@@ -232,20 +232,37 @@ class FileBackend(CredentialBackend):
             a read-only mount) and the damaged file remains at
             ``self._path``.
         """
-        logger.critical(
-            "Credentials file %s is corrupt (%s). Backing up to %s. All previously stored API keys may be lost!",
-            self._path,
-            reason,
-            backup,
-        )
+        backed_up = False
         try:
             os.replace(self._path, backup)
+            backed_up = True
         except OSError:
             # Read-only mount, stale permissions, etc. The damaged file
             # stays at self._path; the caller must not treat the backup
             # as having happened.
-            return False
-        return True
+            pass
+        # The log wording splits on the rename outcome: a reader
+        # recovering from the log must not be sent to a backup path that
+        # holds nothing (KBR-291 round-4 review).
+        if backed_up:
+            logger.critical(
+                "Credentials file %s is corrupt (%s). "
+                "Backed up to %s. All previously stored API keys may be lost!",
+                self._path,
+                reason,
+                backup,
+            )
+        else:
+            logger.critical(
+                "Credentials file %s is corrupt (%s) and could not be "
+                "backed up (rename to %s failed). The damaged file is "
+                "still at the original path; restore write access to "
+                "the directory before retrying.",
+                self._path,
+                reason,
+                backup,
+            )
+        return backed_up
 
     def _read_raw_for_write(self) -> dict[str, str]:
         """Read for the write path: a damaged file reads as empty.
@@ -316,17 +333,25 @@ def _file_corrupt_error(path: Path, reason: str, backup: Path, backed_up: bool) 
     message: "the original is preserved at {backup}" is only true when
     the rename actually moved the bytes; "could not be backed up" makes
     the read-only-mount case visible to the user.
+
+    The wording is context-flexible — the corruption message lands at
+    every call site (launch, setup wizard, egress command, profile
+    edit, doctor), so naming only one command would be misleading in
+    the others. ``'kitty setup' (or the command you were running)``
+    covers all of them without picking one (KBR-291 round-4 review).
     """
     if backed_up:
         return CredentialError(
             f"Credentials file {path} is corrupt ({reason}). "
-            "Run 'kitty setup' to reconfigure stored credentials; "
+            "Run 'kitty setup' (or the command you were running) to "
+            "reconfigure stored credentials; "
             f"the original is preserved at {backup}."
         )
     return CredentialError(
         f"Credentials file {path} is corrupt ({reason}) and could not "
         f"be backed up. The damaged file is still at the path; restore "
-        f"write access to the directory before rerunning 'kitty setup'."
+        f"write access to the directory before rerunning 'kitty setup' "
+        f"(or the command you were running)."
     )
 
 

@@ -1162,3 +1162,91 @@ class TestBackupColumnInProfileTable:
         assert by_name["primary"][4] == "No"
         assert by_name["reserve"][4] == "Yes"
         assert by_name["pool"][4] == "—"
+
+
+# ---------------------------------------------------------------------------
+# KBR-291 round-4 pin: wizard `cred_store.set` wrappers surface
+# `CredentialError` cleanly (the backup-failed raise from
+# `FileBackend._read_raw_for_write`) — three set sites in profile_cmd.
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialErrorOnSet:
+    def test_create_flow_new_key_branch_raises_systemexit(
+        self, store: ProfileStore, cred_store: CredentialStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from kitty.credentials.store import CredentialError
+
+        create = _import_create_profile_flow()
+
+        def _boom(ref: str, value: str) -> None:
+            raise CredentialError("simulated damage + failed backup")
+
+        monkeypatch.setattr(cred_store, "set", _boom)
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
+            patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=None),
+            patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-key"),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-4o", "newprof"]),
+            patch("kitty.cli.profile_cmd.print_error") as mock_err,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            create(store, cred_store)
+
+        assert excinfo.value.code == 1
+        mock_err.assert_called_once()
+        assert "simulated damage + failed backup" in str(mock_err.call_args)
+
+    def test_create_flow_reuse_rejection_branch_raises_systemexit(
+        self, store: ProfileStore, cred_store: CredentialStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both branches of the create flow carry the contract."""
+        from kitty.credentials.store import CredentialError
+
+        create = _import_create_profile_flow()
+        existing_ref = str(uuid.uuid4())
+
+        def _boom(ref: str, value: str) -> None:
+            raise CredentialError("simulated damage + failed backup")
+
+        monkeypatch.setattr(cred_store, "set", _boom)
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
+            patch("kitty.cli.profile_cmd._find_reusable_auth_ref", return_value=existing_ref),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=False),  # decline reuse
+            patch("kitty.cli.profile_cmd.prompt_secret", return_value="sk-key"),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-4o", "newprof"]),
+            patch("kitty.cli.profile_cmd.print_error") as mock_err,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            create(store, cred_store)
+
+        assert excinfo.value.code == 1
+        mock_err.assert_called_once()
+
+    def test_edit_flow_copy_on_write_raises_systemexit(
+        self, store: ProfileStore, cred_store: CredentialStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The edit-flow copy-on-write set is the third wrapper."""
+        from kitty.credentials.store import CredentialError
+
+        edit = _import_edit_profile_flow()
+        store.save(_make_profile("editme", provider="zai_regular"))
+
+        def _boom(ref: str, value: str) -> None:
+            raise CredentialError("simulated damage + failed backup")
+
+        monkeypatch.setattr(cred_store, "set", _boom)
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="API Key"),
+            patch("kitty.cli.profile_cmd.prompt_secret", return_value="new-key"),
+            patch("kitty.cli.profile_cmd.print_error") as mock_err,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            edit(store, cred_store, "editme")
+
+        assert excinfo.value.code == 1
+        mock_err.assert_called_once()

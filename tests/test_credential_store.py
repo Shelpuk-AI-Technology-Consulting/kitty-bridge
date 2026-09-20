@@ -597,3 +597,41 @@ class TestFileLevelCorruption:
         assert any(r.levelno >= logging.CRITICAL for r in caplog.records), (
             "Expected CRITICAL log even in the backup-failed branch"
         )
+        # Round-4 pin: the CRITICAL log line itself must be honest in the
+        # failure branch — a user reading the log to recover the original
+        # must not be sent to a backup path that holds nothing.
+        critical_messages = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.CRITICAL
+        ]
+        assert any("could not be backed up" in m for m in critical_messages), (
+            f"Failure-branch CRITICAL log must name the failed rename: {critical_messages!r}"
+        )
+        assert not any("Backed up to" in m for m in critical_messages), (
+            f"Failure-branch log must not claim the backup was made: {critical_messages!r}"
+        )
+
+    def test_success_branch_log_names_the_backup_path(self, tmp_path, caplog):
+        """Round-4 pin: the success branch's CRITICAL log names the
+        backup path with the 'Backed up to' wording, so a user reading
+        the log can find the original."""
+        path = tmp_path / "creds.json"
+        path.write_bytes(b'["not", "a", "dict"]')
+        backend = FileBackend(path=path)
+
+        with (
+            caplog.at_level(logging.CRITICAL, logger="kitty.credentials.file_backend"),
+            pytest.raises(CredentialError),
+        ):
+            backend.get("any-ref")
+
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert backups, "Expected backup to exist in the success branch"
+        critical_messages = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.CRITICAL
+        ]
+        assert any("Backed up to" in m and str(backups[0]) in m for m in critical_messages), (
+            f"Success-branch log must name the backup path: {critical_messages!r}"
+        )
+        assert not any("could not be backed up" in m for m in critical_messages), (
+            f"Success-branch log must not claim failure: {critical_messages!r}"
+        )
