@@ -721,19 +721,40 @@ async def _run_custom_transport(path: str, payload: dict, first_writes: bool, ca
 
 
 class TestCustomTransportFailureAfterBytes:
-    """The Responses and Gemini custom-transport branches honour the same rule."""
+    """The Responses and Gemini custom-transport branches are pre-emission (KBR-293).
+
+    Pre-KBR-293 these branches wrote provider bytes to the client as they
+    arrived, so §11 Q14(a) bound them: a backend that had already written
+    was not followed by another backend's attempt. KBR-293 made the branches
+    collect-and-judge instead — no byte reaches the socket before the
+    verdict — so the rule is now satisfied by construction and the tests pin
+    the stronger guarantee: a failing attempt is replaced, and its bytes
+    (written into the collector or not) never ship.
+    """
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("path", "payload"), _CUSTOM_TRANSPORT_ROUTES)
-    async def test_custom_transport_failure_after_bytes_does_not_fail_over(self, path, payload):
-        """A backend that already wrote to the client is not followed by another backend's attempt."""
+    async def test_custom_transport_failure_after_collected_bytes_discards_them_and_fails_over(
+        self, path, payload
+    ):
+        """A failing attempt's collected bytes are discarded; the next backend serves.
+
+        The first backend writes its delta into the branch's collector and
+        then times out. Nothing reached the client, so the exception path
+        fails over and the second backend's content is the only content the
+        client sees.
+
+        Args:
+            path: The bridge route under test.
+            payload: The request body for the route.
+        """
         calls: list[int] = []
         body = await _run_custom_transport(path, payload, first_writes=True, calls=calls)
 
-        assert len(calls) == 1, f"stream_request ran {len(calls)} times after bytes reached the client"
-        assert body.count(b'"delta":"Hi"') == 1
-        assert b"Served" not in body
-        assert b'"error"' in body
+        assert len(calls) == 2, "the collected-then-failed attempt must be replaced"
+        assert b'"delta":"Hi"' not in body, "the failed attempt's bytes reached the client"
+        assert b"Served" in body
+        assert b'"error"' not in body
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("path", "payload"), _CUSTOM_TRANSPORT_ROUTES)

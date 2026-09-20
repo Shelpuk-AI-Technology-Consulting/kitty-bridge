@@ -476,6 +476,9 @@ async def test_an_empty_custom_transport_stream_fires_the_empty_ladder(
     assert status == 200
     assert calls == 2
     assert "hello" in _gemini_texts(client_body)
+    # The discarded first attempt wrote nothing — no raw Chat Completions
+    # chunk (the provider's native wire) ever reached the Gemini client.
+    assert all(event.get("object") != "chat.completion.chunk" for event in _parse_data_lines(client_body))
 
 
 @pytest.mark.asyncio
@@ -609,8 +612,10 @@ async def test_an_exhausted_custom_transport_empty_ladder_ends_in_the_d4_termina
     assert calls == 3  # n_backends (1) + len(_EMPTY_FINAL_DELAYS)
     assert '"reason": "empty_response"' in client_body
     assert _NATIVE_EMPTY_REPLY_MESSAGE in client_body
-    # The held synthesis was discarded, not flushed: no content on the wire.
+    # The held synthesis was discarded, not flushed: no content on the wire,
+    # and no raw Chat Completions chunk either.
     assert _gemini_texts(client_body) == []
+    assert all(event.get("object") != "chat.completion.chunk" for event in _parse_data_lines(client_body))
     assert usage_log == []
 
 
@@ -721,3 +726,4 @@ async def test_an_empty_custom_transport_attempt_crosses_to_a_healthy_plain_back
     assert calls["n"] == 1  # the custom attempt; the ladder then crossed
     assert plain_calls["n"] == 1
     assert "hello" in _gemini_texts(client_body)
+    assert all(event.get("object") != "chat.completion.chunk" for event in _parse_data_lines(client_body))

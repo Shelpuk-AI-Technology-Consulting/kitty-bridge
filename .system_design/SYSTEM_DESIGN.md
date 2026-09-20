@@ -706,6 +706,17 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   crossing sites reset the translator before re-entry (KBR-254), and the
   content arm ends the request — the lifecycle opening is written
   unconditionally there, not lazily, because the verdict is already known.
+  **§11 Q14(a) on these two branches is now satisfied by construction, not
+  by a guard:** pre-fix the `_bytes_written` flag stopped a post-write
+  failure from failing over (a second backend's bytes would splice into the
+  first's); post-fix no collected byte reaches the socket before the
+  verdict, so a failing attempt's partial bytes are discarded and the
+  failover proceeds — the KBR-247-era tests
+  (`tests/bridge/test_post_emission_no_failover.py`,
+  `TestCustomTransportFailureAfterBytes`) pin the stronger guarantee (the
+  failed attempt's bytes never ship; the next backend's content is the only
+  content), and the Q14(a) rule itself is unchanged everywhere bytes still
+  stream incrementally (the plain-POST paths).
   **Fidelity callout the PO signed off via PR review:** `/v1/responses` ×
   subscription was a native Responses-SSE passthrough pre-fix (reasoning
   summaries included); post-fix it runs parse → synthesise → translate, and

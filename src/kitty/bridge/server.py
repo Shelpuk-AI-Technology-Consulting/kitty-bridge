@@ -4010,7 +4010,7 @@ class BridgeServer:
                             }
                             if usage is not None:
                                 payload["usage"] = usage
-                            payloads.append(payload)
+                            payloads.append(payload)  # noqa: B023
 
                         choice = (cc_response.get("choices") or [{}])[0]
                         msg = choice.get("message", {})
@@ -6995,7 +6995,7 @@ class BridgeServer:
                             }
                             if usage is not None:
                                 payload["usage"] = usage
-                            payloads.append(payload)
+                            payloads.append(payload)  # noqa: B023
 
                         choice = (cc_response.get("choices") or [{}])[0]
                         msg = choice.get("message", {})
@@ -7141,7 +7141,6 @@ class BridgeServer:
                         except (ConnectionResetError, BrokenPipeError, OSError):
                             logger.debug("Client disconnected before stream EOF")
                         return sr
-                    break
 
                 cc_request.pop("_resolved_key", None)
                 cc_request.pop("_provider_config", None)

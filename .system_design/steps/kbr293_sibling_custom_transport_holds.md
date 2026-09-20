@@ -72,3 +72,11 @@ requires), green post-fix.
 - The 30 s `test_streaming_skips_backends_without_stream_request` slowness
   (KBR-249-era, `/v1/messages`) is pre-existing — verified identical on
   main's server.py; out of scope here.
+- Full-suite round 2 caught the one real behavioural consequence outside the
+  new tests: `tests/bridge/test_post_emission_no_failover.py`'s
+  Q14(a) test (KBR-247-era) pinned "failure after bytes does not fail
+  over" on these two branches. Post-fix the premise is obsolete by
+  construction — collected bytes never reach the socket before the verdict —
+  so the test was rewritten to pin the stronger guarantee (failing attempt's
+  bytes never ship; failover serves the next backend). The Q14(a) rule
+  itself is unchanged on every incrementally-streaming path.
