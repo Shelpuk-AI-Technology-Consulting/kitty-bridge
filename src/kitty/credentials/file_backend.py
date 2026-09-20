@@ -47,9 +47,15 @@ class FileBackend(CredentialBackend):
             damage is distinguishable from a missing key at this boundary.
 
         Raises:
-            CredentialError: When the reference exists but its stored value is
-                undecodable — not valid base64, not decodable as UTF-8, or not a
-                string.
+            CredentialError: (a) When the reference exists but its stored value
+                is undecodable — not valid base64, not decodable as UTF-8, or
+                not a string (KBR-87). (b) When the credentials file itself is
+                damaged — not valid UTF-8 bytes, or its JSON parses to a
+                non-dict (KBR-291). The message names the file path and the
+                ``*.corrupt.<ts>.<pid>`` backup holding the original bytes.
+                ``set``/``delete`` swallow the file-level raise via
+                :meth:`_read_raw_for_write` so the recovery command
+                (``kitty setup``) does not crash on its own write.
         """
         try:
             with self._lock:
@@ -81,27 +87,65 @@ class FileBackend(CredentialBackend):
 
     def set(self, ref: str, value: str) -> None:
         with self._lock:
-            data = self._read_raw()
+            data = self._read_raw_for_write()
             data[ref] = base64.b64encode(value.encode("utf-8")).decode("ascii")
             self._write_raw(data)
             self._set_permissions()
 
     def delete(self, ref: str) -> None:
         with self._lock:
-            data = self._read_raw()
+            data = self._read_raw_for_write()
             data.pop(ref, None)
             self._write_raw(data)
 
     def _read_raw(self) -> dict[str, str]:
+        """Read and parse the credentials file.
+
+        Returns:
+            The parsed ``{ref: base64}`` dict, or an empty dict when the
+            file is absent.
+
+        Raises:
+            CredentialError: When the file exists but is damaged — its
+                bytes are not valid UTF-8 (shape b, KBR-291) or its JSON
+                parses to a non-dict (shape a, KBR-291). The corrupt
+                file is backed up to ``*.corrupt.<ts>.<pid>`` before
+                raising, so the next write cannot silently destroy it.
+                ``FileBackend.set`` / ``delete`` swallow this via
+                :meth:`_read_raw_for_write`; ``get`` lets it propagate
+                so the KBR-87 receiver map produces the clean message.
+        """
+        # Read the file as UTF-8 text. A UnicodeDecodeError means the bytes
+        # themselves are damaged — F37's gap for shape (b). os.replace is
+        # bytes-level (no decode needed), so the backup preserves the
+        # original bytes verbatim; recreating an empty file adds nothing.
         try:
             raw = self._path.read_text(encoding="utf-8")
-            result = json.loads(raw)
-            if isinstance(result, dict):
-                return result
+        except (FileNotFoundError, OSError):
             return {}
+        except UnicodeDecodeError as exc:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            backup = self._path.with_suffix(f".json.corrupt.{ts}.{os.getpid()}")
+            logger.critical(
+                "Credentials file %s is corrupt (not valid UTF-8). "
+                "Backing up to %s. All previously stored API keys may be lost!",
+                self._path,
+                backup,
+            )
+            with contextlib.suppress(OSError):
+                os.replace(self._path, backup)
+            raise CredentialError(
+                f"Credentials file {self._path} is corrupt "
+                f"(not valid UTF-8: {exc}). "
+                "Run 'kitty setup' to reconfigure stored credentials; "
+                f"the original bytes are preserved at {backup}."
+            ) from exc
+
+        # Parse JSON. F37: back up the corrupt file before returning empty
+        # so the next write cannot silently overwrite it.
+        try:
+            result = json.loads(raw)
         except json.JSONDecodeError:
-            # F37: Back up the corrupt file before returning empty.
-            # This prevents the next write from silently overwriting it.
             ts = time.strftime("%Y%m%d-%H%M%S")
             backup = self._path.with_suffix(f".json.corrupt.{ts}.{os.getpid()}")
             logger.critical(
@@ -118,7 +162,54 @@ class FileBackend(CredentialBackend):
             with contextlib.suppress(OSError):
                 self._write_raw({})
             return {}
-        except (FileNotFoundError, OSError):
+
+        # Validate shape — valid JSON that is not an object is file damage
+        # (shape a, KBR-291). Without the backup the next write destroys
+        # the original silently; with it, the backup is the recovered
+        # record. No chaining: the JSON parsed cleanly, so there is no
+        # underlying exception to preserve.
+        if not isinstance(result, dict):
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            backup = self._path.with_suffix(f".json.corrupt.{ts}.{os.getpid()}")
+            logger.critical(
+                "Credentials file %s is corrupt (top-level %s, expected object). "
+                "Backing up to %s and starting fresh. "
+                "All previously stored API keys may be lost!",
+                self._path,
+                type(result).__name__,
+                backup,
+            )
+            with contextlib.suppress(OSError):
+                os.replace(self._path, backup)
+            with contextlib.suppress(OSError):
+                self._write_raw({})
+            raise CredentialError(
+                f"Credentials file {self._path} is corrupt "
+                f"(top-level {type(result).__name__}, expected object). "
+                "Run 'kitty setup' to reconfigure stored credentials; "
+                f"the original is preserved at {backup}."
+            )
+
+        return result
+
+    def _read_raw_for_write(self) -> dict[str, str]:
+        """Read for the write path: a damaged file reads as empty.
+
+        ``get`` raises on file-level damage (the read signal the user
+        needs); the write path forgives it — the user is overwriting the
+        file anyway, and ``kitty setup`` (the recovery command the error
+        message names) reaches a ``set`` call, so raising here would
+        crash the very command the message names (KBR-291 D6). The
+        CRITICAL log + backup still fire from ``_read_raw``; nothing is
+        silent.
+
+        Returns:
+            The parsed data, or an empty dict when the file is absent
+            or damaged.
+        """
+        try:
+            return self._read_raw()
+        except CredentialError:
             return {}
 
     def _write_raw(self, data: dict[str, Any]) -> None:
