@@ -3455,14 +3455,25 @@ class BridgeServer:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             self._access_log_file = log_path.open("a", encoding="utf-8")
 
-        # TLS warning
+        # TLS warning. `kitty bridge start` gives up after its 5-second
+        # window (KBR-176) and exits, closing this process's output pipe;
+        # this print is the documented kill site (KBR-219) — it fires before
+        # the state file is written, so a slow-starting bridge died here on
+        # its first post-parent write. Swallow the BrokenPipeError and move
+        # the streams to devnull: the reader is provably gone, and an
+        # interpreter-exit flush would otherwise raise the same error again.
         if self._should_warn_no_tls():
             import sys
 
-            print(
-                f"WARNING: Binding to {self._host} without TLS. API keys and responses will be sent in plain text.",
-                file=sys.stderr,
-            )
+            from kitty.io_encoding import relinquish_output_streams
+
+            try:
+                print(
+                    f"WARNING: Binding to {self._host} without TLS. API keys and responses will be sent in plain text.",
+                    file=sys.stderr,
+                )
+            except BrokenPipeError:
+                relinquish_output_streams()
 
         # Registration order is outermost-first. Attribution sits *inside* auth
         # (an unauthenticated caller gets no backend details) but *outside* the

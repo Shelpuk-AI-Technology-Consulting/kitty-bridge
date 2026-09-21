@@ -16,7 +16,7 @@ from pathlib import Path
 from kitty.bridge.server import BridgeServer
 from kitty.bridge.state import default_state_path
 from kitty.bridge.stop_signals import install_stop_handlers
-from kitty.io_encoding import harden_output_streams
+from kitty.io_encoding import harden_output_streams, relinquish_output_streams
 
 
 def main() -> None:
@@ -220,6 +220,13 @@ def main() -> None:
 
         await model_context_sync.refresh_model_context_overrides()
         await server.start_async()
+        # Ready is reported: the state file exists, the parent has printed the
+        # URL or given up. From here the parent's pipe serves nothing — a
+        # write to it after the parent exits would raise BrokenPipeError and
+        # kill a serving bridge (KBR-219) — so pipe-shaped streams go to
+        # os.devnull. Service-manager-provided streams (journal socket, log
+        # file) are not pipes and stay.
+        relinquish_output_streams()
         stop_event = asyncio.Event()
         install_stop_handlers(asyncio.get_running_loop(), stop_event.set)
 
