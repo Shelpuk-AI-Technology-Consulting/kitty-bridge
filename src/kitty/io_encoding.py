@@ -1,4 +1,4 @@
-"""Process-level output-stream encoding, applied at every kitty entry point.
+"""Process-level output-stream handling, applied at every kitty entry point.
 
 Kitty has two entry points — the ``kitty`` console script
 (:func:`kitty.cli.main.main`) and the background bridge process
@@ -7,16 +7,18 @@ write anything, so the setting lives here rather than in either of them:
 ``kitty.bridge_runner`` importing ``kitty.cli`` would invert the dependency
 direction that ``pyproject.toml``'s import contracts enforce everywhere else,
 and would pull the whole CLI into every systemd, launchd and NSSM bridge
-service. This module imports nothing but :mod:`sys` and :mod:`contextlib`, so
-any layer may depend on it.
+service. This module imports nothing but the standard library, so any layer
+may depend on it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import os
+import stat
 import sys
 
-__all__ = ["harden_output_streams"]
+__all__ = ["harden_output_streams", "relinquish_output_streams"]
 
 
 def harden_output_streams() -> None:
@@ -61,3 +63,60 @@ def harden_output_streams() -> None:
         # cannot help, not a reason to abort the command the user asked for.
         with contextlib.suppress(ValueError):
             reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+def relinquish_output_streams() -> None:
+    """Point pipe-shaped ``stdout`` and ``stderr`` at ``os.devnull``.
+
+    The background bridge child is spawned with ``stdout=PIPE`` and drained
+    only while ``kitty bridge start``'s parent is still waiting (KBR-176).
+    Once that parent gives up and exits, the pipe's read end closes, and
+    every later write the child makes raises :exc:`BrokenPipeError` — the
+    defect that killed healthy bridges before they reported ready (KBR-219).
+    After the bridge has reported ready there is nothing left to say to a
+    parent that may no longer exist, so the child moves its streams to
+    ``os.devnull``: writes land nowhere and never raise.
+
+    Only **pipes** are redirected. Service managers hand the bridge other
+    things — systemd's journal (an ``AF_UNIX`` socket), launchd a file or
+    ``/dev/null``, NSSM a file — and replacing those would swallow a
+    deployment's log stream. A closed or unstatable fd is skipped for the
+    same reason :func:`harden_output_streams` never fails: relinquishing
+    output must not itself become the thing that breaks the bridge. That
+    rule covers the whole operation, not only the probe: ``os.open`` and
+    ``os.dup2`` are guarded too, because a failure there (``EMFILE``, a
+    restricted sandbox) would otherwise escape into ``bridge_runner``
+    *after* the socket is bound and the state file written — killing the
+    bridge and stranding the state file. Leaving the fd as it was is no
+    worse than the pre-fix state, where post-ready writers already route
+    through ``logging`` and ``warnings``, both of which swallow
+    ``OSError``.
+
+    A second call is a no-op by construction: after the first, the fds name
+    a character device, not a pipe, so the guard skips them.
+    """
+    # Opened lazily: on a child whose streams are already non-pipes, no
+    # devnull fd is created at all.
+    devnull: int | None = None
+    try:
+        for fd in (1, 2):
+            # A closed or invalid fd raises here; skipping it is the
+            # contract, not an error to report.
+            try:
+                is_pipe = stat.S_ISFIFO(os.fstat(fd).st_mode)
+            except OSError:
+                continue
+            if not is_pipe:
+                continue
+            # The open and the dup2 are inside the same guard: a failure in
+            # either leaves this fd as it was and moves on, per the rule
+            # above.
+            try:
+                if devnull is None:
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, fd)
+            except OSError:
+                continue
+    finally:
+        if devnull is not None:
+            os.close(devnull)

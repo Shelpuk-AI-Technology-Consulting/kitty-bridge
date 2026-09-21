@@ -4690,7 +4690,10 @@ A consequence worth stating: **a test may not be moved to `l3` before the Subsys
 Fifteen modules under `tests/` bind real sockets or spawn processes and are `l1` by default
 today (an earlier draft said "roughly six"; the count has grown as Epic B, E and the
 KBR-132/144/176/220 fixes each landed a socket-binding module, and the bullet list below is now
-the authoritative enumeration). Since T-W5 the egress shared fixture plus
+the authoritative enumeration). One new module is `l3`-marked from birth pending the Subsystem
+job (KBR-96, `tests/cli/test_background_bridge_ownership.py`; a module whose plan row points at
+§6.3 is born `l3` rather than moved there, so the rule above is not engaged;
+`PENDING_ACTIVATION_LAYERS` carries it until T-K6). Since T-W5 the egress shared fixture plus
 `tests/harness/test_connect_proxy.py` must move **with** it: an extraction and its own
 regression evidence landing in two different jobs would leave one proving the other in a run
 that no longer includes it. Reclassifying them is correct and is T-K6's business, together with
@@ -4698,9 +4701,9 @@ the job that runs them; doing it earlier would remove them from every gate. T-H1
 reclassification into account before it measures a mutation baseline, because it selects on
 `l1`.
 
-**Fourteen modules are bulleted below — in eleven bullets, since the T-W4, T-W8 and KBR-272-egress
-rows each name two modules — and `tests/cli/test_stream_encoding.py`
-(KBR-10) is described after them, fifteen in all, named here so T-K6 inherits a list rather than a
+**Fifteen modules are bulleted below — in twelve bullets, since the T-W4, T-W8 and
+KBR-272-egress rows each name two modules — and `tests/cli/test_stream_encoding.py`
+(KBR-10) is described after them, sixteen in all, named here so T-K6 inherits a list rather than a
 search** — the count is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph
 were already drifting apart before T-W8 added two; spelling out both is what stops the next
 addition guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it.)
@@ -4768,7 +4771,7 @@ addition guessing which set it joins. T-W9 joins the **bulleted** set, not the p
 - **KBR-220:** `tests/cli/test_bridge_state_location.py` runs the real `kitty bridge start`,
   `status`, `restart` and `stop`, and a real `kitty.bridge_runner` started as a service would start
   it. It has no choice: the defect lived *between* two processes, each of which resolved its path
-  correctly by its own logic. It is the **one** module allowed to spawn `kitty.bridge_runner`, and it
+  correctly by its own logic. It is the **first** of the modules allowed to spawn `kitty.bridge_runner`, and it
   keeps KBR-176's reason for the rule. The model-context catalog cache is seeded fresh in an isolated
   cache directory, so no fetch runs inside `start`'s 5-second window and no user cache is written.
   Its isolation is worth copying: `WIN_PD_OVERRIDE_LOCAL_APPDATA` (platformdirs ≥ 4.8), because
@@ -4792,6 +4795,24 @@ addition guessing which set it joins. T-W9 joins the **bulleted** set, not the p
   crash-resilience tests predate the convention's articulation). Its socket-binding reality was
   unenumerated before KBR-272 surfaced the drift; it now joins the bullets so the §8.2 set the
   timeout registry pins matches the set the doc claims.
+- **KBR-96 (T-I4):** `tests/cli/test_background_bridge_ownership.py` spawns real
+  `kitty.bridge_runner` children on real sockets, then calls
+  `kitty.bridge.manage.{stop_bridge,start_bridge,restart_bridge,bridge_status}` **in-process**
+  with `manage.probe_pid` patched at the one seam. Patching is necessary because the `UNKNOWN`
+  outcome (POSIX `EPERM`) cannot be reproduced without a second account, and a `monkeypatch`
+  cannot cross the CLI-subprocess boundary the KBR-220 bullet uses — there `SystemExit` becomes a
+  returncode and the management contract changes shape. The module does not share the KBR-220
+  fixture: its surface is a strict subset of the management commands and it never drives
+  `python -m kitty bridge <verb>` as a subprocess, so a shared fixture would couple two modules
+  with different shapes; the KBR-220 file remains the reference for the isolation pattern it
+  borrows (`XDG_*` / `WIN_PD_OVERRIDE_LOCAL_APPDATA` redirects, the pre-write refusal, the seeded
+  catalog cache). The /proc fd-oracle tests (KBR-219's regression plus the devnull-at-ready
+  guard) skip on non-Linux platforms; the portable fd-level coverage of the helper lives in
+  `tests/test_io_encoding.py`, an l1 module the fast gate runs on every leg from day one. The
+  module itself is `l3`-marked from birth (the rule above about *moving* tests to `l3` is not
+  engaged — a module born at `l3` need only be added to `PENDING_ACTIVATION_LAYERS`, which it
+  was). Expected runtime is comparable to the KBR-220 module's (sub-second overhead per case,
+  ~10 s in total) once the L3 job activates.
 
 **One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
 for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:
