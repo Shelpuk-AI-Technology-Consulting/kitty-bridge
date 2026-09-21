@@ -176,14 +176,17 @@ def _hermetic_env(home: Path, config_dir: Path, base_url: str) -> dict[str, str]
 
     The child inherits the machine's basics (``PATH`` for its node
     runtime, locale, temp dirs) but **not** the invoking shell's own
-    Anthropic / Claude configuration. The filter strips the same families
-    the tmux E2E strips (``tests/integration/test_tmux_disconnect.py:140``):
-    an exported ``ANTHROPIC_AUTH_TOKEN`` would hand the child a real
-    credential, ``CLAUDE_CODE_USE_BEDROCK`` / ``CLAUDE_CODE_USE_VERTEX``
-    would redirect it off the bridge onto a cloud backend, and the
-    ``CLAUDECODE`` marker would make the binary treat this run as a
-    nested session. On top of the filtered base, four redirects close
-    the remaining leaks — see the module docstring's
+    Anthropic / Claude configuration. The filter strips a superset of
+    what the tmux E2E strips
+    (``tests/integration/test_tmux_disconnect.py:140``): the
+    ``CLAUDE_CODE_*`` and ``CLAUDECODE`` families are shared, the smoke
+    adds the ``ANTHROPIC_*`` family (an exported ``ANTHROPIC_AUTH_TOKEN``
+    would hand the child a real credential) plus the proxy and
+    node-runtime families (which would route the loopback POST
+    off-machine or instrument the binary), and drops the ``TMUX*``
+    family (which the smoke does not need — Claude Code ``-p`` mode
+    never touches tmux). On top of the filtered base, four redirects
+    close the remaining leaks — see the module docstring's
     "Hermetic by construction" section for the rationale of each.
 
     Args:
@@ -202,11 +205,23 @@ def _hermetic_env(home: Path, config_dir: Path, base_url: str) -> dict[str, str]
     # The filter is prefix-based on purpose: Claude Code's documented
     # surface grows faster than any explicit list would track, and a new
     # `ANTHROPIC_*` or `CLAUDE_CODE_*` variable arriving in the shell
-    # must not silently redirect the child.
+    # must not silently redirect the child. The proxy families are
+    # stripped alongside the Anthropic ones: an exported `HTTPS_PROXY`
+    # would route the loopback POST through a developer proxy and carry
+    # the prompt off-machine, defeating the hermetic claim. The node-
+    # runtime knobs (`NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`) are stripped
+    # because they can instrument or redirect the binary's own network
+    # calls without Claude Code's knowledge.
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDECODE"))
+        if not key.startswith(
+            (
+                "ANTHROPIC_", "CLAUDE_CODE_", "CLAUDECODE",
+                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS",
+            )
+        )
     }
     env["ANTHROPIC_BASE_URL"] = base_url
     # A fixed dummy value, matching the bridge fixture's own `_KEY` shape:
@@ -255,19 +270,28 @@ async def _run_one_turn(binary: Path, env: dict[str, str], cwd: Path) -> tuple[i
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TURN_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TURN_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            pytest.fail(
+                f"claude did not finish one non-interactive turn within "
+                f"{_TURN_TIMEOUT_SECONDS}s; killed. The claim under test is "
+                f"connectivity, so a timeout here means the bridge was "
+                f"never reached or the reply never came back."
+            )
+        returncode = proc.returncode if proc.returncode is not None else -1
+        return returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+    except BaseException:
+        # Any exception that is not the timeout we handled above —
+        # CancelledError from pytest-asyncio, KeyboardInterrupt, a
+        # closed-stdin OSError — leaves the child as a zombie and pins
+        # the bridge's ephemeral port. Reap it before the exception
+        # propagates so the runner is not left holding a half-open
+        # subprocess.
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
             await proc.wait()
-        pytest.fail(
-            f"claude did not finish one non-interactive turn within "
-            f"{_TURN_TIMEOUT_SECONDS}s; killed. The claim under test is "
-            f"connectivity, so a timeout here means the bridge was "
-            f"never reached or the reply never came back."
-        )
-    returncode = proc.returncode if proc.returncode is not None else -1
-    return returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+        raise
 
 
 def _body_has_user_message(raw_body: bytes) -> bool:

@@ -92,13 +92,17 @@ REQUIREMENTS.md R1, so the two artifacts agree.
     `tests/harness/bridge.py::AiohttpTransport` with
     `WireFormat.ANTHROPIC_MESSAGES`); the fixture's `_KEY` is the fixed
     dummy. No credential store is consulted.
-  * the inherited environment is filtered to strip the `ANTHROPIC_*` /
-    `CLAUDE_CODE_*` / `CLAUDECODE` key families — the same filter the tmux
-    E2E uses (`tests/integration/test_tmux_disconnect.py:140`). Without
-    this, an exported `ANTHROPIC_AUTH_TOKEN` hands the child a real
-    credential, `CLAUDE_CODE_USE_BEDROCK` / `_USE_VERTEX` redirects it off
-    the bridge onto a cloud backend, and `CLAUDECODE` makes the binary
-    treat the run as a nested session.
+  * the inherited environment is filtered to strip a superset of what
+    the tmux E2E strips (`tests/integration/test_tmux_disconnect.py:140`):
+    the `ANTHROPIC_*` / `CLAUDE_CODE_*` / `CLAUDECODE` families, plus the
+    proxy (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`) and
+    node-runtime (`NODE_OPTIONS` / `NODE_EXTRA_CA_CERTS`) families. The
+    Anthropic families are the credential/redirect risk (an exported
+    `ANTHROPIC_AUTH_TOKEN` hands the child a real credential;
+    `CLAUDE_CODE_USE_BEDROCK` / `_USE_VERTEX` redirects it off the
+    bridge); the proxy families would route the loopback POST through a
+    developer proxy off-machine; the node knobs can instrument the
+    binary's own network calls.
   * `HOME` → `tmp_path`: Claude Code keeps a fifth file, `~/.claude.json`,
     that it writes *outside* the `CLAUDE_CONFIG_DIR` it honours
     (`anthropics/claude-code#25762`); `HOME` is the coarse redirect that
