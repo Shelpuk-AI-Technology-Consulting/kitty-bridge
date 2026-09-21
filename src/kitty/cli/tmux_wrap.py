@@ -387,7 +387,9 @@ def run_captured(argv: list[str], *, cwd: str) -> tuple[int, str]:
         ``(exit_code, stdout)``. A program that cannot be started gives ``(127, "")``.
     """
     try:
-        completed = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        completed = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
+        )
     except OSError:
         return 127, ""
     return completed.returncode, completed.stdout
