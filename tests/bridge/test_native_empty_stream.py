@@ -535,9 +535,14 @@ class TestErrorEventBeforeContent:
         assert len(healthy) == 1, "the success backend stays healthy"
         # The errored attempt is no success; the retry that answered is: the
         # healthy backend's reset on success, the quarantined backend's reset
-        # by the stream-error charge (failure_kind="hard" defaults to
-        # resetting transport_error_count). Both end at zero.
+        # by the stream-error charge — a short cooldown without an explicit
+        # failure_kind, which `_mark_backend_unhealthy`'s backward-compat rule
+        # treats as a "stream" error (increments stream_error_count, zeroes
+        # transport_error_count). Both end at zero.
         assert [h["transport_error_count"] for h in server._backend_health] == [0, 0]
+        # The stream branch's own counter: exactly the charge incremented it,
+        # and the success reset the healthy backend's to zero.
+        assert sorted(h["stream_error_count"] for h in server._backend_health) == [0, 1]
 
     async def test_exhaustion_delivers_the_provider_payload(self):
         budget = (server_module._MAX_RETRIES + 1) + len(server_module._EMPTY_FINAL_DELAYS)
