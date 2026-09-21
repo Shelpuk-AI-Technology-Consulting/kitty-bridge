@@ -2615,6 +2615,9 @@ def scope_problems(
                 )
 
         # Site ↔ scope: keys whose class file a site names must be in scope.
+        # The sentinel claims every adapter by construction, so a row carrying
+        # it is exempt from the file-level subset by design — the subset would
+        # be the whole key set.
         if ALL_PROVIDERS in row.scope:
             continue
         site_files = {site.partition(":")[0] for site in row.site}
