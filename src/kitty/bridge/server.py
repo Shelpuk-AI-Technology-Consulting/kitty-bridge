@@ -316,6 +316,23 @@ def _normalize_gemini_request(body: object) -> dict:
     ``.get(...)`` on each member; a string here iterates characters and the
     ``.get`` raises. The guard runs before the translator sees the body.
 
+    KBR-288 widens the validation to every required-chain member on the
+    Gemini request path (§12.3 of SYSTEM_DESIGN.md):
+
+    * ``contents`` → ``parts`` → per-part ``text`` / ``functionCall`` /
+      ``functionResponse`` shape and required-when-present name.
+    * ``tools`` → per-tool ``functionDeclarations`` → per-declaration
+      shape and required ``name``.
+
+    The five shapes that were still 500-producing on ``main`` (the role
+    unhashable lookup; non-string ``text`` in all three text branches;
+    present-null and non-list ``functionDeclarations``; non-string text
+    inside the tolerated ``systemInstruction`` envelope) are closed here
+    or in ``GeminiTranslator._extract_text`` for the tolerated-envelope
+    leaf. Optional top-level envelopes (``tools``, ``systemInstruction``,
+    ``generationConfig``, ``toolConfig``) keep their tolerated disposition
+    — a wrong-typed envelope is treated as absent, not 400.
+
     Args:
         body: The decoded inbound request body. Typed ``object`` because
             arbitrary JSON.
@@ -324,8 +341,12 @@ def _normalize_gemini_request(body: object) -> dict:
         The body, unchanged.
 
     Raises:
-        InvalidGeminiRequest: ``body`` is not a JSON object, or ``contents``
-            is present and is not a list of objects.
+        InvalidGeminiRequest: ``body`` is not a JSON object, or
+            ``contents`` / ``parts`` / per-part / per-tool /
+            per-declaration shapes are wrong; or a present value on the
+            required chain has a documented type that is violated. The
+            message names the offending path (``contents[0].parts[1]``,
+            ``tools[2].functionDeclarations[0].name``).
     """
     if not isinstance(body, dict):
         raise InvalidGeminiRequest(f"Request body must be a JSON object, got {type(body).__name__}")
@@ -338,7 +359,115 @@ def _normalize_gemini_request(body: object) -> dict:
                 raise InvalidGeminiRequest(
                     f"'contents[{index}]' must be an object, got {type(element).__name__}"
                 )
+            _validate_gemini_content(element, index)
+    _validate_gemini_tools(body)
     return body
+
+
+def _validate_gemini_content(content: dict, index: int) -> None:
+    # pragma: no mutate block
+    """Validate the required-chain members of one Gemini Content object.
+
+    Helper for :func:`_normalize_gemini_request`. ``role`` is optional
+    with a documented default of ``"user"``; when present it must be a
+    string (KBR-288 — a non-string role is a malformed Content per the
+    §12.3 required-shape policy). ``parts`` is required when ``contents[i]``
+    exists, per the Gemini schema; a missing key is allowed but a
+    present non-list / non-dict member is rejected.
+    """
+    pfx = f"contents[{index}]"
+    if "role" in content and not isinstance(content["role"], str):
+        raise InvalidGeminiRequest(
+            f"'{pfx}.role' must be a string, got {type(content['role']).__name__}"
+        )
+    if "parts" in content:
+        parts = content["parts"]
+        if not isinstance(parts, list):
+            raise InvalidGeminiRequest(
+                f"'{pfx}.parts' must be an array, got {type(parts).__name__}"
+            )
+        for part_index, part in enumerate(parts):
+            if not isinstance(part, dict):
+                raise InvalidGeminiRequest(
+                    f"'{pfx}.parts[{part_index}]' must be an object, got {type(part).__name__}"
+                )
+            _validate_gemini_part(part, pfx, part_index)
+
+
+def _validate_gemini_part(part: dict, content_pfx: str, part_index: int) -> None:
+    # pragma: no mutate block
+    """Validate a Gemini Part's required-when-present members.
+
+    Helper for :func:`_validate_gemini_content`. ``text`` is a documented
+    ``type: string`` member; a present-but-non-string value crashed the
+    translator's join before KBR-288. ``functionCall`` and
+    ``functionResponse`` are required-when-present: a non-dict or a dict
+    without a string ``name`` was silently skipped before KBR-288, and
+    the §12.3 required-shape policy tightens the silent skip to a 400.
+    """
+    pfx = f"{content_pfx}.parts[{part_index}]"
+    if "text" in part and not isinstance(part["text"], str):
+        raise InvalidGeminiRequest(
+            f"'{pfx}.text' must be a string, got {type(part['text']).__name__}"
+        )
+    fc = part.get("functionCall")
+    if "functionCall" in part:
+        if not isinstance(fc, dict):
+            raise InvalidGeminiRequest(
+                f"'{pfx}.functionCall' must be an object, got {type(fc).__name__}"
+            )
+        if not isinstance(fc.get("name"), str):
+            raise InvalidGeminiRequest(f"'{pfx}.functionCall.name' must be a string")
+    fr = part.get("functionResponse")
+    if "functionResponse" in part:
+        if not isinstance(fr, dict):
+            raise InvalidGeminiRequest(
+                f"'{pfx}.functionResponse' must be an object, got {type(fr).__name__}"
+            )
+        if not isinstance(fr.get("name"), str):
+            raise InvalidGeminiRequest(f"'{pfx}.functionResponse.name' must be a string")
+
+
+def _validate_gemini_tools(body: dict) -> None:
+    # pragma: no mutate block
+    """Validate ``tools`` and its required-chain members.
+
+    Helper for :func:`_normalize_gemini_request`. The ``tools`` envelope
+    itself is optional (§12.3 tolerated: non-list means absent — the
+    translator already returns ``[]`` for non-list). Inside a list, every
+    Tool must be a dict, every declared ``functionDeclarations`` must be
+    a list (the ``tool.get("functionDeclarations", [])`` default does not
+    fire when the key is present-null, and ``for fd in None`` was a real
+    fuzzer finding KBR-288 closed), and every declaration must be a
+    dict with a string ``name`` (translator's silent-skip tightened per
+    §12.3 — a silent drop inside a required chain is an I1 fidelity hit).
+    """
+    if "tools" not in body:
+        return
+    tools = body["tools"]
+    if not isinstance(tools, list):
+        return  # tolerated: optional envelope, non-list = absent
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            raise InvalidGeminiRequest(
+                f"'tools[{index}]' must be an object, got {type(tool).__name__}"
+            )
+        if "functionDeclarations" not in tool:
+            continue
+        fds = tool["functionDeclarations"]
+        if not isinstance(fds, list):
+            raise InvalidGeminiRequest(
+                f"'tools[{index}].functionDeclarations' must be an array, got {type(fds).__name__}"
+            )
+        for fd_index, fd in enumerate(fds):
+            if not isinstance(fd, dict):
+                raise InvalidGeminiRequest(
+                    f"'tools[{index}].functionDeclarations[{fd_index}]' must be an object, got {type(fd).__name__}"
+                )
+            if not isinstance(fd.get("name"), str):
+                raise InvalidGeminiRequest(
+                    f"'tools[{index}].functionDeclarations[{fd_index}].name' must be a string"
+                )
 
 
 def _has_tool_use_blocks(body: dict) -> bool:
