@@ -25,7 +25,8 @@ thresholds on. Until that ticket lands, no number here gates anything.
 pytest_add_cli_args_test_selection`, so the nightly mutation run never
 depends on loopback socket timing (the KBR-266 clean-test stall's root
 cause). The Fast job's `pytest -m "l1 or l2"` selection is unchanged — every
-module still runs on every push under KBR-272's timeout marks. Three
+module still runs on every push (and carries KBR-272's 120 s timeout mark on
+the gate once that PR lands). Three
 consequences for reading the numbers this file records:
 
 1. **Kills vanish.** Tests in the deselected modules stop associating with
@@ -43,8 +44,11 @@ consequences for reading the numbers this file records:
    which overlaps with `tests/test_egress_https_proxy.py`. KBR-91's
    thresholding must treat the next per-group re-measure as the new
    baseline, not as a regression against the rows above.
-3. **Cache invalidation on the first post-merge run.** Pinned mutmut 3.8.0
-   fingerprints `pytest_add_cli_args_test_selection` (`test_selection` in
+3. **Cache invalidation on the first post-merge run.** Verified on the
+   mutmut 3.8.0 installed in this venv (pyproject declares `mutmut>=3.0,<4`;
+   the fingerprint + invalidation behaviour below holds across the pinned
+   range per the mutmut 3.x source): mutmut fingerprints
+   `pytest_add_cli_args_test_selection` (`test_selection` in
    `config_fingerprint`); a change resets all cached verdicts and forces a
    full stats recollection and per-mutant re-run
    (`_apply_config_change_invalidation`). The "re-running resumes from here"

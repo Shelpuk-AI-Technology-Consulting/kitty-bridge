@@ -1908,12 +1908,13 @@ None`. `mutmut` closes that gap.
   L1 gate still runs the file — because mutmut's clean-run context trips it (see
   `.system_design/MUTATION_BASELINE.md` for the rationale); the §8.2 `--ignore` rows are
   likewise mutmut-only — the Fast job's `pytest -m "l1 or l2"` selection still collects every
-  one of them on every push under KBR-272's timeout marks, while the nightly mutation run
-  never exercises loopback socket timing at all (mirroring §8.2's earlier "may want to
-  deselect this file from the mutation baseline rather than from the gate" precedent for
-  `tests/cli/test_stream_encoding.py`). The full selection list is held against the registry
-  by the l2 contract guard `tests/test_socket_binding_l1_mutation_exclusion.py`; the
-  registry is the source of truth KBR-272's timeout-mark guard also reads.
+  one of them on every push (and carries KBR-272's 120 s `pytest.mark.timeout` mark on the
+  gate once that PR lands), while the nightly mutation run never exercises loopback socket
+  timing at all (mirroring §8.2's earlier "may want to deselect this file from the mutation
+  baseline rather than from the gate" precedent for `tests/cli/test_stream_encoding.py`).
+  The full selection list is held against the registry by the l2 contract guard
+  `tests/test_socket_binding_l1_mutation_exclusion.py`; the registry is the source of truth
+  KBR-272's timeout-mark guard also reads.
 - **Scope — narrow, but it must include the code the rationale is about.** An earlier draft
   justified the subset by "a mutation surviving in the compactor means the suite would not notice
   kitty eating a tool result", then excluded `server.py`, where the compactor lives. Corrected
@@ -4739,8 +4740,9 @@ addition guessing which set it joins. T-W9 joins the **bulleted** set, not the p
   TLS handshakes through a local TLS CONNECT proxy — every other egress test is mocked at the
   socket layer, this module proves the unmocked path. Since T-W5 its shared fixture
   (`tests/harness/test_connect_proxy.py`) must move **with** it; the two are one module's worth of
-  evidence, not two. Run **on demand** by the CI matrix today; the §8.3 honest-gap registry
-  acknowledges this is one of the modules the eventual Subsystem job (T-K6) will reclassify.
+  evidence, not two. It runs on every push via the `l1` path default today; this §8.2
+  enumeration is the acknowledgement that the eventual Subsystem job (T-K6) will reclassify it,
+  and the §9 gap register is where the not-yet-proven part stays on the record.
 - **KBR-272 (crash resilience):** `tests/bridge/test_crash_resilience.py` binds real
   `BridgeServer`s on ephemeral ports across its cases, following the convention KBR-144 cited when
   adding `tests/bridge/test_responses_string_input.py` (no bullet of its own then — the
