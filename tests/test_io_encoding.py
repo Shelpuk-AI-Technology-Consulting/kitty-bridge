@@ -15,8 +15,11 @@ module, where the platform skip is part of the scenario.
 
 **fd hygiene.** The helper's contract is about fds 1 and 2, which the tests
 temporarily replace (dup2 a probe fd onto them, restore in ``finally``).
-pytest's own capture holds the originals, so restoring them is what keeps
-the session's output intact.
+What they restore is **the fd they displaced** — captured with ``os.dup``
+before the swap — not a devnull sentinel: under pytest's default
+``--capture=fd`` the capture owns the originals, but under ``-s`` (or a piped
+run) nothing restores them, and leaving devnull installed would swallow every
+later line of the session's output, failure summaries included.
 
 **Layer.** ``l1`` by path default: pure fd mechanics, no sockets, no child
 processes — and deliberately so, so the six fast-gate legs exercise it from
@@ -54,6 +57,7 @@ def test_relinquish_output_streams_dup2s_devnull_onto_pipe_streams():
     the whole point of the KBR-219 fix — because the fd names os.devnull.
     """
     reader, writer = os.pipe()
+    saved1, saved2 = os.dup(1), os.dup(2)
     try:
         os.dup2(writer, 1)
         os.dup2(writer, 2)
@@ -68,13 +72,12 @@ def test_relinquish_output_streams_dup2s_devnull_onto_pipe_streams():
         assert _points_at_devnull(2), "fd 2 was not pointed at os.devnull"
         os.write(1, b"safe")  # must not raise BrokenPipeError
     finally:
-        # Restore the fds pytest's capture installed. A devnull fd needs no
-        # closing (os.devnull is opened internally by the helper), but the
-        # originals must come back before the test ends.
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 1)
-        os.dup2(devnull, 2)
-        os.close(devnull)
+        # Restore the displaced fds (what was on 1/2 before the swap), not
+        # a devnull sentinel — see the module docstring's fd-hygiene note.
+        os.dup2(saved1, 1)
+        os.dup2(saved2, 2)
+        os.close(saved1)
+        os.close(saved2)
 
 
 def test_relinquish_output_streams_leaves_regular_files_alone():
@@ -128,6 +131,7 @@ def test_relinquish_output_streams_is_idempotent():
     may call it again. Both must be safe.
     """
     reader, writer = os.pipe()
+    saved1, saved2 = os.dup(1), os.dup(2)
     try:
         os.dup2(writer, 1)
         os.dup2(writer, 2)
@@ -140,7 +144,7 @@ def test_relinquish_output_streams_is_idempotent():
         assert _points_at_devnull(1) and _points_at_devnull(2)
         os.write(1, b"safe")
     finally:
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 1)
-        os.dup2(devnull, 2)
-        os.close(devnull)
+        os.dup2(saved1, 1)
+        os.dup2(saved2, 2)
+        os.close(saved1)
+        os.close(saved2)

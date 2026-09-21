@@ -82,7 +82,15 @@ def relinquish_output_streams() -> None:
     ``/dev/null``, NSSM a file — and replacing those would swallow a
     deployment's log stream. A closed or unstatable fd is skipped for the
     same reason :func:`harden_output_streams` never fails: relinquishing
-    output must not itself become the thing that breaks the bridge.
+    output must not itself become the thing that breaks the bridge. That
+    rule covers the whole operation, not only the probe: ``os.open`` and
+    ``os.dup2`` are guarded too, because a failure there (``EMFILE``, a
+    restricted sandbox) would otherwise escape into ``bridge_runner``
+    *after* the socket is bound and the state file written — killing the
+    bridge and stranding the state file. Leaving the fd as it was is no
+    worse than the pre-fix state, where post-ready writers already route
+    through ``logging`` and ``warnings``, both of which swallow
+    ``OSError``.
 
     A second call is a no-op by construction: after the first, the fds name
     a character device, not a pipe, so the guard skips them.
@@ -100,9 +108,15 @@ def relinquish_output_streams() -> None:
                 continue
             if not is_pipe:
                 continue
-            if devnull is None:
-                devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, fd)
+            # The open and the dup2 are inside the same guard: a failure in
+            # either leaves this fd as it was and moves on, per the rule
+            # above.
+            try:
+                if devnull is None:
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, fd)
+            except OSError:
+                continue
     finally:
         if devnull is not None:
             os.close(devnull)

@@ -570,6 +570,14 @@ class TestAnUnreachableForeignPidIsStale:
 
         # The child inherits os.environ (start_bridge builds child_env from
         # it), so the isolated environment reaches the spawned interpreter.
+        # monkeypatch.setenv can only add or overwrite keys — it cannot
+        # undo the fixture's KITTY_* strip — so strip them explicitly here
+        # before installing the isolated set; otherwise a developer or CI
+        # job with KITTY_EGRESS_PROXY / KITTY_SESSION_SUMMARY in scope would
+        # leak it into the child and the test would error on an unexpected
+        # SystemExit instead of asserting.
+        for name in [n for n in os.environ if n.startswith("KITTY_")]:
+            monkeypatch.delenv(name, raising=False)
         for name, value in isolated_kitty.env.items():
             monkeypatch.setenv(name, value)
 
