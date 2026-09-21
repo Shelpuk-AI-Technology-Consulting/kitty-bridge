@@ -17,7 +17,7 @@ a base-URL helper (§7.5.2).
 ``BedrockAdapter._get_boto3_client`` reads the process-wide egress from
 ``kitty.egress.get_egress()`` and passes
 ``botocore.config.Config(proxies=egress.proxies_dict())`` to
-``session.client``. Measured on the resolved botocore (1.43.93): the explicit
+``session.client``. Measured on the resolved botocore (1.43.94): the explicit
 ``Config(proxies=...)`` overrides ambient ``NO_PROXY`` matching the
 destination and ambient ``HTTP_PROXY`` / ``HTTPS_PROXY`` / ``ALL_PROXY`` in
 both letter cases — the documented precedence AWS publishes
