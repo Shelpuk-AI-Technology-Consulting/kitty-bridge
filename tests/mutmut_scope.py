@@ -67,7 +67,9 @@ TARGET_GROUPS: dict[str, list[Target]] = {
     ],
     # Compaction, pairing, normalisation. All BridgeServer methods.
     # _get_max_context_chars is a dispatcher since KBR-151 — see the
-    # model_context group for the matcher itself.
+    # model_context group for the matcher itself. _tool_result_content_size
+    # is module-level (KBR-223): the shared M3/M4 size extractor, registered
+    # here so the pragma scheme's only-unmarked-defs rule keeps holding.
     "compaction_and_pairing": [
         Target("kitty.bridge.server", "BridgeServer", "_compact_messages"),
         Target("kitty.bridge.server", "BridgeServer", "_compact_with_tighter_budget"),
@@ -76,6 +78,7 @@ TARGET_GROUPS: dict[str, list[Target]] = {
         Target("kitty.bridge.server", "BridgeServer", "_apply_compaction"),
         Target("kitty.bridge.server", "BridgeServer", "_normalize_model"),
         Target("kitty.bridge.server", "BridgeServer", "_get_max_context_chars"),
+        Target("kitty.bridge.server", None, "_tool_result_content_size"),
     ],
     # Provider adapter hooks — every adapter implements these three, plus
     # the ProviderAdapter._strip_endpoint_suffix from KBR-134.
