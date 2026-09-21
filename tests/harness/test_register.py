@@ -794,7 +794,16 @@ class TestTheScopeColumn:
         Three adapters — ``custom_anthropic``, ``minimax_token``, ``zai_coding``
         — have ``use_native_messages`` true. ``anthropic`` is *not* one:
         ``AnthropicAdapter`` inherits the base property, which returns False.
+        The constant is pinned against a literal *in addition* to the row's
+        agreement with it, so a future edit that changes
+        ``_NATIVE_MESSAGES_ADAPTERS`` cannot flip the row and this test
+        together and still pass (the M16 test's posture).
         """
+        assert set(r._NATIVE_MESSAGES_ADAPTERS) == {
+            "custom_anthropic",
+            "minimax_token",
+            "zai_coding",
+        }
         assert _row("M9a").scope == r._NATIVE_MESSAGES_ADAPTERS
         assert "anthropic" not in r._NATIVE_MESSAGES_ADAPTERS
 
