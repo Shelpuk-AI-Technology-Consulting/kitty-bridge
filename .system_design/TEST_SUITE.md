@@ -2405,7 +2405,12 @@ written live — so the ladder put a second attempt on the stream that already c
 exhaustion failing over onto a Messages-wire backend ended in the "retry came back empty" error
 the ticket reproduced). It now reads `sr` and ends the turn like every other post-emission
 failure, under row 2's oracle; no backend is charged, keeping the empty ladder's no-quarantine
-health model. One residual
+health model. KBR-247 (2026-09-14) closed the same gap on the **standard** (non-custom-transport)
+`_stream_responses` and `_stream_gemini` empty-response verdicts (`server.py` 3766 and 5677 on
+origin/main `d6079fd`): each route's empty check ran the failover / backoff ladder without
+consulting emission, and the same empty-finish-then-content shape put a second attempt's events on
+a stream the client already had bytes on. The guard lands on both routes; the terminal shape per
+route is decided in §11 Q14 (2026-09-14, this ticket). One residual
 differs in its *ending*, not in its recovery: a post-emission **transport** drop on the translated
 `/v1/messages` path still closes with `end_turn` + `message_stop` rather than the error event
 (KBR-183's decision D2, carried as a scope addition on KBR-99, so the second, third and fourth rows
@@ -6123,40 +6128,83 @@ both the emptiness gate and FI-8.3's truncation guard. The post-emission retry a
 after the finish chunk can still trigger is KBR-236's, untouched here.
 
 **Extended to `/v1/responses` and `/v1/gemini` by KBR-250 (owner decision, 2026-09-14,
-per-route confirmation pending).** The no-finish empty-stream hole that KBR-235 closed on
-`/v1/messages` had the same shape on `_stream_responses` (Codex CLI) and `_stream_gemini`
-(Gemini CLI): the gate at `server.py` ~3766 / ~5677 still read
-`translator.response_was_empty and finish_events`, so an upstream that answered `200` with
-zero bytes or `[DONE]`-only passed both conditions' guard and reached the agent as an
-empty turn with the backend marked healthy. The fix is the same on both routes: a no-finish
-arm `empty_no_finish = not finish_events and not events_emitted` extends the gate to
-`or empty_no_finish`, and the D4 exhaustion path writes an SSE error event into the open
-`sr`, lets the post-loop synthesize `response.completed` with `status="incomplete"`
-(responses) or `write_eof()` without the healthy-mark (gemini), and returns `sr` with
-`200 text/event-stream`. The route-specific D4 discriminators carry the same semantic
-KBR-235 chose for the messages branch: `responses_format_error({"code": "empty_response",
-"message": ...}, seq=N)` producing a top-level `{type: "error", code: "empty_response",
-...}` on the Responses wire; `{"error": {"code": 502, "message": ..., "reason":
-"empty_response"}}` serialized as `data: {json}\n\n` on the Gemini wire. The owner is
-asked in the PR to confirm this in-stream shape as the exhaustion form for Codex and
-Gemini CLI.
+per-route confirmation pending), and amended the same day by KBR-247.** The no-finish
+empty-stream hole that KBR-235 closed on `/v1/messages` had the same shape on
+`_stream_responses` (Codex CLI) and `_stream_gemini` (Gemini CLI): the gate in `_stream_*`
+still read `translator.response_was_empty and finish_events`, so an upstream that answered
+`200` with zero bytes or `[DONE]`-only passed both conditions' guard and reached the agent
+as an empty turn with the backend marked healthy. The KBR-250 fix is the same on both
+routes: a no-finish arm `empty_no_finish = not finish_events and not events_emitted`
+extends the gate to `or empty_no_finish`, and the D4 exhaustion path writes an SSE error
+event into the open `sr`, lets the post-loop synthesize `response.completed` with
+`status="incomplete"` (responses) or `write_eof()` without the healthy-mark (gemini), and
+returns `sr` with `200 text/event-stream`. The route-specific D4 discriminators carry the
+same semantic KBR-235 chose for the messages branch:
+`responses_format_error({"code": "empty_response", "message": ...}, seq=N)` producing a
+top-level `{type: "error", code: "empty_response", ...}` on the Responses wire;
+`{"error": {"code": 502, "message": ..., "reason": "empty_response"}}` serialized as
+`data: {json}\n\n` on the Gemini wire. The owner is asked in the PR to confirm this
+in-stream shape as the exhaustion form for Codex and Gemini CLI.
 
-**The post-emission arm and per-request `request_emitted` flag are deliberately NOT
-mirrored on these two routes.** `ResponsesTranslator` and `GeminiTranslator` set
-`response_was_empty` against the **whole response's accumulated content** (text + tools +
-reasoning), not the finish chunk's content alone — the messages branch's
-`MessagesTranslator` is chunk-scoped, so its post-emission arm fires there but is
-structurally unreachable on responses and gemini. A stream that wrote content then received
-a finish chunk with no content has accumulated content → `response_was_empty` is False →
-the gate does not fire → no post-emission arm is reachable. The `empty_no_finish` arm
-requires `not events_emitted` on the current attempt, which also cannot be true when
-content has been written. The two routes therefore carry no `request_emitted` flag and no
-post-emission guard; minimum code, no defensive scaffolding for an impossible scenario. The
-shape is locked in by `TestResponsesInStreamErrorExhaustion::test_content_then_empty_finish_never_fires_the_empty_gate`
-and the gemini mirror in `tests/bridge/test_empty_response_retry.py` — a regression that
-makes the gate fire on a content-carrying stream fails them both. If a future translator
-change makes the emptiness check chunk-scoped on these routes too, the post-emission arm is
-the obvious next step — the same shape KBR-235 added on messages.
+**Post-emission arm added by KBR-247 (owner decisions, 2026-09-14).** KBR-250 closed the
+empty ladder's hole and noted an unreachable post-emission arm — its
+`test_content_then_empty_finish_never_fires_the_empty_gate` review pins lock the
+reachability claim for the content-then-empty-finish ordering, where
+`response_was_empty` is recomputed against the accumulated text and the gate does not
+fire. **KBR-247 closes the ordering that analysis missed**: an upstream that sends an
+**empty finish chunk first** latches `response_was_empty` True at that chunk (`was_empty`
+is computed, then `reset()` runs, then the verdict is assigned), and content arriving
+after it never recomputes the flag — the gate fires with the client already holding
+bytes, and without a guard the empty ladder puts a second attempt's events on that stream.
+Each route's empty check now reads a per-request `_request_emitted` flag (declared
+outside the attempt loop because `sr` is prepared eagerly on these routes — unlike
+`_stream_messages`, where lazy preparation lets `sr is not None` itself answer "has the
+request written?") and, when the request has written anything, ends the turn per Q14(a):
+buffered finish events dropped, exactly one upstream request, no health charge (the empty
+ladder's no-quarantine model). **The terminal shape per route is the route's own existing
+in-stream error convention, ratified rather than invented** — the same principle as
+(b)'s preamble-hold rationale above:
+
+- **/v1/responses**: one SSE `error` event (`responses_format_error`,
+  `code: "upstream_error"`), then `response.completed` with `status: "incomplete"`
+  (`synthesize_completed_events` closes any half-open item the client saw open), then EOF.
+  KBR-242's lazy lifecycle (`_write_lifecycle_start`) opens on the first non-finish event,
+  so when the guard fires after content the opening is already on the wire; this ending
+  reads as a lifecycle that *began* and is closed incomplete.
+- **/v1/gemini**: a single SSE `data: {"error": {"code": 502, "message": <message>}}`
+  event, then EOF — `streamGenerateContent`'s SSE has no typed completion event, so there
+  is nothing to close and nothing to synthesize. The `reason: "empty_response"`
+  discriminator is intentionally omitted here (KBR-247's own convention); the D4
+  exhaustion path above still carries the discriminator on the same route. On this
+  route the model's late tool-call bytes sit in `_tool_call_buffers`, not in
+  `finish_events` — the guard ends the turn with them still buffered and they never
+  cross the wire (`test_empty_verdict_after_text_does_not_deliver_a_late_tool_call`);
+  a tool-call delta with no text after the verdict writes nothing at all, so that
+  stream is still pre-emission and keeps the ladder
+  (`test_tool_call_only_stream_is_still_pre_emission`).
+
+What was deliberately not chosen: opening the Responses lifecycle inside this guard
+(coupling KBR-247 to KBR-242's shape decision), and a Messages-uniform error-only ending
+on Responses (Codex CLI keys the lifecycle off `response.completed`; dropping it would
+break the client the route exists to serve). Pre-emission empty verdicts keep today's
+ladder on both routes, pinned by `tests/bridge/test_empty_response_retry.py`.
+
+**The post-content in-stream error shape** (Q14(a), design-review 2026-09-14). When the
+empty-finish-then-content path is followed by an upstream error chunk matching
+`_is_upstream_stream_error`, `_stream_responses`'s in-stream-error exhaustion arm would
+historically fall through to the empty-verdict check, and KBR-247 would then have fired
+its post-emission guard on top of the exhaustion arm's terminal error event — two
+`error` events followed by `response.completed`, violating the "one terminal error"
+property above. The fix is a `break` inside the `events_emitted` branch of the
+exhaustion arm, matching `_stream_messages` (which always broke after
+`finalize_interrupted_stream`) and `_stream_gemini` (which already broke on `events_emitted`
+at its exhaustion arm). The no-events branch is untouched: a pre-emission exhausted
+attempt still falls through to the empty ladder, which is what AC-2 requires. Regression:
+`tests/bridge/test_post_emission_no_failover.py`
+`TestResponsesEmptyVerdictAfterContent::test_empty_verdict_then_in_stream_error_emits_one_error`
+pins exactly one `error` event followed by `response.completed` with `status: "incomplete"`
+for the empty-then-content-then-error sequence. The Gemini route's parallel arm already
+breaks without the fix needing any change, so KBR-247 lands only the Responses branch.
 
 **JSON 502 alternative.** The branches `sr.prepare(request)` at the top of each handler,
 before any upstream POST, so aiohttp cannot later replace the prepared `StreamResponse`
@@ -6166,6 +6214,7 @@ the first byte" consequences that need their own design pass — out of scope fo
 The in-stream SSE error event is the chosen shape; the JSON 502 alternative is recorded
 here as the route the owner can take if a future decision prefers protocol-identical
 behaviour to the messages branch.
+
 
 **Why, and not the obvious alternative.** Three reasons, in decreasing order of how much they
 would cost to be wrong about.

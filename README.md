@@ -777,9 +777,9 @@ agent shows its spinner, not live thinking, until the first text or tool call ar
 
 ### "Kitty Bridge received an empty response from the upstream provider after content had already been sent"
 
-Applies to streamed `/v1/messages` requests on providers kitty talks to in Chat Completions format. The provider's reply opened with an "empty" verdict and produced its words only after it, so part of the answer had already reached your agent. Kitty ends the turn there instead of asking the provider again — a second attempt would append a second answer to text you have already seen. Simply resend the turn; if it keeps happening, the provider is misbehaving.
+Applies to streamed requests on the routes kitty converts to Chat Completions — `/v1/messages`, `/v1/responses`, and `/v1beta/models/...:streamGenerateContent` (Gemini). The provider's reply opened with an "empty" verdict and produced its words only after it, so part of the answer had already reached your agent. Kitty ends the turn there instead of asking the provider again — a second attempt would append a second answer to text you have already seen. Simply resend the turn; if it keeps happening, the provider is misbehaving.
 
-There is no `"reason":` marker to grep for: the reply arrives as an ordinary `200` SSE stream that ends in a single `error` event carrying the message above.
+There is no `"reason":` marker to grep for, and the wire uses the generic `code: "upstream_error"` (Responses) or `code: 502` (Gemini) rather than a dedicated discriminator: the reply arrives as an ordinary `200` SSE stream that ends in one terminal outcome in the route's own convention — on `/v1/messages` a single `error` event, on `/v1/responses` an `error` event (with the message above) followed by `response.completed` with `status: "incomplete"`, on Gemini a `data: {"error": {"code": 502, "message": <the message above>}}` event and EOF (streamGenerateContent has no typed completion event).
 
 ### A 502 whose error carries `"reason": "upstream_error"`
 
