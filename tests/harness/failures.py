@@ -543,8 +543,12 @@ def empty_response(
     """Answer with a contentless success.
 
     F4. Non-streaming writes the format's empty success body. Streaming writes
-    a stream that never releases the preamble hold (Anthropic) or a
-    well-formed skeleton whose role chunk arrives (Chat Completions).
+    a stream that never releases the preamble hold (Anthropic Messages), and
+    on Chat Completions a content-less completion (a role chunk then
+    ``[DONE]`` — no content delta, no finish chunk). Since KBR-276 the hold
+    withholds non-content lines on the raw CC wire too, so this shape is what
+    fires the empty ladder on that route (KBR-232's converter-gated semantics
+    are gone).
 
     Args:
         fmt: The wire format to answer in.
@@ -580,10 +584,11 @@ def empty_response(
         return responder
 
     if stream and fmt is WireFormat.CHAT_COMPLETIONS:
-        # F4.d — role chunk + [DONE]. Recorded behaviour, not empty-retry: on
-        # the CC wire the role chunk itself sets the bridge's `has_content`
-        # flag (KBR-232's well-formed-skeleton semantics). A consumer needing
-        # the CC empty ladder must script a stream that forwards nothing.
+        # F4.d — role chunk + [DONE], the content-less CC completion. Since
+        # KBR-276 the pre-emission hold withholds non-content lines on the raw
+        # CC wire too: the role chunk no longer sets the bridge's `has_content`
+        # flag, so THIS shape is what fires the empty ladder on that route
+        # (KBR-232's converter-gated semantics are gone).
         async def responder(captured: CapturedRequest, response: Reply) -> None:
             await response.begin(200, {"Content-Type": "text/event-stream"})
             await response.write(_cc_role_chunk())
