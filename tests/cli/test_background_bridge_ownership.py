@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -200,6 +201,22 @@ def _isolated_kitty(tmp_path: Path) -> Iterator[IsolatedKitty]:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=_PROCESS_EXIT_TIMEOUT_SECONDS)
+        # Mirror the KBR-220 pattern: an in-process `start_bridge` spawns
+        # a detached child via `subprocess.Popen` whose `Popen` is not
+        # returned and therefore is not in `install.spawned`. Its PID
+        # lives in the only pointer at it -- the state file. Without
+        # this scan, one bridge per run of `test_start_proceeds_when_the_
+        # foreign_pid_is_unreachable` would leak past pytest's tmp_path
+        # cleanup (start_new_session=True detaches it from that path).
+        pids = {
+            state.pid
+            for f in install.root.rglob("bridge_state.json")
+            if (state := load_state(f)) is not None
+        }
+        for pid in pids:
+            if _really_alive(pid):
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                _wait_until_gone(pid)
 
 
 @pytest.fixture

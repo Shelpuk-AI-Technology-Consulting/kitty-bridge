@@ -93,7 +93,10 @@ vacuous):
 * `bridge_runner.run()` calls `relinquish_output_streams()` immediately after
   `await server.start_async()` returns — the ready transition. Justification
   is in D9.
-* `server.py start_async`'s no-TLS warning (`server.py:3289`) is wrapped in
+* `server.py start_async`'s no-TLS warning (the `if self._should_warn_no_tls():`
+  block — the block whose `print` writes the warning, not a literal line
+  number, since line numbers drift: it sat at `server.py:3289` when written
+  and at `server.py:3465-3476` after the rebase onto `main`) is wrapped in
   `try / except BrokenPipeError: relinquish_output_streams()`. The dup2 on
   catch is what kills the interpreter-exit flush that would otherwise raise a
   second `BrokenPipeError` during shutdown.
