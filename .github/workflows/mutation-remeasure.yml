@@ -129,17 +129,32 @@ jobs:
           echo "PATTERNS=$PATTERNS" >> "$GITHUB_ENV"
           echo "Patterns: $PATTERNS"
 
-      # The step-level cap is the loss-prevention half of the resume
-      # design, and it exists because of a demonstrated failure: a job-level
-      # timeout kill can consume the cancel grace window tearing down
-      # mutmut's fork-server children, and the runner is force-killed before
-      # the always()-guarded upload ever starts -- one leg's progress was
-      # lost exactly that way (KBR-272). Ending the mutmut step at 270
-      # minutes leaves the job's remaining ~30 minutes as guaranteed room
-      # for the aggregate + upload steps, so every leg preserves its work.
+      # Soft deadline, not a GitHub timeout -- and why, from three lost
+      # legs (KBR-272): a job-level timeout kill can eat the cancel grace
+      # window tearing down mutmut's fork-server children (one leg's tree
+      # was lost that way), and a STEP-level timeout skips every subsequent
+      # if: always() step outright (a second leg, same fate: mutmut step
+      # `cancelled`, upload `skipped`, zero artifacts). GNU `timeout`
+      # SIGINTs mutmut at 240 minutes instead, so THIS step completes
+      # normally and the aggregate + upload steps below run as ordinary
+      # steps -- the partial tree is always preserved. -k 60 is the SIGKILL
+      # backstop; mid-run hard kills are already proven safe by the legs
+      # above (per-mutant .meta results are written incrementally, and the
+      # next leg restored and resumed from a hard-killed tree). 124/130 are
+      # the timeout/SIGINT exit codes and end the leg cleanly; any other
+      # non-zero code is a real mutmut failure and fails the step loudly.
+      # The GitHub step timeout below (285) is a last-resort backstop for
+      # GNU timeout itself misbehaving; it should never fire.
       - name: Run mutmut for the group
-        timeout-minutes: 270
-        run: mutmut run $PATTERNS
+        timeout-minutes: 285
+        run: |
+          rc=0
+          timeout -s INT -k 60 240m mutmut run $PATTERNS || rc=$?
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 130 ]; then
+            echo "Soft deadline reached at 240 minutes; the partial tree is on disk and the upload step preserves it. Re-dispatch to continue."
+            exit 0
+          fi
+          exit "$rc"
 
       # 🔴 `|| true`, deliberately, and why: the aggregator asserts
       # `not_checked == 0` per group and exits 1 when a group has unmeasured
