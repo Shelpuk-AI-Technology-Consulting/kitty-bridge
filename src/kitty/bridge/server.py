@@ -6000,6 +6000,27 @@ class BridgeServer:
                                 if hold.stop_reason in _NATIVE_TRUNCATING_STOP_REASONS:
                                     return _make_error_response(_d3_truncation_error_body(hold.stop_reason), status=400)
 
+                                # KBR-99 (S13): quarantine parity with the CC-wire path.
+                                # When this attempt's upstream sent the pre-content
+                                # error event the hold judged, the backend carries the
+                                # same stream-error cooldown an in-stream error charges
+                                # on the Chat Completions wire (first charge 30 s,
+                                # escalating) — KBR-241's D2 amendment kept the health
+                                # model different deliberately, and the owner closed the
+                                # difference: without it a persistently-erroring backend
+                                # kept drawing ~1/n of the attempts on a balancing pool.
+                                # The recognition rule and the exhaustion payload from
+                                # the D2 amendment are untouched.
+                                if hold.error_seen and self._backends and (
+                                    self._current_backend_idx >= 0
+                                ):
+                                    self._mark_backend_unhealthy(
+                                        self._current_backend_idx,
+                                        cooldown=self._get_stream_error_cooldown(
+                                            self._current_backend_idx
+                                        ),
+                                    )
+
                                 # Empty reply, nothing written: the translated path's
                                 # empty-response ladder, including its balancing quirk of
                                 # retrying only inside the final delays once no backend

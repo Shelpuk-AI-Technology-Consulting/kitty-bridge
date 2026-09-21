@@ -761,6 +761,64 @@ class TestTranslatedStreamingD3:
         )
 
 
+# ── Fix R5 — Messages-wire pre-content error quarantine parity ─────────
+
+
+class TestMessagesWirePreContentErrorQuarantine:
+    """R5: the Messages-wire pre-content error ladder charges the cooldown.
+
+    SYSTEM_DESIGN §5.3 S13 closes the D2-amendment half KBR-241 left open:
+    a pre-content ``event: error`` on a Messages-wire stream now charges
+    ``_get_stream_error_cooldown`` on the failing backend, matching the
+    CC-wire in-stream error cooldown. Without parity, a persistently-
+    erroring backend kept drawing ~1/n of the attempts on a balancing pool.
+
+    Red at base: the empty ladder runs the retries without marking the
+    backend unhealthy — the assertion ``_backend_health[0]["healthy"] is
+    False`` fails today (the backend stays healthy). After the fix the
+    backend carries the stream cooldown and is marked unhealthy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_messages_wire_pre_content_error_charges_the_backend_cooldown(
+        self,
+        fast_stall,
+        short_grace,  # noqa: F811 — fixture shadowing the module-level import
+    ) -> None:
+        # A pre-content Anthropic-style error event — the shape the
+        # preamble hold recognises by name line (server.py:5896).
+        pre_content_error = (
+            b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error",'
+            b'"message":"Overloaded"}}\n\n'
+        )
+
+        async def _pre_content_error_stream(
+            request: web.Request, _ordinal: int
+        ) -> web.StreamResponse:
+            resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await resp.prepare(request)
+            await resp.write(pre_content_error)
+            await resp.write_eof()
+            return resp
+
+        upstream = _Upstream("/v1/messages", _pre_content_error_stream)
+        async with upstream as base_url:
+            server = _build("balanced", base_url, native=True)
+            port = await server.start_async()
+            try:
+                await _post_stream(port)
+            finally:
+                await server.stop_async()
+
+        # Parity fix: the first backend carries the stream-error cooldown
+        # so a balancing pool stops drawing the persistently-erroring one.
+        backend_zero_health = server._backend_health[0]
+        assert backend_zero_health["healthy"] is False, (
+            "Messages-wire pre-content error must charge the backend cooldown"
+        )
+        assert backend_zero_health["failure_count"] >= 1
+
+
 class TestPostEmissionTimeoutEndings:
     """A read timeout after content ends the turn per Q14(a) — no second attempt.
 
