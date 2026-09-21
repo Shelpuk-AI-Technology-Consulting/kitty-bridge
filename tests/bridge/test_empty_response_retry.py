@@ -750,8 +750,18 @@ class TestEmptyResponseNonBalancing:
         await server.stop_async()
 
     @pytest.mark.asyncio
-    async def test_streaming_exhausts_retries_emits_fallback(self):
-        """Streaming: Empty x 4 -> Fallback text emitted."""
+    async def test_streaming_exhausts_retries_emits_d4(self):
+        """Streaming: Empty x N -> D4 ``502 empty_response``.
+
+        KBR-235 originally left the finish-chunk empty arm on the translated
+        route producing the M12 fallback text inside a ``200`` — a
+        normal-looking assistant turn. KBR-99 (S11) unifies the split:
+        both empty shapes now exhaust into the D4 error (Q14(a)'s rationale
+        — a ``200`` carrying substituted text is the one thing the route
+        must never produce). The ``Upstream model returned an empty
+        response`` string the D4 body carries is the same constant the old
+        fallback used.
+        """
         server = _make_server(1)
         port = await server.start_async()
         url = f"http://127.0.0.1:{port}/v1/messages"
@@ -770,9 +780,10 @@ class TestEmptyResponseNonBalancing:
                 )
 
             async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
-                assert resp.status == 200
-                content = await resp.text()
-                assert "Upstream model returned an empty response" in content
+                assert resp.status == 502
+                body = await resp.text()
+                body_text = body.decode() if isinstance(body, (bytes, bytearray)) else body
+                assert '"reason":"empty_response"' in body_text or '"reason": "empty_response"' in body_text
 
         await server.stop_async()
 
@@ -949,7 +960,12 @@ class TestEmptyResponseFinalRetries:
         await server.stop_async()
 
     @pytest.mark.asyncio
-    async def test_streaming_final_retries_fallback(self, monkeypatch):
+    async def test_streaming_final_retries_exhaust_into_d4(self, monkeypatch):
+        """Streaming final-retry exhaustion: D4, not the M12 fallback.
+
+        KBR-99 (S11) closed the finish-chunk fallback path the KBR-235-era
+        test originally pinned; the unified exhaustion is the D4 error.
+        """
         monkeypatch.setattr(_server_module, "_EMPTY_FINAL_DELAYS", [0.0, 0.0])
         server = _make_balancing_server(2)
         port = await server.start_async()
@@ -970,9 +986,9 @@ class TestEmptyResponseFinalRetries:
                 m.post("https://api1.example.com/v1/chat/completions", body=empty_stream)
 
             async with aiohttp.ClientSession() as session, session.post(url, json=request_body) as resp:
-                assert resp.status == 200
-                content = await resp.text()
-                assert "Upstream model returned an empty response" in content
+                assert resp.status == 502
+                body = await resp.text()
+                assert '"reason":"empty_response"' in body or '"reason": "empty_response"' in body
 
         await server.stop_async()
 

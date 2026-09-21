@@ -6488,27 +6488,37 @@ class BridgeServer:
 
                                 # KBR-235, owner decision 2026-09-14: exhausting a stream that
                                 # never produced a finish chunk ends in the D4 error, as on the
-                                # native route — not fallback text. Nothing has been written on
-                                # any attempt of this request (the gate required `sr is None`),
-                                # so the JSON error is legal; the attempt counts no completion,
-                                # and no backend health changes.
-                                if empty_no_finish:
-                                    logger.warning(
-                                        "Messages stream empty (no finish chunk) after %d attempts for %s",
-                                        attempt + 1,
-                                        message_id,
-                                    )
-                                    return _make_error_response(
-                                        {
-                                            "type": "error",
-                                            "error": {
-                                                "type": "api_error",
-                                                "message": _NATIVE_EMPTY_REPLY_MESSAGE,
-                                                "reason": "empty_response",
-                                            },
+                                # native route — not fallback text. KBR-99 (S11) unifies the
+                                # split KBR-235 deliberately kept: the finish-chunk empty arm
+                                # now exhausts into the same D4 error instead of the M12
+                                # fallback text — Q14(a)'s rationale already says a `200`
+                                # carrying substituted text is the one thing the route must
+                                # never produce, and the same upstream failure was producing
+                                # a normal-looking turn or an error depending on an accident
+                                # of the upstream's chunking. M12 stays live on non-streaming
+                                # replies and the other inbound protocols; only this streaming
+                                # write path stops delivering the substitution. Nothing has
+                                # been written on any attempt of this request (the gate's
+                                # post-emission arm above broke out when `sr is not None`),
+                                # so the JSON error is legal; the attempt counts no
+                                # completion, and no backend health changes.
+                                logger.warning(
+                                    "Messages stream empty (empty-response ladder exhausted) "
+                                    "after %d attempts for %s",
+                                    attempt + 1,
+                                    message_id,
+                                )
+                                return _make_error_response(
+                                    {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "api_error",
+                                            "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                            "reason": "empty_response",
                                         },
-                                        status=502,
-                                    )
+                                    },
+                                    status=502,
+                                )
 
                             # Write buffered finish events to client
                             s = await _ensure_prepared()

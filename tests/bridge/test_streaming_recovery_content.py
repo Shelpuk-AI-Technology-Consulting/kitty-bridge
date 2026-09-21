@@ -619,6 +619,85 @@ class TestGeminiInStreamErrorExhaustionFix:
         assert '"code": 502' in error_lines[0]
 
 
+# ── Fix R3 — D4 unification on the translated Messages empty-stream gate ──
+
+
+async def _drive_messages_json(port: int) -> tuple[int, bytes]:
+    """POST a streaming /v1/messages request and return ``(status, body)``."""
+    async with (
+        aiohttp.ClientSession() as session,
+        session.post(
+            f"http://127.0.0.1:{port}/v1/messages",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1024,
+                "stream": True,
+            },
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp,
+    ):
+        return resp.status, await resp.read()
+
+
+class TestTranslatedEmptyStreamD4Unification:
+    """R3: both empty shapes (no-finish and finish-chunk) exhaust into D4.
+
+    Before the fix the no-finish arm returned the D4 ``502 empty_response``
+    while the finish-chunk arm exhausted into the M12 fallback text inside
+    a ``200`` (KBR-235 deliberately kept the split). The unification closes
+    the split: Q14(a) already says a ``200`` carrying substituted text is
+    the one thing the route must never produce.
+
+    Red at base: a finish-chunk-only empty stream (the well-formed-skeleton
+    shape — role chunk, empty finish, ``[DONE]``, no content delta) on a
+    two-backend balancing pool exhausts the ladder; the client receives
+    the M12 fallback inside a ``200``. After the fix the client receives
+    the D4 ``502 api_error`` body with ``reason: empty_response``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_translated_finish_chunk_only_empty_stream_exhausts_into_d4(
+        self,
+        fast_stall,
+        short_grace,  # noqa: F811 — fixture shadowing the module-level import
+    ) -> None:
+        role_chunk = (
+            b'data: {"id":"c1","choices":[{"index":0,'
+            b'"delta":{"role":"assistant","content":""}}],"model":"test-model"}\n\n'
+        )
+        finish_chunk = (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+        )
+        well_formed_skeleton = role_chunk + finish_chunk + b"data: [DONE]\n\n"
+
+        async def _empty_skeleton(request: web.Request, _ordinal: int) -> web.StreamResponse:
+            return await _sse(request, well_formed_skeleton)
+
+        upstream = _Upstream("/v1/chat/completions", _empty_skeleton)
+        async with upstream as base_url:
+            server = _build("balanced", base_url)
+            port = await server.start_async()
+            try:
+                status, body = await _drive_messages_json(port)
+            finally:
+                await server.stop_async()
+
+        # Both attempts hit the ladder (2 backends); today the second attempt
+        # also exhausts into the same fallback path.
+        assert status == 502, (
+            f"expected D4 502 empty_response, got {status}; body: {body[:300]!r}"
+        )
+        body_text = body.decode()
+        assert '"reason": "empty_response"' in body_text or '"reason":"empty_response"' in body_text
+        # The fallback text must not reach the client.
+        assert "_EMPTY_ASSISTANT_FALLBACK_TEXT" not in body_text
+        # Two backend attempts (no third attempt because the empty ladder
+        # only runs within attempt budget, and balancing selects A then B).
+        assert upstream.requests >= 2
+
+
 class TestPostEmissionTimeoutEndings:
     """A read timeout after content ends the turn per Q14(a) — no second attempt.
 
