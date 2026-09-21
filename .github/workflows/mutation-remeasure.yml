@@ -53,14 +53,20 @@ permissions:
 jobs:
   remeasure:
     runs-on: ubuntu-latest
-    # A cap, not a budget, sized from the recorded run's numbers (KBR-266):
-    # generation ~1 min, stats ~20 min, per-mutant phase 5–30 min on an 8-CPU
-    # workstation; 648 mutants each associated with 532–596 L1 tests on a
-    # 4-vCPU hosted runner is the slowest expected shape. 180 minutes clears
-    # that with margin under the platform's 360-minute ceiling. A run killed
-    # here still uploads its partial tree (the upload step is `if: always()`),
-    # and mutmut resumes from a cached tree — re-dispatch to continue.
-    timeout-minutes: 180
+    # A cap, not a budget. The first attempt at 180 minutes hit the cap on
+    # the per-mutant phase (KBR-272); after two capped runs 459 mutants
+    # remained of 648 -- the ticket's 5–30-minute estimate was low by an
+    # order of magnitude, because each mutant runs 532–596 associated L1
+    # tests on a 4-vCPU hosted runner (~37 mutants/hour measured). 300
+    # keeps the resume loop at ~3 legs (total compute, not per-leg ceiling,
+    # binds the schedule) while sitting STRICTLY under the 360-minute
+    # `ubuntu-latest` ceiling: the review suite requires declared < ceiling,
+    # and the margin is operational, not aesthetic -- when the cap fires,
+    # the always()-guarded upload still has an hour of platform room to
+    # preserve the partial tree. A run killed here still uploads its
+    # partial tree, and mutmut resumes from the cached tree -- re-dispatch
+    # to continue.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
