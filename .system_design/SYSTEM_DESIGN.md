@@ -822,9 +822,12 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   native Messages reply (and its D3 truncation 400) is structurally
   unreachable — the parsed `cc_response` is judged through
   `BridgeServer._is_empty_cc_response` (the KBR-285 lockstep whole-response
-  judge, KBR-297's streaming twin) **before** `translate_response`, gated on
-  `self._active_provider.use_custom_transport`. Content-bearing → translate +
-  respond, unchanged. Judged-empty → the route's D4 terminal as a
+  judge, KBR-297's streaming twin) **before** `translate_response`. KBR-298
+  gated on `self._active_provider.use_custom_transport`; KBR-300 widened the
+  predicate to `not self._active_provider.use_native_messages and
+  self._is_empty_cc_response(cc_response)` so the same gate covers the
+  raw-CC cell too (see the KBR-300 paragraph below). Content-bearing →
+  translate + respond, unchanged. Judged-empty → the route's D4 terminal as a
   non-streaming JSON error: `web.json_response` with
   `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"`, HTTP `502` —
   **no** `_log_usage`, **no** `_mark_backend_healthy` on a judged-empty
@@ -853,11 +856,11 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
     non-streaming cell has the same post-ladder shape — the ticket
     attributed it to KBR-277, but KBR-277 widened only the
     `reasoning_content` predicate and left the exhaustion terminal
-    untouched — so it stays open here and is filed as **KBR-300**; until
-    that lands, a `[custom, plain]` mixed pool whose both backends return
-    empty exhausts with the last-selected backend plain, the transport gate
-    does not fire, and the fabricated fallback ships (the pre-existing
-    behaviour, unchanged by KBR-298).
+    untouched. The raw-CC cell was filed as **KBR-300** and is now closed
+    there: KBR-300 widens the elif's predicate to
+    `not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response)`,
+    so the same gate covers both the KBR-298 cell and the raw-CC cell —
+    one location, one comment, no parallel structures to maintain.
   The reasoning-only accepted trade-off carries over (none of the three
   custom parsers' non-streaming paths surface reasoning:
   `BedrockAdapter.translate_from_upstream` reads only `text`/`toolUse`
@@ -866,14 +869,74 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   only text deltas and function-call items). The empty arm logs a
   route-scoped `logger.warning` mirroring KBR-297's;
   `_request_with_retry_single`'s own "returning fallback" line is left
-  unchanged — its wording remains accurate for the raw-CC sibling routes
-  KBR-298 leaves open. Tests:
+  unchanged — its wording is now historical (the raw-CC sibling routes
+  KBR-298 leaves open were closed by KBR-300 below; the comment above the
+  KBR-298 code site records the widening). Tests:
   `tests/bridge/test_messages_custom_transport_non_streaming_empty_hold.py`
   (the KBR-287/293/297 harness shape; scripted raw upstream shapes fed
   through the adapters' real non-streaming parsers; content oracles parsed
   from the JSON response body, never raw substrings; the recording seam
   captures `_log_usage` / `_mark_backend_healthy` so the empty-arm
   guarantees are asserted, not assumed).
+- **KBR-300 closed the four non-streaming silent-skeleton cells the
+  KBR-298 closure left open.** KBR-248/276/287/293/297 closed the streaming
+  emission paths; KBR-298 closed the non-streaming `/v1/messages` ×
+  custom-transport cell; this ticket closes the three sibling cells
+  (`_handle_responses`, `_handle_gemini`, `_handle_chat_completions`,
+  both transport classes) and the raw-CC cell on `/v1/messages` itself
+  (the KBR-298 elif gated on `use_custom_transport` and left
+  `use_custom_transport = False` reaching `translate_response`'s
+  fabricated fallback). Each handler's judge sits after the ladder
+  (`_request_with_retry`'s existing walk, unchanged), in the
+  translated/verbatim arm, before `translate_response` (and before
+  `_log_usage` / `_mark_backend_healthy`). Single predicate per handler:
+  `not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response)`
+  — the messages elif widens in place (no parallel gate); the three
+  siblings add one gate each. **Four per-route D4 body shapes, each
+  mirroring its route's streaming D4 family** (route-internal consistency
+  across stream modes, one client branch per route): `/v1/messages` keeps
+  KBR-298's bare-JSON `502` + `_NATIVE_EMPTY_REPLY_MESSAGE` +
+  `reason: "empty_response"` (`type: "error"`, `error.type: "api_error"`);
+  `/v1/responses` adds `reason: "empty_response"` over the streaming
+  `code: "empty_response"` discriminator (`type: "error"`, `error.code` /
+  `error.reason`); a client branching on `(code == "empty_response")`
+covers both stream modes on this route, with `reason` a non-streaming-only
+marker. `/v1/gemini` byte-mirrors the streaming SSE error
+  payload (`code: 502` integer, no top-level `type`); `/v1/chat/completions`
+  byte-mirrors KBR-287's streaming D4 (`error.type: "empty_response"`,
+  verbatim CC carries `type`, not `reason`). All four `502`; all four
+  return *before* `_log_usage` and `_mark_backend_healthy`. The
+  `use_native_messages is false` conjunct excludes native (`use_native_messages
+  = True`) providers on every route — same structural carve-out KBR-298
+  made for the native-Messages arm of `/v1/messages`. Concretely on
+  `/v1/messages`: a native Anthropic provider whose `_native_messages_request`
+  was cleared by the KBR-237 tool-use-format fallback (`server.py:4596`)
+  answers in CC form; an empty reply there falls through the widened elif
+  into `translate_response`'s fabricated fallback (today's behaviour,
+  deliberately preserved). Widening to cover native providers is a
+  one-conjunct drop per handler; **proposed follow-up, not yet filed — PO
+  to decide** on scope and priority. Reasoning-only trade-off carries over
+  unchanged: custom-transport non-streaming parsers drop reasoning
+  (`BedrockAdapter.translate_from_upstream` reads only `text`/`toolUse`;
+  `OllamaCloudAdapter` reads only `message.content`/`message.tool_calls`;
+  `OpenAISubscriptionAdapter._parse_sse_to_response` reads only text
+  deltas and function-call items) → ladder-taking; raw-CC cells carry
+  `reasoning_content` non-empty in the wire shape → the KBR-277
+  predicate counts it as content → released on the first attempt. Tests:
+  `tests/bridge/test_messages_raw_cc_non_streaming_empty_hold.py` (the
+  raw-CC cell on `/v1/messages`); `tests/bridge/test_responses_non_streaming_empty_hold.py`,
+  `tests/bridge/test_gemini_non_streaming_empty_hold.py`,
+  `tests/bridge/test_chat_completions_non_streaming_empty_hold.py` (each
+  route × both transport classes, the KBR-287/293/297 harness shape; plain
+  cells use `aioresponses` on the OpenAI default endpoint, custom cells
+  monkeypatch `make_request` and feed canned raw shapes through the
+  adapters' real non-streaming parsers). The pre-existing
+  `test_non_streaming_exhausts_retries_emits_fallback` /
+  `test_all_backends_empty_emits_fallback` /
+  `test_non_streaming_final_retries_fallback` tests in
+  `tests/bridge/test_empty_response_retry.py` pinned the raw-CC fallback
+  behaviour KBR-300 retires; they were rewritten in-PR to pin the D4
+  expectation, mirroring the streaming-side KBR-99 (S11) precedent.
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
