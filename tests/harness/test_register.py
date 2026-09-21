@@ -128,10 +128,10 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 73 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 79 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """25 bridge-level rows less the withdrawn M13, plus 48 provider-level.
+        """27 bridge-level rows less the withdrawn M13, plus 52 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
@@ -144,11 +144,13 @@ class TestTheRowsThemselves:
         parallel-false omission), P35 (G35 omitted legal tool_choice). The +4
         over the pre-KBR-137 count is P36/P37/P38/P42, the OpenCode Go
         Responses-route mutations (whole-body translate, eight CC-only drops,
-        the max_tokens rename, the reasoning injection). All literals are the
+        the max_tokens rename, the reasoning injection). The +2 over the
+        pre-KBR-271 count is M9a/M9b, the two cache-breakpoint drops the M9
+        fallback converter performs (KBR-271). All literals are the
         no-reflow damage test — a future change that drops a row or adds one
         without updating the guard fails loudly.
         """
-        assert len(r.REGISTER) == 77
+        assert len(r.REGISTER) == 79
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.

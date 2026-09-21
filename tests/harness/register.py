@@ -637,6 +637,76 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         ),
     ),
     MutationRow(
+        id="M9a",
+        # KBR-271: the M9 fallback's top-level twin of M16's fourth path
+        # (KBR-263 / G38). `_convert_native_to_cc_format` builds its result
+        # dict from named keys and never copies `body["cache_control"]`, so
+        # Anthropic's automatic-caching form -- projected to
+        # `envelope.extra[cache_control]` (§3.3.1) -- is dropped by omission
+        # on the retried wire. Pinned at the wire by the KBR-200 CB-3 suite's
+        # `top_level` site (`tests/bridge/test_native_passthrough_cache_breaks.py`).
+        #
+        # Two overlap facts, stated so no future reader re-derives them from
+        # `oracle.py`. (1) Claim matching ignores sites, so whenever
+        # `NON_NATIVE_UPSTREAM_WIRE` is met M16 -- same trigger, superset
+        # paths -- claims this address; these rows are the register's record
+        # of the M9 site's drops, not extra oracle coverage. (2) The rows are
+        # anticipatory in P28's sense: the fallback is reachable only on the
+        # native route (all four call sites gate on
+        # `cc_request.get("_native_messages_request")`, set only on the
+        # `use_native_messages` branch), so this ROUTE-kind trigger is false
+        # on the only path that reaches the site today; no corpus entry
+        # exercises the fallback, and any hypothetical fallback run fails
+        # §4.3 C2 before assertion 1. The trigger is M16-family symmetry, not
+        # a reachability claim -- the alternative (`NATIVE_TOOL_USE_FORMAT_ERROR`,
+        # M9's own RESPONSE-kind trigger) would force `conditional=True`
+        # (`test_rows_sharing_a_trigger_agree_on_whether_it_is_conditional`)
+        # and owe a §3.3.2 assertion-2 complement no corpus entry can author.
+        site=(f"{_SERVER}:_convert_native_to_cc_format",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Keyed literal -- no wildcard, so the `_SHAPES` test excludes it by
+        # construction (P26's reason). The path stays narrow so it cannot
+        # swallow a sibling row's `envelope.extra[<other>]` delta.
+        paths=(c.extra_path("cache_control"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G43",
+    ),
+    MutationRow(
+        id="M9b",
+        # KBR-271: the M9 fallback's block-level twin of M16's three carrier
+        # paths. The rebuild flattens every block it touches -- assistant
+        # text joined to a string, `tool_use` rebuilt as a `tool_calls`
+        # entry, `tool_result.content` flattened to a string *before* any
+        # carriage (the Messages translator preserves the nested half; this
+        # converter defeats it), `tools` rebuilt from
+        # `name`/`description`/`input_schema` only -- so a breakpoint on a
+        # tool declaration or on any content part is dropped on the retried
+        # wire. Pinned at the wire by the CB-3 suite's `tool`, `image`,
+        # `user_text`, `assistant_text`, `tool_use`, `tool_result` and
+        # `tool_result_nested` sites. See M9a for the two overlap facts
+        # (site-blind matching against M16; anticipatory, native-route-only
+        # today) and for the trigger choice.
+        #
+        # Deliberately outside these paths: the `system` carrier survives by
+        # carriage on `zai_anthropic`/`custom_anthropic` (no drop, no row),
+        # and a nested `tool_result` *block* residualises before register
+        # matching (M16's "outside this row's paths by design" reason). Both,
+        # plus the `minimax_token` system drop these rows' trigger cannot
+        # reach (the adapter is native), are recorded on §9.2 G43.
+        site=(f"{_SERVER}:_convert_native_to_cc_format",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Both patterns are already listed in `_SHAPES` for M16/P28 -- one
+        # per carrier Anthropic permits a breakpoint on. The paths name the
+        # field, never the block: a coarser anchor would also claim a deleted
+        # part or tool description (two of §3.3.1's five falsification cases).
+        paths=(
+            c.tool_path(c.WILDCARD, "cache_control"),
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+        ),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G43",
+    ),
+    MutationRow(
         id="M10",
         site=(f"{_SERVER}:BridgeServer._handle_gemini",),
         trigger=Trigger.GEMINI_PROTOCOL,
