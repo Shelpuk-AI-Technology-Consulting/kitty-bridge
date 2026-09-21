@@ -1029,3 +1029,62 @@ class TestEveryScopeNamesRealProviders:
 
         with pytest.raises(r.RegisterSourceError):
             r.provider_registry(tmp_path)
+
+    def test_a_star_unpacking_entry_raises(self, tmp_path: Path) -> None:
+        """The ``**``-unpacking refusal: a ``None`` key slot is no literal key.
+
+        A registry assembled by merging another dict would let keys reach
+        :func:`scope_problems` that the AST reader never saw — exactly the
+        silent-widening shape the reader exists to refuse.
+        """
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "_OTHER = {}\n"
+            "_registry: dict[str, type[ProviderAdapter]] = {**_OTHER, 'x': FooAdapter}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)
+
+    def test_a_non_literal_key_raises(self, tmp_path: Path) -> None:
+        """A bare name as a key is not a string literal — the ``literal_eval`` refusal."""
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "KEY = 'x'\n"
+            "_registry: dict[str, type[ProviderAdapter]] = {KEY: FooAdapter}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)
+
+    def test_a_non_string_literal_key_raises(self, tmp_path: Path) -> None:
+        """A literal key that is not a string (``{1: …}``) is refused, not coerced.
+
+        The registry's keys are provider type strings; a numeric key would
+        resolve to nothing in :func:`row_is_in_scope` and pass silently.
+        """
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "_registry: dict[str, type[ProviderAdapter]] = {1: FooAdapter}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)
+
+    def test_a_non_class_value_raises(self, tmp_path: Path) -> None:
+        """A call expression as a value is no bare class name — the site↔scope
+        subset check needs the class's *name* to find its defining file."""
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "def make_adapter():\n"
+            "    return None\n"
+            "\n"
+            "_registry: dict[str, type[ProviderAdapter]] = {'x': make_adapter()}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)

@@ -143,12 +143,13 @@ a reviewed decision.
   (P8's four callers, P5a's five-adapter family, M16's 21-adapter exclusion of
   the hardcoded-native pair, M9a's native trio, P4 excluding
   `openai_subscription`). L2 (`test_register_agreement.py::
-  TestEveryScopeNamesRealProviders`, 9): live-register guard, registry-reader
+  TestEveryScopeNamesRealProviders`, 13): live-register guard, registry-reader
   self-guard (23 keys + named members incl. the `zai_coding` →
   `ZaiAnthropicAdapter` file-class split), four falsification cases (bogus
   key / mixed sentinel / empty scope / site-scope omission), synthetic
-  mini-registry positive control, and two `RegisterSourceError` refusals
-  (unreadable source, empty dict literal).
+  mini-registry positive control, and six `RegisterSourceError` refusals
+  (unreadable source, empty dict literal, `**`-unpacking entry, non-literal
+  key, non-string key, non-class value) — one per refusal path.
 - **Design doc.** §3.2.4 rewritten to the carried-column state (reachability
   definition, KBR-160 survival boundary + open follow-up, P9e deferral, three
   derived facts, guard description); schema sentence "plus two"; §3.2.5 table
