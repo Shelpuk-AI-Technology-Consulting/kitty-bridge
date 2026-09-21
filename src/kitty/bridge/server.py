@@ -1179,8 +1179,10 @@ def _d3_truncation_error_body(stop_reason: str) -> dict:
 
     Q14 D3: the body is an ``invalid_request_error`` carrying a ``reason`` marker, so the
     agent sees a request-shaped failure it will not retry and operators can tell it from
-    any other ``400``. Shared by the native streaming branch and the non-streaming
-    Messages delivery (KBR-235) so the wording cannot drift.
+    any other ``400``. Shared by the native streaming branch (``_stream_messages`` on the
+    Messages-wire passthrough), the non-streaming Messages delivery (KBR-235), and the
+    translated streaming branch (``_stream_messages`` on the Chat Completions-wire upstream,
+    KBR-99 S12 — streaming D3) so the wording cannot drift across protocols.
 
     Args:
         stop_reason: The upstream stop reason that truncated the reply.
