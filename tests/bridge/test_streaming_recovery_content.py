@@ -773,11 +773,11 @@ class TestMessagesWirePreContentErrorQuarantine:
     CC-wire in-stream error cooldown. Without parity, a persistently-
     erroring backend kept drawing ~1/n of the attempts on a balancing pool.
 
-    Red at base: the empty ladder runs the retries without marking the
-    backend unhealthy — the assertion that exactly one backend ends the
-    request unhealthy fails today (both stay healthy). After the fix the
-    erroring backend — whichever one selection drew — carries the stream
-    cooldown and is marked unhealthy.
+    Red at base: the empty ladder runs the retries without marking any
+    backend unhealthy — the assertion that every backend the ladder drew
+    ends charged fails today (all stay healthy). After the fix each drawn
+    backend carries the stream cooldown (both, on this always-erroring
+    two-backend pool).
     """
 
     @pytest.mark.asyncio
@@ -811,14 +811,19 @@ class TestMessagesWirePreContentErrorQuarantine:
             finally:
                 await server.stop_async()
 
-        # Parity fix: exactly one backend carries the stream-error cooldown
-        # so a balancing pool stops drawing the persistently-erroring one.
-        # Selection is random, so we count rather than index.
-        quarantined = [h for h in server._backend_health if not h["healthy"]]
-        assert len(quarantined) == 1, (
-            "the erroring backend must carry the stream cooldown"
+        # Parity fix: the upstream errors on every attempt, so the ladder
+        # charges each backend it draws — on this two-backend pool, both end
+        # quarantined (then `_any_healthy_backend()` goes False and the
+        # ladder ends). Which backend was drawn first is random; that both
+        # were drawn and charged is not. The assertion is the charge itself —
+        # healthy False, the stream branch's own counter incremented — not
+        # the draw order.
+        charged = [h for h in server._backend_health if not h["healthy"]]
+        assert len(charged) == 2, (
+            "every backend the ladder drew must carry the stream cooldown"
         )
-        assert quarantined[0]["failure_count"] >= 1
+        assert all(h["failure_count"] >= 1 for h in charged)
+        assert all(h["stream_error_count"] >= 1 for h in charged)
 
 
 class TestPostEmissionTimeoutEndings:
