@@ -1190,9 +1190,9 @@ class TestNameRequired:
     for a name is **not** lossless — a call nobody can name cannot be paired
     with its result or addressed by a register row. KBR-279 landed the rule
     for the Ollama readers, KBR-281 for Chat Completions / Gemini / Anthropic;
-    KBR-292 extends it here (§7.4.2 rule 7 row 2, seven strict readers). The
-    ``FunctionTool`` declaration branch keeps the residualise posture by
-    design.
+    KBR-292 extends it here (§7.4.2 rule 7 row 2, seven strict readers).
+    The ``FunctionTool`` declaration branch raises too via the same helper
+    since KBR-295 closed the deliberate sibling.
     """
 
     @staticmethod
@@ -1236,6 +1236,55 @@ class TestNameRequired:
         assert tool_use.name == "get_weather"
         assert tool_use.arguments == {"city": "Toronto"}
         assert tool_use.id == "call_1"
+
+
+class TestDeclarationNameRequired:
+    """A ``FunctionTool`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a tool nobody can name cannot be paired with its result or
+    addressed by a register row. KBR-279 landed the rule for the Ollama
+    readers, KBR-281 for Chat Completions / Gemini / Anthropic invocations,
+    KBR-292 for the remaining invocation readers; KBR-295 extends it to the
+    declaration side (§7.4.2 rule 7 row 2, the seven invocation readers and
+    the six declaration branches). The
+    residualise-and-still-project posture that KBR-281 left deliberately open
+    on the declaration branches is now settled on the strict-raise rule.
+    """
+
+    @staticmethod
+    def _body_with_function_tool(name: Any) -> dict[str, Any]:
+        """Return a Responses body whose one ``FunctionTool`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published examples never show and the schema calls required.
+        """
+        tool: dict[str, Any] = {"type": "function", "parameters": {}}
+        if name is not None:
+            tool["name"] = name
+        return {"input": "hi", "tools": [tool]}
+
+    def test_missing_function_tool_name_raises(self) -> None:
+        """A ``FunctionTool`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_function_tool(None))
+
+    def test_empty_function_tool_name_raises(self) -> None:
+        """A ``FunctionTool`` with an empty ``name`` raises (KBR-295)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_function_tool(""))
+
+    def test_non_string_function_tool_name_raises(self) -> None:
+        """A ``FunctionTool`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_function_tool(42))
+
+    def test_named_function_tool_control_is_clean(self) -> None:
+        """Control — a named ``FunctionTool`` projects cleanly."""
+        projected = project(self._body_with_function_tool("get_weather"))
+
+        assert projected.conversation.tools == (c.ToolDecl(name="get_weather", schema={}),)
 
 
 class TestFunctionCallOutput:
@@ -1748,25 +1797,6 @@ class TestToolDeclarations:
         )
 
         assert set(projected.residual) == {"tools[0].description", "tools[0].parameters"}
-
-    def test_a_function_tool_without_a_name_residualises(self) -> None:
-        """The same rule as a `function_call`, for a stronger reason.
-
-        `FunctionTool.required` includes `name`, and §3.3.1a addresses tools by
-        name with no index to fall back on. Two unnamed declarations would both
-        sit at `conversation.tools[]` — and `path_matches` accepts `[]` as the
-        **legacy wildcard spelling**, so a register row anchored at
-        `conversation.tools[*].strict` would match them by accident rather than
-        by name. That is the collision the MCP naming rule exists to prevent,
-        reached by a different route.
-        """
-        projected = r.ResponsesProjection().read_request(
-            captured({"input": "hi", "tools": [{"type": "function", "parameters": {}}]})
-        )
-
-        assert set(projected.residual) == {"tools[0].name"}
-        with pytest.raises(c.ResidualFieldsError):
-            c.verify_total(projected)
 
     def test_a_custom_tool_is_named_by_its_own_name(self) -> None:
         """`CustomToolParam` makes `name` required; using `type` would discard it."""

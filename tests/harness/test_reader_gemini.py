@@ -768,21 +768,6 @@ class TestTools:
 
         assert projected.conversation.tools[0].behavior is None
 
-    def test_a_declaration_with_no_usable_name_residualises_rather_than_raising(self) -> None:
-        """§3.3.1b settles this, and not the way the leaf rule usually goes.
-
-        "An absent `name` *does* residualise … a call nobody can name cannot be
-        paired or addressed." Absent and `null` residualise as well as a wrong
-        type — but the declaration is still **projected**, because raising would
-        blind the oracle to the rest of a request it could otherwise diff. T-A3
-        takes the same branch; an earlier draft of this reader raised, which was
-        a third answer to a question §3.3.1b had already settled.
-        """
-        projected = project_untotalled({"tools": [{"functionDeclarations": [{"description": "x"}]}]})
-
-        assert projected.conversation.tools == (c.ToolDecl(name="", description="x"),)
-        assert projected.residual == {"tools[0].functionDeclarations[0].name": None}
-
     @pytest.mark.parametrize(
         "key",
         [
@@ -2172,11 +2157,10 @@ class TestEveryOptionalLeafFailsClosed:
             "tools[0].functionDeclarations[0].description",
             lambda p: p.conversation.tools[0].description is None,
         ),
-        "functionDeclaration.name": (
-            {"tools": [{"functionDeclarations": [{"name": 7}]}]},
-            "tools[0].functionDeclarations[0].name",
-            lambda p: p.conversation.tools[0] == c.ToolDecl(name=""),
-        ),
+        # `functionDeclaration.name` was in this table under T-A3 (residualise +
+        # project `name=""`); KBR-295 closed the deliberate sibling and tightened
+        # `name` to the strict-raise posture, which this table excludes. Coverage
+        # lives in `TestDeclarationNameRequired` instead.
         "functionDeclaration.parametersJsonSchema": (
             {"tools": [{"functionDeclarations": [{"name": "f", "parametersJsonSchema": ["ab", "cd"]}]}]},
             "tools[0].functionDeclarations[0].parametersJsonSchema",
@@ -2842,9 +2826,9 @@ class TestNameRequired:
     with its result or addressed by a register row. KBR-279 landed the rule
     for the Ollama readers; KBR-281 aligns Gemini's request direction on it
     (the reply direction's site is pinned in ``test_reader_gemini_reply.py``).
-    The residualising ``_read_required_name`` helper keeps serving
-    ``FunctionDeclaration`` names, whose residualise posture is deliberate
-    (§3.3.1b, T-A3) — declaration pins stay green untouched.
+    ``FunctionDeclaration`` names raise too via :func:`_read_required_name`
+    since KBR-295 closed the declaration sibling — see
+    ``TestDeclarationNameRequired`` below.
     """
 
     @staticmethod
@@ -2888,3 +2872,52 @@ class TestNameRequired:
         assert isinstance(tool_use, c.ToolUse)
         assert tool_use.name == "get_weather"
         assert tool_use.arguments == {"city": "Toronto"}
+
+
+class TestDeclarationNameRequired:
+    """A ``FunctionDeclaration`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a tool nobody can name cannot be paired with its result or
+    addressed by a register row. KBR-279 landed the rule for the Ollama
+    readers, KBR-281 for Chat Completions / Gemini / Anthropic invocations,
+    KBR-292 for the remaining invocation readers; KBR-295 extends it to the
+    declaration side (§7.4.2 rule 7 row 2, the seven invocation readers and
+    the six declaration branches). The
+    residualising ``_read_required_name`` posture that T-A3 settled is now
+    itself settled on the strict-raise rule.
+    """
+
+    @staticmethod
+    def _body_with_declaration(name: Any) -> dict[str, Any]:
+        """Return a Gemini body whose one ``FunctionDeclaration`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published examples never show and the schema calls required.
+        """
+        declaration: dict[str, Any] = {"description": "current weather"}
+        if name is not None:
+            declaration["name"] = name
+        return {"tools": [{"functionDeclarations": [declaration]}]}
+
+    def test_missing_function_declaration_name_raises(self) -> None:
+        """A ``FunctionDeclaration`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"functionDeclarations\[0\]\.name"):
+            project_untotalled(self._body_with_declaration(None))
+
+    def test_empty_function_declaration_name_raises(self) -> None:
+        """A ``FunctionDeclaration`` with an empty ``name`` raises (KBR-295)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"functionDeclarations\[0\]\.name"):
+            project_untotalled(self._body_with_declaration(""))
+
+    def test_non_string_function_declaration_name_raises(self) -> None:
+        """A ``FunctionDeclaration`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"functionDeclarations\[0\]\.name"):
+            project_untotalled(self._body_with_declaration(42))
+
+    def test_named_function_declaration_control_is_clean(self) -> None:
+        """Control — a named ``FunctionDeclaration`` projects cleanly."""
+        projected = project(self._body_with_declaration("get_weather"))
+
+        assert projected.conversation.tools == (c.ToolDecl(name="get_weather", description="current weather"),)

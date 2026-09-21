@@ -1322,7 +1322,11 @@ def _read_tools(
             # name-addressed (§3.3.1a), so no indexed path shifts.
             residual[path] = entry
             continue
-        name = _typed_leaf(function, "name", (str,), f"{path}.function", residual) or ""
+        # KBR-279's strict-name rule covers the invocation sites; KBR-295
+        # extends it to the declaration side (§7.4.2 rule 7 row 2) — the
+        # ``_typed_leaf(...) or ""`` projection it replaced admitted every
+        # bad shape silently.
+        name = _require_tool_call_name(function, f"{path}.function")
         description = _typed_leaf(function, "description", (str,), f"{path}.function", residual)
         schema = function.get("parameters")
         if schema is not None and not isinstance(schema, Mapping):

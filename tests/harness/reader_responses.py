@@ -277,17 +277,18 @@ def _require_tool_call_name(name: Any, path: str) -> str:
     """Validate and return a tool-call's ``name``; raise on absent / empty / wrong type.
 
     The strict name-required rule shared by the request reader's
-    :meth:`ResponsesProjection._read_function_call` and the reply projection's
-    ``function_call`` branch — one spelling of the rule for both directions,
-    per §7.4.1's within-module anti-drift rule, mirroring Ollama's
-    :func:`_require_tool_call_name` (``reader_ollama.py:1007``) so the
-    readers' strict-name helpers grep together. ``""`` for a name is not a
-    lossless projection (``contract.decode_arguments``): it claims a tool *named*
-    empty-string, and a call nobody can name cannot be paired with its result
-    or addressed by a register row (KBR-281 settled the rule for four readers;
-    KBR-292 extends it here). Declaration names keep the residualise posture
-    of the ``FunctionTool`` branch — that slot's prescription is §3.3.1b's
-    general one, deliberately.
+    :meth:`ResponsesProjection._read_function_call`, the reply projection's
+    ``function_call`` branch, and — since KBR-295 — the ``FunctionTool``
+    declaration branch: one spelling of the rule for both directions and
+    the declaration path, per §7.4.1's within-module anti-drift rule,
+    mirroring Ollama's :func:`_require_tool_call_name`
+    (``reader_ollama.py:1007``) so the readers' strict-name helpers grep
+    together. ``""`` for a name is not a lossless projection
+    (``contract.decode_arguments``): it claims a tool *named* empty-string,
+    and a call nobody can name cannot be paired with its result or addressed
+    by a register row (KBR-281 settled four invocation readers; KBR-292
+    extended it to the remaining invocations; KBR-295 closes the
+    declarations).
 
     Args:
         name: The raw ``name`` value.
@@ -1238,6 +1239,12 @@ class ResponsesProjection:
 
         Returns:
             The projected declaration.
+
+        Raises:
+            UnreadableBodyError: When a ``function`` declaration's ``name``
+                is absent, empty, or not a string — via
+                :func:`_require_tool_call_name` (§7.4.2 rule 7 row 2,
+                KBR-295).
         """
         kind = entry.get("type")
 
@@ -1257,18 +1264,13 @@ class ResponsesProjection:
                 residual[c.residual_key(path, "parameters")] = parameters
                 parameters = None
 
-            # §3.3.1b's general prescription, deliberately not the
-            # invocations' strict raise (§7.4.2 rule 7 row 2): a missing
-            # name residualises and the declaration still projects with
-            # `name=""`. `FunctionTool.required` includes `name`, and two
-            # unnamed declarations would both sit at `conversation.tools[]`
-            # — which `path_matches` accepts as the legacy wildcard
-            # spelling, so a register row would match them by accident
-            # rather than by name.
-            name = entry.get("name")
-            if not isinstance(name, str):
-                residual[c.residual_key(path, "name")] = name
-                name = ""
+            # `FunctionTool.required` includes `name`, and two unnamed
+            # declarations would both sit at `conversation.tools[]` — which
+            # `path_matches` accepts as the legacy wildcard spelling, so a
+            # register row would match them by accident rather than by name.
+            # The strict raise (§7.4.2 rule 7 row 2) settled for the
+            # invocations covers declarations too (KBR-295).
+            name = _require_tool_call_name(entry.get("name"), c.residual_key(path, "name"))
 
             strict = entry.get("strict")
             return c.ToolDecl(

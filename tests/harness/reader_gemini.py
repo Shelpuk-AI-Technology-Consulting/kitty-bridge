@@ -1246,9 +1246,10 @@ def _read_function_declarations(
         The declarations, in order.
 
     Raises:
-        UnreadableBodyError: When ``functionDeclarations`` is not a list or an
-            entry is not an object. An entry with no usable name residualises
-            instead — see :func:`_read_required_name`.
+        UnreadableBodyError: When ``functionDeclarations`` is not a list, an
+            entry is not an object, or an entry has no usable ``name``
+            (absent / empty / null / non-string) — via
+            :func:`_read_required_name` (§7.4.2 rule 7 row 2, KBR-295).
     """
     if "functionDeclarations" not in tool:
         return []
@@ -1266,7 +1267,7 @@ def _read_function_declarations(
             raise c.UnreadableBodyError(f"{item} must be an object, got {type(entry).__name__}")
 
         declaration = _aliased(entry, PUBLISHED_FUNCTION_DECLARATION_KEYS, item, residual)
-        name = _read_required_name(declaration, item, residual)
+        name = _read_required_name(declaration, item)
         schema, mapped = _read_declaration_schema(declaration, item, residual)
         declared.append(
             c.ToolDecl(
@@ -1286,60 +1287,55 @@ def _read_function_declarations(
     return declared
 
 
-def _read_required_name(view: Mapping[str, tuple[str, Any]], path: str, residual: dict[str, Any]) -> str:
-    """Return a required declaration ``name``, residualising it when the wire carried none.
+def _read_required_name(view: Mapping[str, tuple[str, Any]], path: str) -> str:
+    """Return a required declaration ``name``; raise on absent / empty / null / wrong type.
 
-    §3.3.1b settles this and the answer is **not** the wrongly-typed-leaf rule's
-    usual one: "an absent ``name`` *does* residualise … ``ToolUse.name`` is a
-    ``str`` with no such value: ``""`` claims a tool *named* empty-string, and a
-    call nobody can name cannot be paired or addressed." So absent and ``null``
-    residualise too, not only a wrong type — and the part is still **projected**,
-    because dropping or raising on it would blind the oracle to the rest of a
-    request it could otherwise diff. T-A3 takes the same branch.
+    §7.4.2 rule 7 row 2's settled tool-name posture — the same rule the
+    ``FunctionCall`` site routes through :func:`_require_tool_call_name`:
+    ``""`` for a name is not a lossless projection
+    (``contract.decode_arguments``), and a tool nobody can name cannot be
+    paired with its result or addressed by a register row. KBR-279 landed the
+    rule for Ollama, KBR-281 for the four strict invocation readers, KBR-292
+    for the remaining invocations; KBR-295 closes the declaration side, where
+    T-A3's residualise-and-project posture had been the deliberate sibling.
 
-    **One call site since KBR-281: ``FunctionDeclaration`` names.** The
-    ``FunctionCall`` site used to route through here too; it now uses
-    :func:`_require_tool_call_name`, whose raise-on-absent/empty/non-string
-    rule is the settled tool-call posture (§7.4.2 rule 7 row 2, four strict
-    readers). A future schema that gave declarations a second name-shaped key
-    would silently mis-route here, because the helper takes the aliased view
-    rather than the schema it came from.
+    **One call site: ``FunctionDeclaration`` names.** A future schema that
+    gave declarations a second name-shaped key would silently mis-route here,
+    because this helper takes the aliased view rather than the schema it came
+    from — the same caveat the invocation site carries.
 
     Args:
         view: The aliased view of the object carrying the name.
-        path: That object's path from the body root.
-        residual: The residual mapping, extended in place.
+        path: That object's path from the body root, used as the error-message
+            prefix.
 
     Returns:
-        The name, or ``""`` when the wire carried none — which the residual then
-        names, so the run fails with the field identified.
-    """
-    # `_typed_leaf` has already residualised a wrongly-typed value; what is left
-    # is absent or explicitly null, which this records in its place.
-    name: str | None = _typed_leaf(view, "name", (str,), path, residual)
-    if name is None:
-        residual.setdefault(
-            c.residual_key(path, view["name"][0] if "name" in view else "name"),
-            view["name"][1] if "name" in view else None,
-        )
-        return ""
+        The validated, non-empty name.
 
-    return name
+    Raises:
+        UnreadableBodyError: When ``name`` is absent, empty, null, or not a
+            string.
+    """
+    # The aliased view maps published name -> (wire key, value); the strict
+    # check takes the raw value, so unwrap it here.
+    raw_name = view["name"][1] if "name" in view else None
+    return _require_tool_call_name(raw_name, f"{path}.name")
 
 
 def _require_tool_call_name(name: Any, path: str) -> str:
     """Validate and return a ``functionCall``'s ``name``; raise on absent / empty / wrong type.
 
-    The strict name-required rule shared by the reply ``_read_part`` site and
-    the request ``_read_function_call`` site — one spelling of the rule for
-    both directions, per §7.4.1's within-module anti-drift rule, mirroring
-    Ollama's ``_require_tool_call_name`` (``reader_ollama.py:1007``) so the
-    readers' strict-name helpers grep together. ``""`` for a name is not a
-    lossless projection (``contract.py:935-941``): it claims a tool *named*
+    The strict name-required rule shared by the reply ``_read_part`` site,
+    the request ``_read_function_call`` site, and — since KBR-295 — the
+    declaration site via :func:`_read_required_name`: one spelling of the
+    rule for both directions and the declaration path, per §7.4.1's
+    within-module anti-drift rule, mirroring Ollama's
+    ``_require_tool_call_name`` (``reader_ollama.py:1007``) so the readers'
+    strict-name helpers grep together. ``""`` for a name is not a lossless
+    projection (``contract.decode_arguments``): it claims a tool *named*
     empty-string, and a call nobody can name cannot be paired with its result
-    or addressed by a register row (KBR-281). Declaration names keep the
-    residualise posture of :func:`_read_required_name` — that slot's
-    prescription is §3.3.1b's general one, deliberately.
+    or addressed by a register row (KBR-281 settled the invocations; KBR-295
+    settled the declarations).
 
     Args:
         name: The ``functionCall``'s raw ``name`` value.
