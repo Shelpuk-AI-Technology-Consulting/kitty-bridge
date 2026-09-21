@@ -11,23 +11,40 @@ depends_on:
 
 ## What
 
-One new test category, `agent_smoke`, populated by three tests at
+One new test category, `agent_smoke`, populated by five tests at
 `tests/agent_smoke/test_claude_startup.py`:
 
 * `TestAgentStartupSmoke::test_a_pinned_claude_code_runs_one_turn_and_reaches_the_bridge`
   — the §6.4.2 connectivity claim. The test launches a real `claude -p`
   against a real `BridgeServer` in front of the T-W4 recorder, on loopback,
   with a dummy `ANTHROPIC_API_KEY`, `HOME` and `CLAUDE_CONFIG_DIR` both
-  redirected into `tmp_path`, and
+  redirected into `tmp_path`, the inherited environment filtered to strip
+  the `ANTHROPIC_*` / `CLAUDE_CODE_*` / `CLAUDECODE` key families,
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` killing the binary's own
-  statsig/sentry/update traffic. It asserts the binary exits 0 and at least
-  one `POST /v1/messages` capture carries the user's turn (the user turn is
-  pinned by *content*, not by index — see "Why" below).
-* `TestMissingBinaryFalsification::test_a_missing_binary_fails_rather_than_skips`
-  — the §8 falsification (KBR-132 shape): a nonexistent
-  `KITTY_AGENT_SMOKE_BINARY` must raise `pytest.fail`, not skip.
+  statsig / sentry / update traffic, and `cwd` pinned to the temp tree
+  rather than the checkout. It asserts the binary exits 0 and at least
+  one `POST /v1/messages` capture carries the user's turn (the user turn
+  is pinned by *content*, not by index — see "Why" below).
+* `TestMissingBinaryFalsification::test_a_missing_override_fails_rather_than_skips`
+  — the §8 falsification (KBR-132 shape) on the **override branch**:
+  a nonexistent `KITTY_AGENT_SMOKE_BINARY` must raise `pytest.fail`, not
+  skip.
 * `TestMissingBinaryFalsification::test_an_existing_override_path_is_honoured`
   — the positive control proving the override seam is non-vacuous.
+* `TestMissingBinaryFalsification::test_a_truly_missing_binary_fails_rather_than_skips`
+  — the §8 falsification on the **default branch** (what a machine with
+  genuinely no installed binary reaches): `_resolve_default_binary()`
+  returning `None` must raise `pytest.fail`, not skip. Both branches get
+  their own case because a refactor that turns only one branch into
+  `pytest.skip` would otherwise go uncaught.
+* `TestTimeoutKill::test_a_hung_binary_is_killed_before_the_test_fails`
+  — the safety-critical branch that reaps a hung child. Driven with a
+  stub shell script that records its own PID and sleeps past a shrunk
+  timeout; the assertion proves the specific PID is reaped via
+  `os.kill(pid, 0)`. The real-binary smoke cannot exercise this branch
+  (a hung `claude` would itself hang the smoke), so the stub is the only
+  deterministic way to cover the §8 invariant — a regression that
+  drops `proc.kill()` would wedge every later test.
 
 Layer-marker wiring: `tests/layers.py::_PATH_DEFAULTS` gains the row
 `("tests/agent_smoke/", "agent_smoke")`, with a parametrized test in
@@ -69,12 +86,19 @@ REQUIREMENTS.md R1, so the two artifacts agree.
 
 ## How
 
-* **Hermetic by construction.** Four redirects, each closing a different
-  leak (the module docstring names them):
+* **Hermetic by construction.** Six redirects, each closing a different
+  leak:
   * the bridge fixture owns the recorder (T-W8:
     `tests/harness/bridge.py::AiohttpTransport` with
     `WireFormat.ANTHROPIC_MESSAGES`); the fixture's `_KEY` is the fixed
     dummy. No credential store is consulted.
+  * the inherited environment is filtered to strip the `ANTHROPIC_*` /
+    `CLAUDE_CODE_*` / `CLAUDECODE` key families — the same filter the tmux
+    E2E uses (`tests/integration/test_tmux_disconnect.py:140`). Without
+    this, an exported `ANTHROPIC_AUTH_TOKEN` hands the child a real
+    credential, `CLAUDE_CODE_USE_BEDROCK` / `_USE_VERTEX` redirects it off
+    the bridge onto a cloud backend, and `CLAUDECODE` makes the binary
+    treat the run as a nested session.
   * `HOME` → `tmp_path`: Claude Code keeps a fifth file, `~/.claude.json`,
     that it writes *outside* the `CLAUDE_CONFIG_DIR` it honours
     (`anthropics/claude-code#25762`); `HOME` is the coarse redirect that
@@ -87,6 +111,10 @@ REQUIREMENTS.md R1, so the two artifacts agree.
     uses this flag for its own hermetic runs
     (`tests/integration/test_tmux_disconnect.py:141`,
     `scripts/capture_corpus_t_c1.py:179`).
+  * `cwd` pinned to the temp tree, not the checkout: Claude Code loads
+    the project-level `CLAUDE.md` from the cwd, and a future root-level
+    `.claude/` directory with hooks would execute them unprompted under
+    `--dangerously-skip-permissions`.
 * **Binary discovery uses the same fallback chain kitty uses in
   production.** `kitty.launchers.discovery.discover_binary("claude")` is
   the production helper; §8.6 records that `~/.local/bin/claude` is not on
@@ -169,6 +197,9 @@ REQUIREMENTS.md R1, so the two artifacts agree.
 - One new test file in a new directory; one row in `_PATH_DEFAULTS`; one
   parametrized case in `test_layer_markers.py`; one package docstring.
   Three files, all surgical, none invasive.
+- Five tests in the new file: the smoke, two missing-binary
+  falsifications (override + default branches), an override-seam
+  positive control, and a timeout-kill test.
 - The capture assertion checks the request path (`/v1/messages`) and the
   shape of the inbound body (`messages` array, role `user`) on **at least
   one** capture, and does not pin the count. It does NOT re-prove what
@@ -192,6 +223,21 @@ REQUIREMENTS.md R1, so the two artifacts agree.
   Claude Code `-p` mode makes more than one POST per turn (a
   session-title-generation call precedes the user reply), so the
   capture-count assertion is `>= 1` with the user turn pinned by content.
+- **Review-bot findings, applied 2026-09-21:** six findings, four warnings
+  and two suggestions. (i) `_hermetic_env` originally inherited the
+  ambient env; now filters `ANTHROPIC_*` / `CLAUDE_CODE_*` / `CLAUDECODE`
+  matching the tmux E2E. (ii) The missing-binary falsification only drove
+  the override branch; factored `_resolve_default_binary` and added a
+  second case for the default branch. (iii) The module docstring
+  overstated coverage ("the first merge exercises the test in the
+  `agent_live` test runner"); rewritten to state the truth — no runner
+  in the tree selects `agent_smoke` until T-K10 — with the
+  bidirectional checks at `tests/layers.py::unaccounted_layers` and
+  `stale_pending_layers` named as the mechanism that keeps the debt
+  registered. (iv) The timeout-kill branch was uncovered; added
+  `TestTimeoutKill` driven by a stub that records its own PID. (v) Dropped
+  the unused `env=` parameter on `_claude_binary`. (vi) `cwd` is now
+  pinned to the temp tree rather than the checkout.
 - Step index regenerated 2026-09-21; dependency graph validates
   (`depends_on: KBR-31, KBR-32, KBR-43, KBR-216`, all Done);
   `scripts/regenerate_step_index.py` exits 0.

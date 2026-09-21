@@ -76,10 +76,14 @@ a permissions-shaped test belongs elsewhere.
 **Layer.** No ``pytestmark``; the path default from
 ``tests/layers.py::_PATH_DEFAULTS`` (row ``tests/agent_smoke/``) carries
 the ``agent_smoke`` marker, following the T-J1 rule that a new
-directory adds a row rather than a marker to each of its files. The
-first merge exercises the test under ``pytest -m agent_smoke`` and in
-the ``agent_live`` test runner; the per-PR gate that *positively*
-selects ``agent_smoke`` is plan task T-K10 (KBR-119, currently To Do).
+directory adds a row rather than a marker to each of its files. Until
+plan task T-K10 (KBR-119, currently To Do) activates the per-PR gate,
+**no runner in the tree selects this category** — the tests run only
+when a developer explicitly invokes ``pytest -m agent_smoke``. That
+debt is registered, not silent: ``PENDING_ACTIVATION_LAYERS["agent_smoke"]``
+names T-K10, and the bidirectional checks at
+``tests/layers.py::unaccounted_layers`` and ``stale_pending_layers``
+hold the registry to the tree.
 """
 
 from __future__ import annotations
@@ -88,7 +92,7 @@ import asyncio
 import contextlib
 import json
 import os
-from collections.abc import Mapping
+import sys
 from pathlib import Path
 
 import pytest
@@ -108,17 +112,15 @@ _PROMPT = "Reply with the single word: ready"
 _TURN_TIMEOUT_SECONDS = 60.0
 
 
-def _claude_binary(env: Mapping[str, str] | None = None) -> Path:
+def _claude_binary() -> Path:
     """Return the Claude Code binary, or fail the test naming the lookup.
 
-    Args:
-        env: The environment to read, defaulting to :data:`os.environ`.
-            ``KITTY_AGENT_SMOKE_BINARY``, when set to an existing file
-            path, overrides the lookup entirely — that is the seam the
-            falsification case below drives, and the only way to
-            simulate a missing binary deterministically (poisoning
-            ``PATH`` cannot, because :func:`discover_binary` falls back
-            to ``~/.local/bin``, where the real binary sits).
+    ``KITTY_AGENT_SMOKE_BINARY``, when set in the environment to an
+    existing file path, overrides the lookup entirely — that is the seam
+    the falsification case below drives, and the only way to simulate a
+    missing binary deterministically (poisoning ``PATH`` cannot, because
+    :func:`discover_binary` falls back to ``~/.local/bin``, where the
+    real binary sits).
 
     Returns:
         The resolved path to the ``claude`` executable.
@@ -128,8 +130,7 @@ def _claude_binary(env: Mapping[str, str] | None = None) -> Path:
             fallback chain that was searched, so a CI log reader can
             tell "install failed" from "wrong binary".
     """
-    environment = os.environ if env is None else env
-    override = environment.get("KITTY_AGENT_SMOKE_BINARY")
+    override = os.environ.get("KITTY_AGENT_SMOKE_BINARY")
     if override:
         path = Path(override)
         if path.is_file():
@@ -140,7 +141,7 @@ def _claude_binary(env: Mapping[str, str] | None = None) -> Path:
             f"be falsified deterministically; point it at the real "
             f"binary or unset it."
         )
-    binary = discover_binary("claude")
+    binary = _resolve_default_binary()
     if binary is None:
         pytest.fail(
             "the Claude Code CLI was not found on PATH or in the platform "
@@ -152,14 +153,38 @@ def _claude_binary(env: Mapping[str, str] | None = None) -> Path:
     return binary  # type: ignore[no-any-return]
 
 
+def _resolve_default_binary() -> Path | None:
+    """Return the production binary lookup, as a mockable seam.
+
+    Returns:
+        Whatever :func:`kitty.launchers.discovery.discover_binary` finds
+        for ``claude``, or ``None`` when nothing is found. Its own
+        function rather than an inline call so the
+        real-missing-binary falsification can monkeypatch it: poisoning
+        ``PATH`` cannot reach the fallback chain, so the absence of a
+        binary is only simulatable at this boundary.
+
+    Raises:
+        Nothing: :func:`discover_binary` returns ``None`` rather than
+            raising.
+    """
+    return discover_binary("claude")  # type: ignore[no-any-return]
+
+
 def _hermetic_env(home: Path, config_dir: Path, base_url: str) -> dict[str, str]:
     """Build the child environment for one hermetic turn against ``base_url``.
 
-    Three redirects, each closing a different leak — see the module
-    docstring's "Hermetic by construction" section for the rationale of
-    each. The fourth redirect (``ANTHROPIC_BASE_URL``) is the bridge
-    loopback itself, which the smoke is *about* rather than a leak to
-    close.
+    The child inherits the machine's basics (``PATH`` for its node
+    runtime, locale, temp dirs) but **not** the invoking shell's own
+    Anthropic / Claude configuration. The filter strips the same families
+    the tmux E2E strips (``tests/integration/test_tmux_disconnect.py:140``):
+    an exported ``ANTHROPIC_AUTH_TOKEN`` would hand the child a real
+    credential, ``CLAUDE_CODE_USE_BEDROCK`` / ``CLAUDE_CODE_USE_VERTEX``
+    would redirect it off the bridge onto a cloud backend, and the
+    ``CLAUDECODE`` marker would make the binary treat this run as a
+    nested session. On top of the filtered base, four redirects close
+    the remaining leaks — see the module docstring's
+    "Hermetic by construction" section for the rationale of each.
 
     Args:
         home: The fresh directory to hand ``HOME``, so ``~/.claude.json``
@@ -170,12 +195,19 @@ def _hermetic_env(home: Path, config_dir: Path, base_url: str) -> dict[str, str]
             :attr:`~harness.bridge.BridgeFixture.base_url`.
 
     Returns:
-        An environment suitable for :func:`asyncio.create_subprocess_exec`.
-        Inherited on purpose — the binary needs ``PATH`` for its node
-        runtime — with the five overrides layered on top and a dummy
-        key standing in for a credential.
+        An environment suitable for :func:`asyncio.create_subprocess_exec`,
+        with the five overrides layered on top and a dummy key standing
+        in for a credential.
     """
-    env = os.environ.copy()
+    # The filter is prefix-based on purpose: Claude Code's documented
+    # surface grows faster than any explicit list would track, and a new
+    # `ANTHROPIC_*` or `CLAUDE_CODE_*` variable arriving in the shell
+    # must not silently redirect the child.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDECODE"))
+    }
     env["ANTHROPIC_BASE_URL"] = base_url
     # A fixed dummy value, matching the bridge fixture's own `_KEY` shape:
     # the bridge does not validate the inbound key, and the recorder is
@@ -187,12 +219,17 @@ def _hermetic_env(home: Path, config_dir: Path, base_url: str) -> dict[str, str]
     return env
 
 
-async def _run_one_turn(binary: Path, env: dict[str, str]) -> tuple[int, str, str]:
+async def _run_one_turn(binary: Path, env: dict[str, str], cwd: Path) -> tuple[int, str, str]:
     """Spawn the binary for one non-interactive turn and collect the output.
 
     Args:
         binary: The resolved Claude Code executable.
         env: The child environment, from :func:`_hermetic_env`.
+        cwd: The directory to run the binary in. Deliberately **not** the
+            checkout: Claude Code loads the project-level ``CLAUDE.md``
+            from the cwd, and a future root-level ``.claude/`` directory
+            with hooks would execute them unprompted under
+            ``--dangerously-skip-permissions``.
 
     Returns:
         ``(returncode, stdout, stderr)`` after the process exits. The
@@ -212,6 +249,7 @@ async def _run_one_turn(binary: Path, env: dict[str, str]) -> tuple[int, str, st
         _PROMPT,
         "--dangerously-skip-permissions",
         env=env,
+        cwd=str(cwd),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -292,7 +330,7 @@ class TestAgentStartupSmoke:
 
         async with BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as fixture:
             env = _hermetic_env(home, config_dir, fixture.base_url)
-            returncode, stdout, stderr = await _run_one_turn(binary, env)
+            returncode, stdout, stderr = await _run_one_turn(binary, env, home)
             captures = list(fixture.captures)
 
         # Evidence on the exit, before evidence on the capture: a
@@ -330,15 +368,25 @@ class TestMissingBinaryFalsification:
     TEST_SUITE.md §8 line 4537 names the pattern: a detector is a
     detector only if *restoring the defect turns it red*. The defect
     here is :func:`_claude_binary` failing (not skipping) when no
-    binary is found. :func:`kitty.launchers.discovery.discover_binary`
-    falls back to ``~/.local/bin``, where the real binary sits, so
-    poisoning ``PATH`` cannot simulate the absence — which is why
-    :func:`_claude_binary` takes the ``KITTY_AGENT_SMOKE_BINARY``
-    override: it is the seam that makes this case automatable, and the
-    only one that does.
+    binary is found. Two cases, because two branches can carry the
+    defect:
+
+    * the **override branch** — ``KITTY_AGENT_SMOKE_BINARY`` names a
+      path that does not exist;
+    * the **default branch** — :func:`_resolve_default_binary` returns
+      ``None``, which is what a machine with no installed binary
+      actually reaches.
+
+    Neither is drivable by poisoning ``PATH``: ``discover_binary``
+    falls back to ``~/.local/bin``, where the real binary sits. The
+    override branch is drivable through the env var; the default
+    branch only through monkeypatching :func:`_resolve_default_binary`
+    at its own boundary. A refactor that turns *either* ``pytest.fail``
+    into ``pytest.skip`` — the §8 rule's exact forbidden shape — turns
+    its case red.
     """
 
-    def test_a_missing_binary_fails_rather_than_skips(
+    def test_a_missing_override_fails_rather_than_skips(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Point the override at a nonexistent path; ``pytest.fail`` must fire.
@@ -368,3 +416,74 @@ class TestMissingBinaryFalsification:
         fake_binary.touch()
         monkeypatch.setenv("KITTY_AGENT_SMOKE_BINARY", str(fake_binary))
         assert _claude_binary() == fake_binary
+
+    def test_a_truly_missing_binary_fails_rather_than_skips(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Drive the default branch to ``None``; ``pytest.fail`` must fire.
+
+        This is the branch a machine with genuinely no installed binary
+        reaches. Monkeypatching :func:`_resolve_default_binary` is the
+        only deterministic way to reach it — on this box (and any CI
+        runner the install step provisions) a real ``claude`` exists, so
+        unpatched execution would never get past the lookup.
+
+        Args:
+            monkeypatch: Pytest's monkeypatch fixture, replacing the
+                lookup for the duration of this test.
+        """
+        monkeypatch.setattr(
+            "agent_smoke.test_claude_startup._resolve_default_binary",
+            lambda: None,
+        )
+        with pytest.raises(pytest.fail.Exception, match="was not found"):
+            _claude_binary()
+
+
+class TestTimeoutKill:
+    """The timeout-kill branch of :func:`_run_one_turn`, driven end to end.
+
+    A hung binary must be killed before the test fails, or the hung
+    child survives the test to wedge the runner and leak processes into
+    every later test. No test here exercises that branch through the
+    real binary — a hung ``claude`` would itself hang the smoke — so
+    the branch is driven with a stub executable and a shrunk timeout.
+    The stub records its own PID before sleeping; the assertion reads
+    that PID and proves the process is reaped, which is the guarantee
+    the branch exists for.
+    """
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="drives a /bin/sh script, which the POSIX paths assume")
+    def test_a_hung_binary_is_killed_before_the_test_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Let a stub sleep past a shrunk timeout; the child must be reaped.
+
+        Args:
+            tmp_path: Pytest's per-test temp directory, hosting the
+                stub, its PID file, and the ``cwd`` the helper runs it
+                in.
+            monkeypatch: Pytest's monkeypatch fixture, shrinking
+                :data:`_TURN_TIMEOUT_SECONDS` for this test only.
+        """
+        monkeypatch.setattr("agent_smoke.test_claude_startup._TURN_TIMEOUT_SECONDS", 1.0)
+
+        # The stub ignores every argument the helper passes (its -p, the
+        # prompt, the permissions flag) and sleeps long enough that a
+        # correct timeout always fires first. It writes its own PID
+        # before sleeping, so the assertion can check that specific
+        # process — not "some sleep somewhere" — is gone.
+        pid_file = tmp_path / "stub-pid"
+        stub = tmp_path / "sleepy-stub"
+        stub.write_text(f"#!/bin/sh\necho $$ > '{pid_file}'\nexec sleep 30\n")
+        stub.chmod(0o755)
+
+        with pytest.raises(pytest.fail.Exception, match="did not finish"):
+            asyncio.run(_run_one_turn(stub, dict(os.environ), tmp_path))
+
+        # `os.kill(pid, 0)` sends no signal; it raises ProcessLookupError
+        # exactly when the process no longer exists. That is the
+        # strongest statement available of "the child was reaped".
+        pid = int(pid_file.read_text().strip())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
