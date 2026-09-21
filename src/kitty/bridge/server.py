@@ -7649,6 +7649,25 @@ class BridgeServer:
                         if stream_error:
                             if events_emitted:
                                 logger.warning("Gemini stream error after client events emitted; not retrying")
+                                # KBR-99 (S10): the one silent arm gets its terminal
+                                # diagnostic. The route's own KBR-247 convention — a
+                                # single `{"error": ...}` SSE data event, then EOF —
+                                # is what every sibling exhaustion arm writes; leaving
+                                # this arm silent made a Gemini CLI session see the
+                                # stream just stop (status="incomplete", no event).
+                                # The stream-error cooldown was already charged at
+                                # detection; no retry and no failover, per Q14(a).
+                                error_payload = {
+                                    "error": {
+                                        "code": 502,
+                                        "message": "Upstream provider sent an error after the response had begun",
+                                    }
+                                }
+                                error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                                try:
+                                    await sr.write(error_sse.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug("Client disconnected before error could be sent")
                                 break
                             if attempt < max_attempts - 1:
                                 translator.reset()  # F22: clear stale tool buffers

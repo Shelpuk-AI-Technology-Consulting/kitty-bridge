@@ -553,6 +553,72 @@ class TestGridOracleFalsification:
         _assert_no_duplicated_content(once, "kbr-tb4")
 
 
+# ── Fix R2 — Gemini terminal diagnostic on post-content in-stream error ──
+
+
+async def _drive_gemini(port: int) -> bytes:
+    """POST a streaming Gemini request and return the raw client body."""
+    async with (
+        aiohttp.ClientSession() as session,
+        session.post(
+            f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent",
+            json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp,
+    ):
+        return await resp.read()
+
+
+class TestGeminiInStreamErrorExhaustionFix:
+    """R2: ``_stream_gemini``'s exhaustion arm writes a terminal diagnostic.
+
+    SYSTEM_DESIGN §5.3 S10 closes the only silent arm: when an in-stream
+    error surfaces after the request has written, the turn ends in one
+    ``data: {"error": {"code": 502, "message": ...}}`` SSE event and EOF —
+    the route's own KBR-247 convention. Before the fix the arm logs and
+    breaks and the stream simply stops (status="incomplete", no event);
+    the red assertion expects the terminal event.
+    """
+
+    @pytest.mark.asyncio
+    async def test_gemini_in_stream_error_after_content_writes_one_error_event(
+        self,
+        fast_stall,
+        short_grace,  # noqa: F811 — fixture shadowing the module-level import
+    ) -> None:
+        async def _content_then_in_stream_error(request: web.Request, _ordinal: int) -> web.StreamResponse:
+            resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await resp.prepare(request)
+            await resp.write(_CC_CONTENT_CHUNK)
+            await resp.write(_CC_IN_STREAM_ERROR)
+            await resp.write_eof()
+            return resp
+
+        upstream = _Upstream(
+            "/v1/chat/completions",
+            _content_then_in_stream_error,
+        )
+        async with upstream as base_url:
+            server = _balancing_protocol_server(base_url, _GeminiLauncher())
+            port = await server.start_async()
+            try:
+                client_body = await _drive_gemini(port)
+            finally:
+                await server.stop_async()
+
+        assert upstream.requests == 1
+        text = client_body.decode()
+        # Exactly one error data line with the route's terminal discriminator.
+        error_lines = [
+            line for line in text.splitlines()
+            if line.startswith("data:") and '"error"' in line
+        ]
+        assert len(error_lines) == 1, (
+            f"expected exactly one Gemini terminal error event, got {len(error_lines)}: {text!r}"
+        )
+        assert '"code": 502' in error_lines[0]
+
+
 class TestPostEmissionTimeoutEndings:
     """A read timeout after content ends the turn per Q14(a) — no second attempt.
 
