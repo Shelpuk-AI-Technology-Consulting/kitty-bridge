@@ -24,9 +24,16 @@ Both were written through kitty's own stores (`CredentialStore.set` +
 `ProfileStore.save` — base64 + 0600 + atomic writes, not hand-edited JSON), a
 digest round-trip confirms the values survive the encode, and both pass
 kitty's own pre-flight (`validate_api_key`) with `valid=True` and
-`warning=None` — the empty-warning state proves the upstream was reached
-(`validate_api_key` returns `valid=True` *with* a non-empty warning on
-timeout or connection error, so `warning is None` is the auth evidence).
+`warning=None`. Scope of that evidence, precisely: the empty-warning state
+rules out the timeout / connection-error paths (`validate_api_key` returns
+`valid=True` *with* a non-empty warning there), so the upstream was reached
+and the probe was not rejected as 401/403 — but for `opencode_go` the probe
+itself is rejected pre-auth (400 MissingSessionID: the CC key-probe carries
+no `x-opencode-session` header, owner-replicated 2026-09-21), so pre-flight
+proves **reachability**, not key authentication, on that adapter. The
+key-authentication evidence for both profiles lives in the owner's KBR-252
+live session (real model calls, outcomes recorded on that ticket), not in
+`validate_api_key`.
 Neither profile is a member of any balancing pool and neither is default, so
 paid credits burn only in an explicitly launched probe session — with the
 caveat that "not default" is a current-state property, not an invariant:
@@ -98,9 +105,22 @@ fork PRs. The live-verify sessions KBR-246 / KBR-252 need are different:
   defaults `False` (the only overrides are `bedrock` / `ollama_cloud` /
   `openai_subscription`), so `validate_api_key` actually runs for `anthropic`
   and `opencode_go`. Pre-flight for both new profiles therefore posts a real
-  request and `valid=True` with `warning=None` is genuine auth proof. Noted
+  request; `valid=True` with `warning=None` proves the upstream was reached
+  and the probe was not 401/403 — for `anthropic` that is authentication
+  evidence, while for `opencode_go` the probe is rejected pre-auth (400
+  MissingSessionID) so it proves reachability only (see the What paragraph).
+  Noted
   here as an observation; a docstring fix is **not this ticket's scope** —
   flag with the owner if you want it ticketed.
+
+- **Real key state after provisioning (owner-verified, 2026-09-21).** Both
+  credentials exist and decode to the keys the KBR-252 owner session used,
+  but neither account was immediately probe-ready: the first-party Anthropic
+  account is usage-capped until 2026-10-01 (400 on every request) and
+  `opencode-go`'s subscription gate rejects model-route requests (403) —
+  owner-recorded on KBR-252 from its live session. This confirms §8.7's
+  gate framing empirically: keys present and validate-clean is necessary
+  but not sufficient for the verification tickets to run.
 
 - **Runbook — rotation, reprovision, cleanup.** On key rotation: revoke at
   the provider console, then drop the existing profile via `kitty profile`'s
