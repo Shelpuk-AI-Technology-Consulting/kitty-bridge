@@ -795,17 +795,81 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   the helper exists in this handler — the KBR-287/293 empty arms omit it
   too, and a dead client plus a broken upstream burns the ~60 s ladder.
   Recorded so the omission can be revisited as a cross-cutting pass over
-  all four custom segments. **Non-streaming residual, out of scope:** the
-  non-streaming `/v1/messages` × custom-transport path (through
-  `_request_with_retry`) still returns the empty response for
-  `translate_response` to dress in fallback text and still marks the
-  backend healthy on success — pre-existing, a separate defect class from
-  the streaming silent turn; KBR-297 is scoped to the **streaming**
-  custom segment only, so the "last streaming leg" claim stays honest.
-  Tests: `tests/bridge/test_messages_custom_transport_empty_hold.py`
+  all four custom segments. The non-streaming `/v1/messages` × custom-transport
+  residual this paragraph used to record as out of scope is closed by KBR-298
+  below. Tests: `tests/bridge/test_messages_custom_transport_empty_hold.py`
   (the KBR-287/293 harness shape; content oracles parsed from Messages-API
   events, never raw substrings; `_EMPTY_ASSISTANT_FALLBACK_TEXT` absence
   asserted explicitly as the fabricated-text defect).
+- **KBR-298 closed the non-streaming `/v1/messages` × custom-transport cell —
+  the residual KBR-297 recorded here as out of scope.** Ticket correction
+  recorded, same shape as KBR-297's: the pre-fix wire did not deliver a
+  silent turn either. `_request_with_retry`'s built-in empty ladder
+  (single-backend: `len(_EMPTY_RETRY_DELAYS) + len(_EMPTY_FINAL_DELAYS) + 1`
+  attempts; balancing: `n_backends`, empties never marking a backend
+  unhealthy) already retried a judged-empty completion, and its exhaustion
+  arm returned the empty response by design (grep anchor: "translator will
+  add fallback text") — which the handler, with no emptiness gate, handed to
+  `translate_response`'s defensive fallback. The client received a
+  **fabricated** `_EMPTY_ASSISTANT_FALLBACK_TEXT` reply as a `200`,
+  `_log_usage` billed it, and `_mark_backend_healthy` kept the broken
+  upstream in rotation. The fix: in `_handle_messages`' translated arm — the
+  `else:` branch of the `cc_response.get("type") == "message"` check, so a
+  native Messages reply (and its D3 truncation 400) is structurally
+  unreachable — the parsed `cc_response` is judged through
+  `BridgeServer._is_empty_cc_response` (the KBR-285 lockstep whole-response
+  judge, KBR-297's streaming twin) **before** `translate_response`, gated on
+  `self._active_provider.use_custom_transport`. Content-bearing → translate +
+  respond, unchanged. Judged-empty → the route's D4 terminal as a
+  non-streaming JSON error: `web.json_response` with
+  `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"`, HTTP `502` —
+  **no** `_log_usage`, **no** `_mark_backend_healthy` on a judged-empty
+  completion. Three decisions the design review settled:
+  - *Judge after the ladder, not per attempt.* The non-streaming route's
+    retry structure already walks the empty ladder inside
+    `_request_with_retry`; the ticket says to mirror that walk and invent no
+    second ladder. The judge sits after the walk returns, where it can only
+    see a content-bearing reply or the exhausted empty one — unlike the
+    streaming twin's per-attempt pre-emit judge, because the non-streaming
+    branch is atomic per attempt by construction
+    (`_make_upstream_request` → `provider.make_request` returns one complete
+    response or raises).
+  - *Status 502, decided against the route's non-streaming error contract.*
+    The route's non-streaming statuses are 400 (malformed input, D3
+    truncation), the preserved upstream status (`UpstreamError`), 500
+    (unknown exceptions) — none covers "the upstream answered, with nothing
+    usable, on every attempt", the canonical 502 case. Route-internal
+    consistency agrees: this route's streaming D4 (the plain
+    `empty_no_finish` arm and KBR-297's custom segment alike) is bare-JSON
+    502 with the same `reason: "empty_response"` discriminator, so one
+    client branch, `(502, reason=empty_response)`, covers the route in both
+    stream modes. Claude Code's Messages client retries any 5xx, so 502 vs
+    500 changes no retry behaviour — the choice is semantic.
+  - *Custom-transport gate only.* The ticket scopes the cell. The raw-CC ×
+    non-streaming cell has the same post-ladder shape — the ticket
+    attributed it to KBR-277, but KBR-277 widened only the
+    `reasoning_content` predicate and left the exhaustion terminal
+    untouched — so it stays open here and is filed as **KBR-300**; until
+    that lands, a `[custom, plain]` mixed pool whose both backends return
+    empty exhausts with the last-selected backend plain, the transport gate
+    does not fire, and the fabricated fallback ships (the pre-existing
+    behaviour, unchanged by KBR-298).
+  The reasoning-only accepted trade-off carries over (none of the three
+  custom parsers' non-streaming paths surface reasoning:
+  `BedrockAdapter.translate_from_upstream` reads only `text`/`toolUse`
+  blocks; `OllamaCloudAdapter` reads only `message.content` /
+  `message.tool_calls`; the subscription's `_parse_sse_to_response` reads
+  only text deltas and function-call items). The empty arm logs a
+  route-scoped `logger.warning` mirroring KBR-297's;
+  `_request_with_retry_single`'s own "returning fallback" line is left
+  unchanged — its wording remains accurate for the raw-CC sibling routes
+  KBR-298 leaves open. Tests:
+  `tests/bridge/test_messages_custom_transport_non_streaming_empty_hold.py`
+  (the KBR-287/293/297 harness shape; scripted raw upstream shapes fed
+  through the adapters' real non-streaming parsers; content oracles parsed
+  from the JSON response body, never raw substrings; the recording seam
+  captures `_log_usage` / `_mark_backend_healthy` so the empty-arm
+  guarantees are asserted, not assumed).
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule

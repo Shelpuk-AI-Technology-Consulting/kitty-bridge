@@ -5284,6 +5284,33 @@ class BridgeServer:
                 if truncation is not None:
                     return web.json_response(_d3_truncation_error_body(truncation), status=400)
                 result = cc_response
+            # KBR-298: judge the parsed cc_response from a use_custom_transport target
+            # before translate_response dresses it in fabricated fallback text. The empty
+            # ladder already walked inside _request_with_retry (its built-in walk — mirror
+            # the existing walk, invent no second ladder); the exhaust of that walk is a
+            # defined D4 terminal, not a fabricated assistant reply, and no usage is billed
+            # and no backend is marked healthy for a judged-empty completion. The gate sits
+            # in the translated arm, so a native Messages reply (the `if` above) is
+            # structurally unreachable here; the reasoning-only accepted trade-off
+            # KBR-287/293/297 pin carries over (none of the three custom parsers surfaces
+            # reasoning).
+            elif self._active_provider.use_custom_transport and self._is_empty_cc_response(cc_response):
+                logger.warning(
+                    "Messages non-streaming empty response on custom transport (%s), "
+                    "responding with the empty-response terminal",
+                    self._active_provider.provider_type,
+                )
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                            "reason": "empty_response",
+                        },
+                    },
+                    status=502,
+                )
             else:
                 result = translator.translate_response(cc_response, context=self._empty_response_context())
             self._audit_response_tool_use(result, collect_tool_schemas(body))
