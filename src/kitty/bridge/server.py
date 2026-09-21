@@ -376,6 +376,18 @@ def _validate_gemini_content(content: dict, index: int) -> None:
     translator treats it as an empty parts list — no turn is
     manufactured), and a present non-list value or non-dict member is
     rejected (KBR-288).
+
+    Args:
+        content: The Gemini ``Content`` object (``contents[index]``);
+            must already be a dict because ``_normalize_gemini_request``
+            validated that.
+        index: The position of *content* in the inbound ``contents``
+            list, used only to name the offending path on error.
+
+    Raises:
+        InvalidGeminiRequest: ``content["role"]`` is present and not a
+            string; or ``content["parts"]`` is present and not a list;
+            or a member of ``content["parts"]`` is not a dict.
     """
     pfx = f"contents[{index}]"
     if "role" in content and not isinstance(content["role"], str):
@@ -406,6 +418,22 @@ def _validate_gemini_part(part: dict, content_pfx: str, part_index: int) -> None
     ``functionResponse`` are required-when-present: a non-dict or a dict
     without a string ``name`` was silently skipped before KBR-288, and
     the §12.3 required-shape policy tightens the silent skip to a 400.
+
+    Args:
+        part: The Gemini ``Part`` object (``contents[index].parts[index]``);
+            must already be a dict because ``_validate_gemini_content``
+            validated that.
+        content_pfx: The path prefix naming *part* in error messages
+            (e.g. ``"contents[0]"``).
+        part_index: The position of *part* in the ``parts`` list, used
+            only to name the offending path on error.
+
+    Raises:
+        InvalidGeminiRequest: ``part["text"]`` is present and not a
+            string; or ``part["functionCall"]`` is present and not a
+            dict, or a dict without a string ``name``; or
+            ``part["functionResponse"]`` is present and not a dict, or a
+            dict without a string ``name``.
     """
     pfx = f"{content_pfx}.parts[{part_index}]"
     if "text" in part and not isinstance(part["text"], str):
@@ -443,6 +471,16 @@ def _validate_gemini_tools(body: dict) -> None:
     fuzzer finding KBR-288 closed), and every declaration must be a
     dict with a string ``name`` (translator's silent-skip tightened per
     §12.3 — a silent drop inside a required chain is an I1 fidelity hit).
+
+    Args:
+        body: The validated Gemini request body (a dict); only
+            ``body["tools"]`` is consulted.
+
+    Raises:
+        InvalidGeminiRequest: ``body["tools"]`` is a list and one of
+            its members is not a dict; or a member's ``functionDeclarations``
+            is present and not a list; or a declaration is not a dict,
+            or a dict without a string ``name``.
     """
     if "tools" not in body:
         return

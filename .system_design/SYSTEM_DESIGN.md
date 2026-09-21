@@ -1492,8 +1492,10 @@ absence (`content.get("parts", [])` handles it), and requiring the key would
 turn") is about a *present-but-wrong-typed* `parts` being silently treated
 as absent — not about the key's absence.
 
-Helpers (`_require_list`, `_require_dict`) keep the call sites readable. Each
-helper carries a one-line test pinning both the OK shape and a malformed shape.
+Helpers (`_validate_gemini_content`, `_validate_gemini_part`,
+`_validate_gemini_tools`) keep the call sites readable. Each helper is
+covered by route-level L2 pins in `tests/test_route_preflight.py`
+(per-shape `assert status == 400` plus the dialect-envelope check).
 
 **Ordering dependency (verified):** validation runs first in `_handle_gemini`
 — normalizer, then translate, truncate, compaction, size check — so no 400 can
@@ -1508,8 +1510,9 @@ fuzzer's distribution is the only producer.
 - `tests/test_route_preflight.py` (L2) — per-protocol pins; the Gemini rows carry
   every To Be-table row of §12.4 with a positive control on `:generateContent`,
   plus one tightening shape and one crash-class shape on `:streamGenerateContent`
-  (the shared-handler proof), asserting `error.code` is the schema-int `400`,
-  `error.status == "INVALID_ARGUMENT"`, and no traceback leak.
+  (the shared-handler proof), asserting HTTP `status == 400`, `error.code` is
+  an integer (any int — a regression writing `code: 500` over HTTP 400 would
+  still pin), `error.status == "INVALID_ARGUMENT"`, and no traceback leak.
 - `tests/test_openapi_conformance.py` (L2) — the schemathesis conformance run; the
   discoverer. The 400 envelope is schema-documented so widening the normalizer does
   not introduce an undocumented status.
