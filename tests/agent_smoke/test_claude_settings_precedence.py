@@ -31,7 +31,9 @@ sentinel serves as the winner in at least one run — without the
 controls, a typo in A's URL reads as a pass because A is *supposed*
 to be silent in Main and Control 1, and a broken A is silent too.
 A wrong-precedence binary fails Main with one of the sentinels as
-the winner, and the controls then narrow the diagnosis.
+the winner, and the controls then narrow the diagnosis. The diagnostic
+message names the fixture that captured — the destination that
+captured is named in the failure.
 
 **L4 rationale.** A precedence order is a fact about Claude Code, not
 kitty code; the only observable surface is the real binary's
@@ -54,16 +56,10 @@ Code implementation detail that today's binary happens to share.
 parameter this task added). The bridge fixture is shared with
 :mod:`harness.bridge`. The ``agent_smoke`` marker is inherited from
 the ``tests/agent_smoke/`` path default (``tests/layers.py``); no
-``pytestmark`` on this file, per the T-J1 rule.
-
-**Hermeticity.** T-I5's posture, unchanged: four redirects (``HOME``,
-``CLAUDE_CONFIG_DIR``, ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1``,
-``ANTHROPIC_BASE_URL``), one ``cwd`` pin to the temp tree, one env-key
-filter stripping the ``ANTHROPIC_*`` / ``CLAUDE_CODE_*`` / ``CLAUDECODE``
-/ proxy / node-runtime families. The ``ANTHROPIC_BASE_URL`` redirect
-carries sentinel A's URL — the T-I5 helper is parameterised, so the
-same function reaches a different destination for the precedence
-runs.
+``pytestmark`` on this file, per the T-J1 rule. The canonical
+hermeticity posture lives in T-I5's module docstring
+(``tests/agent_smoke/test_claude_startup.py``) — four redirects, one
+cwd pin, one env-key filter — and is not restated here.
 
 **Layer.** No runner in the tree selects ``agent_smoke`` until T-K10
 lands (KBR-119, To Do). Until then, the tests run only when a
@@ -75,6 +71,7 @@ names T-K10.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from harness.bridge import BridgeFixture, transport
@@ -86,12 +83,6 @@ from agent_smoke.test_claude_startup import (
     _hermetic_env,
     _run_one_turn,
 )
-
-#: The one prompt each run drives. Same shape as T-I5's :data:`_PROMPT` —
-#: answerable from the canned recorder reply, no tool call, no long
-#: context, so a slow or chatty binary still finishes inside the smoke
-#: timeout.
-_PROMPT = "Reply with the single word: ready"
 
 
 def _write_session_settings_file(path: Path, base_url: str) -> None:
@@ -122,156 +113,70 @@ def _write_global_settings_file(path: Path, base_url: str) -> None:
     Args:
         path: The file location, ``$CLAUDE_CONFIG_DIR/settings.json``.
         base_url: The bridge URL the global settings should target —
-            i.e. sentinel B in Main and Control 1.
+            i.e. sentinel B in Main, the winner in Control 1.
     """
     path.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": base_url}}), encoding="utf-8")
 
 
-async def _three_fixtures_up() -> tuple[BridgeFixture, BridgeFixture, BridgeFixture]:
-    """Bring up the recorder, sentinel A and sentinel B on independent ports.
+def _loser_labels() -> tuple[str, str]:
+    """Return the canonical ``(loser-A, loser-B)`` labels for diagnostics.
 
     Returns:
-        A three-tuple ``(recorder, sentinel_a, sentinel_b)`` of started
-        :class:`BridgeFixture`s. All three are bound to independent
-        ephemeral loopback ports before the function returns — so a
-        ``claude`` connect attempt inside the next turn never sees a
-        half-up destination. The caller owns the teardown: the test
-        methods' ``finally`` blocks stop all three, in the same order
-        they were started, so a half-up start inside this function
-        leaves the earlier fixtures running for the ``finally`` to
-        release.
+        Two human-readable names that name the destination, not the
+        position in a tuple, so a failure on a different fixture than
+        the one named by position reads with the right destination.
     """
-    recorder = BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES))
-    sentinel_a = BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES))
-    sentinel_b = BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES))
-    # Sequential starts, not concurrent: a start failure in the second
-    # or third fixture would leave the first bound if the starts raced.
-    await recorder.start()
-    await sentinel_a.start()
-    await sentinel_b.start()
-    return recorder, sentinel_a, sentinel_b
+    return ("sentinel A (env)", "sentinel B (global settings)")
 
 
-async def _run_turn_and_assert_winner(
+async def _run_precedence_turn(
     *,
     tmp_path: Path,
     binary: Path,
-    recorder: BridgeFixture,
-    sentinel_a: BridgeFixture,
-    sentinel_b: BridgeFixture,
-    extra_args: tuple[str, ...] = (),
-    write_global_settings: bool = True,
+    winner: BridgeFixture,
+    winner_label: str,
+    losers: Sequence[tuple[str, BridgeFixture]],
+    env_url: str,
+    extra_args: Sequence[str] = (),
+    global_settings_url: str | None = None,
 ) -> None:
-    """Run one turn and assert recorder wins, sentinels stay silent.
+    """Run one turn; assert the named winner captures, every loser stays silent.
 
     Args:
         tmp_path: The pytest-supplied temp directory, hosting both
             ``HOME`` and ``CLAUDE_CONFIG_DIR``.
         binary: The resolved Claude Code executable.
-        recorder: The fixture that should receive the user-turn POST.
-        sentinel_a: The fixture wired to ``ANTHROPIC_BASE_URL`` in the
-            child env. Expected to capture nothing.
-        sentinel_b: The fixture wired to ``env.ANTHROPIC_BASE_URL`` in
-            ``$CLAUDE_CONFIG_DIR/settings.json``. Expected to capture
-            nothing.
+        winner: The fixture that should receive the user-turn POST.
+        winner_label: Human-readable name of the winning destination,
+            used in assertion messages.
+        losers: ``(label, fixture)`` pairs for every destination
+            expected to capture nothing. Labels name the destination
+            (e.g. ``"sentinel A (env)"``), not the position in a tuple.
+        env_url: The ``ANTHROPIC_BASE_URL`` value in the child env.
+            For Main and both controls this is sentinel A's URL —
+            the env is one of three sources, and the others win.
         extra_args: Additional CLI args appended to ``claude`` after
             ``--dangerously-skip-permissions``. Main passes
-            ``("--settings", <path>)``; controls pass an empty tuple.
-        write_global_settings: When ``True``, writes
-            ``$CLAUDE_CONFIG_DIR/settings.json`` pointing at sentinel B.
-            When ``False``, the file is absent (Control 2's condition).
+            ``("--settings", <path>)``; both controls pass an empty
+            tuple.
+        global_settings_url: When set, writes
+            ``$CLAUDE_CONFIG_DIR/settings.json`` pointing at this URL.
+            ``None`` leaves the file absent (Control 2's condition).
 
     Raises:
-        AssertionError: When the winner captured nothing or either
-            sentinel captured anything.
+        AssertionError: When the winner captured nothing, or any
+            loser captured anything.
     """
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     config_dir = tmp_path / "claude-config"
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    if write_global_settings:
-        _write_global_settings_file(config_dir / "settings.json", sentinel_b.base_url)
-
-    env = _hermetic_env(home, config_dir, sentinel_a.base_url)
-    returncode, stdout, stderr = await _run_one_turn(binary, env, home, extra_args=extra_args)
-    diagnostic = f"exit={returncode} stdout={stdout[:400]!r} stderr={stderr[:400]!r}"
-
-    recorder_captures = list(recorder.captures)
-    sentinel_a_captures = list(sentinel_a.captures)
-    sentinel_b_captures = list(sentinel_b.captures)
-
-    user_captures = [
-        c for c in recorder_captures
-        if c.path == "/v1/messages" and _body_has_user_message(c.body)
-    ]
-    assert user_captures, (
-        f"the recorder captured {len(recorder_captures)} request(s) but "
-        f"none carried a user-role message on /v1/messages; "
-        f"A captured {len(sentinel_a_captures)}, B captured "
-        f"{len(sentinel_b_captures)}: {diagnostic}"
-    )
-    assert not sentinel_a_captures, (
-        f"sentinel A (env) captured {len(sentinel_a_captures)} request(s) "
-        f"but should have been silent under the precedence Claude Code "
-        f"documents: {diagnostic}"
-    )
-    assert not sentinel_b_captures, (
-        f"sentinel B (global settings) captured "
-        f"{len(sentinel_b_captures)} request(s) but should have been "
-        f"silent under the precedence Claude Code documents: {diagnostic}"
-    )
-
-
-async def _run_turn_and_assert_silent_loser(
-    *,
-    tmp_path: Path,
-    binary: Path,
-    winner: BridgeFixture,
-    losers: tuple[BridgeFixture, ...],
-    env_url: str,
-    extra_args: tuple[str, ...] = (),
-    write_global_settings: bool = True,
-    winner_label: str,
-) -> None:
-    """Run one turn and assert the named winner receives the user turn.
-
-    Args:
-        tmp_path: The pytest-supplied temp directory.
-        binary: The resolved Claude Code executable.
-        winner: The fixture that should receive the user-turn POST.
-        losers: The fixtures expected to capture nothing.
-        env_url: The ``ANTHROPIC_BASE_URL`` value in the child env.
-            For Control 2 this is sentinel A's URL (the env is the
-            winner); for Control 1 it is also sentinel A's URL (and
-            sentinel B wins via the global settings file).
-        extra_args: Additional CLI args for ``claude``. Both control
-            runs pass an empty tuple — ``--settings`` is absent on
-            purpose.
-        write_global_settings: Whether to write the
-            ``$CLAUDE_CONFIG_DIR/settings.json`` file. Control 2
-            passes ``False``.
-        winner_label: Human-readable name of the winning destination,
-            used in assertion messages only.
-
-    Raises:
-        AssertionError: When the winner captured nothing, any loser
-            captured anything, or ``--settings`` was passed when it
-            should have been absent.
-    """
-    home = tmp_path / "home"
-    home.mkdir(parents=True, exist_ok=True)
-    config_dir = tmp_path / "claude-config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    if write_global_settings:
-        # The global settings file's destination is whichever fixture is
-        # the winner in a control run (sentinel B in Control 1; absent
-        # in Control 2). The caller-supplied winner is that fixture.
-        _write_global_settings_file(config_dir / "settings.json", winner.base_url)
+    if global_settings_url is not None:
+        _write_global_settings_file(config_dir / "settings.json", global_settings_url)
 
     env = _hermetic_env(home, config_dir, env_url)
-    returncode, stdout, stderr = await _run_one_turn(binary, env, home, extra_args=extra_args)
+    returncode, stdout, stderr = await _run_one_turn(binary, env, home, extra_args=tuple(extra_args))
     diagnostic = f"exit={returncode} stdout={stdout[:400]!r} stderr={stderr[:400]!r}"
 
     winner_captures = list(winner.captures)
@@ -281,9 +186,10 @@ async def _run_turn_and_assert_silent_loser(
     ]
     assert user_captures, (
         f"the winner ({winner_label}) captured {len(winner_captures)} "
-        f"request(s) but none carried a user-role message on /v1/messages: {diagnostic}"
+        f"request(s) but none carried a user-role message on /v1/messages; "
+        f"loser captures: {[(label, len(list(f.captures))) for label, f in losers]}: {diagnostic}"
     )
-    for label, fixture in zip(("loser A", "loser B"), losers, strict=True):
+    for label, fixture in losers:
         loser_captures = list(fixture.captures)
         assert not loser_captures, (
             f"{label} captured {len(loser_captures)} request(s) but "
@@ -304,54 +210,56 @@ class TestSettingsPrecedence:
         settings) must capture nothing.
         """
         binary = _claude_binary()
-        # Create the temp tree before any helper writes into it —
-        # ``home/`` is where the session settings file lands, and the
-        # helper that writes it does not mkdir.
+        # Create ``home/`` before any helper writes into it — the
+        # session settings file lands at ``home/session-settings.json``
+        # and the writer does not mkdir.
         home = tmp_path / "home"
         home.mkdir(parents=True, exist_ok=True)
-        recorder, sentinel_a, sentinel_b = await _three_fixtures_up()
-        try:
+        async with (
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as recorder,
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as sentinel_a,
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as sentinel_b,
+        ):
             session_settings = home / "session-settings.json"
             _write_session_settings_file(session_settings, recorder.base_url)
-            await _run_turn_and_assert_winner(
+            await _run_precedence_turn(
                 tmp_path=tmp_path,
                 binary=binary,
-                recorder=recorder,
-                sentinel_a=sentinel_a,
-                sentinel_b=sentinel_b,
+                winner=recorder,
+                winner_label="the recorder (--settings)",
+                losers=zip(_loser_labels(), (sentinel_a, sentinel_b), strict=True),
+                env_url=sentinel_a.base_url,
                 extra_args=("--settings", str(session_settings)),
-                write_global_settings=True,
+                global_settings_url=sentinel_b.base_url,
             )
-        finally:
-            for fixture in (recorder, sentinel_a, sentinel_b):
-                await fixture.stop()
 
     async def test_control_1_global_settings_win(self, tmp_path: Path) -> None:
         """Without ``--settings``, the global settings file outranks env.
 
-        Same two losing fixtures as Main (recorder pointed at by env,
-        sentinel A pointed at by env), but ``--settings`` is absent
-        and sentinel B (the global-settings destination) wins.
+        ``--settings`` is absent; the global settings file points at
+        sentinel B (the winner); the env points at sentinel A. Recorder
+        and sentinel A must capture nothing.
         """
         binary = _claude_binary()
-        recorder, sentinel_a, sentinel_b = await _three_fixtures_up()
-        try:
-            # In Control 1 the global-settings file is the only writer,
-            # so its destination (sentinel B) is the winner. The other
-            # two fixtures (recorder, sentinel A) are losers.
-            await _run_turn_and_assert_silent_loser(
+        async with (
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as recorder,
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as sentinel_a,
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as sentinel_b,
+        ):
+            await _run_precedence_turn(
                 tmp_path=tmp_path,
                 binary=binary,
                 winner=sentinel_b,
-                losers=(recorder, sentinel_a),
+                winner_label="sentinel B (global settings)",
+                losers=zip(
+                    ("the recorder (no source points at it)", "sentinel A (env)"),
+                    (recorder, sentinel_a),
+                    strict=True,
+                ),
                 env_url=sentinel_a.base_url,
                 extra_args=(),
-                write_global_settings=True,
-                winner_label="sentinel B (global settings)",
+                global_settings_url=sentinel_b.base_url,
             )
-        finally:
-            for fixture in (recorder, sentinel_a, sentinel_b):
-                await fixture.stop()
 
     async def test_control_2_env_wins(self, tmp_path: Path) -> None:
         """Without ``--settings`` and without a global settings file, env wins.
@@ -364,18 +272,22 @@ class TestSettingsPrecedence:
         global scope and Claude Code.
         """
         binary = _claude_binary()
-        recorder, sentinel_a, sentinel_b = await _three_fixtures_up()
-        try:
-            await _run_turn_and_assert_silent_loser(
+        async with (
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as recorder,
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as sentinel_a,
+            BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as sentinel_b,
+        ):
+            await _run_precedence_turn(
                 tmp_path=tmp_path,
                 binary=binary,
                 winner=sentinel_a,
-                losers=(recorder, sentinel_b),
+                winner_label="sentinel A (env)",
+                losers=zip(
+                    ("the recorder (no source points at it)", "sentinel B (no file points at it)"),
+                    (recorder, sentinel_b),
+                    strict=True,
+                ),
                 env_url=sentinel_a.base_url,
                 extra_args=(),
-                write_global_settings=False,
-                winner_label="sentinel A (env)",
+                global_settings_url=None,
             )
-        finally:
-            for fixture in (recorder, sentinel_a, sentinel_b):
-                await fixture.stop()

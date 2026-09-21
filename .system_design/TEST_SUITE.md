@@ -2660,29 +2660,20 @@ Two distinct things, currently conflated, with different costs and different cad
 
 **What T-I5 settled.** T-I5 (KBR-97, PR #251, merged 2026-09-21)
 delivered the hermetic posture that the agent-boundary tests now
-inherit verbatim. The capture-count discovery — Claude Code in `-p`
-mode makes **more than one** `POST /v1/messages` per turn, a
-session-title-generation call precedes the user reply — is the
-reason the captures are pinned by content (`_body_has_user_message`)
-and not by count or index. The hermetic posture is **four redirects
-plus one cwd pin plus one env-key filter**: `HOME` → temp tree (so
-`~/.claude.json` writes land there, since the binary keeps that file
-outside `CLAUDE_CONFIG_DIR` per `anthropics/claude-code#25762`),
-`CLAUDE_CONFIG_DIR` → temp tree (the documented fine redirect for
-"settings / history / plugins"), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
-(kills statsig / sentry / update traffic), `ANTHROPIC_BASE_URL` →
-the recorder's URL, **cwd pinned to the temp tree** (so the binary
-loads neither the checkout's `CLAUDE.md` nor any future root-level
-`.claude/` hook directory), and one env-key filter stripping the
-`ANTHROPIC_*` / `CLAUDE_CODE_*` / `CLAUDECODE` / `HTTP_PROXY` /
-`HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` / `NODE_OPTIONS` /
-`NODE_EXTRA_CA_CERTS` families. Two falsification seams carry the
-KBR-132 shape: `KITTY_AGENT_SMOKE_BINARY` (env override) and the
-factored `_resolve_default_binary()` (default branch); both must
-produce `pytest.fail`, never `pytest.skip`, when the binary is
-absent. T-I5's step file (`.system_design/steps/t_i5_agent_startup_smoke.md`)
-is the implementation notes of record; this paragraph is the design
-of record and the cross-reference.
+inherit verbatim. The canonical breakdown — four redirects, one cwd
+pin, one env-key filter — lives in T-I5's module docstring at
+`tests/agent_smoke/test_claude_startup.py`; **that is the source of
+record**, and any change to the hermeticity posture updates it there
+first. T-I5's step file (`.system_design/steps/t_i5_agent_startup_smoke.md`)
+is the implementation notes. This paragraph carries only the facts
+§6.4.2 reads off T-I5: the capture-count discovery (Claude Code in
+`-p` mode makes more than one POST per turn, a session-title call
+precedes the user reply — the reason captures are pinned by content
+via `_body_has_user_message`, not by count or index), the two
+falsification seams (`KITTY_AGENT_SMOKE_BINARY` env override, the
+factored `_resolve_default_binary()` default branch — both must
+produce `pytest.fail`, never `pytest.skip`), and the L4 rationale for
+the precedence run (below).
 
 **Why the precedence claim is L4, not L3.** A precedence order is a
 fact about *Claude Code*, not kitty code; the only observable surface
