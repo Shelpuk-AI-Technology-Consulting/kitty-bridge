@@ -733,16 +733,78 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   (the `except` arm) still ships its error event without a lifecycle close,
   unlike the plain path's catch-alls which fall through to the post-loop
   synthesize — pre-existing, not this ticket's defect class; and
-  `/v1/messages`' custom segment (parse → `translate_response` → Messages
-  events) still has no emptiness gate, so a content-less completion there
-  delivers a content-less Messages turn — the smaller-class sibling defect,
-  deferred. KBR-254's sibling-test stubs were corrected to what real
+  `/v1/messages`' custom segment — closed by KBR-297 below; the smaller-class
+  sibling defect. KBR-254's sibling-test stubs were corrected to what real
   adapters emit (`_fake_hello_cc_stream`; the Responses-SSE stub pinned what
   the branch accepted, not what Bedrock writes). Tests:
   `tests/bridge/test_responses_custom_transport_empty_hold.py`,
   `tests/bridge/test_gemini_custom_transport_empty_hold.py` (the KBR-287
   harness shape; content oracles parsed from route-protocol events, never
   raw substrings — the KBR-249 vacuous-oracle trap).
+- **KBR-297 closed the last streaming leg — the `use_custom_transport` segment
+  of `_stream_messages` / `/v1/messages`.** Ticket correction recorded here: the
+  pre-fix wire did **not** deliver a silent empty turn. It delivered
+  **fabricated fallback text** — `MessagesTranslator.translate_response`'s
+  defensive fallback (`src/kitty/bridge/messages/translator.py:766-771`,
+  "never emit thinking-only or empty assistant output") appended a `text`
+  block carrying `_EMPTY_ASSISTANT_FALLBACK_TEXT` — *"Upstream model
+  returned an empty response. Please retry. If the context is full, use
+  /clear to reset the conversation."* — plus a `(provider, model, after N
+  attempts)` suffix on a balancing pool, and `_log_usage` billed the
+  fabricated turn. The bridge put words in the model's mouth, the
+  empty-response ladder could not fire, and a balancing pool kept routing to
+  the broken upstream. The fix ports KBR-287/293's judge-first shape: after
+  `parse_stream_to_cc_response` (Bedrock / Ollama Cloud) or
+  `_parse_sse_to_response` (subscription), the branch runs a single
+  up-front verdict through `BridgeServer._is_empty_cc_response` (the
+  KBR-285 lockstep whole-response twin of `_cc_chunk_carries_content`).
+  Content-bearing → translate + emit, unchanged. Content-free → held; ladder
+  per the KBR-287/293 shape (class-agnostic `_select_backend()` —
+  custom → refresh `_resolved_key` / `_provider_config` + `continue`; plain
+  → pop the three custom keys + `break` into the dispatch-loop fall-through;
+  pool-less `elif` → `_BACKOFF_BASE` exponential backoff); exhaustion →
+  **the route's own D4 terminal**, the bare JSON `_make_error_response` with
+  `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"` and HTTP 502
+  — this route defers `sr.prepare()`, so the D4 is a JSON response, not
+  the SSE siblings' in-stream error event, per §5.3 S8. Attempt bound
+  `n_backends + len(_EMPTY_FINAL_DELAYS)` with the final-delay prologue;
+  exception-path gates stay at `n_backends - 1`; exception-path log
+  denominators follow `n_backends` (mirroring the KBR-293 twin). Usage is
+  log-on-release (`_log_usage` after emit); empty attempts never reach
+  `_log_usage` and never reach `translate_response`, so the fallback text
+  is never fabricated and no usage is billed for a judged-empty completion.
+  Reasoning-only completions take the ladder — neither parser surfaces
+  reasoning, the accepted trade-off KBR-287/293 pin. **One-step
+  reasoning-widening asymmetry:** on this route the judge reads the parsed
+  message directly and `translate_response` already maps
+  `message.reasoning_content` → a `thinking` block, so a future
+  parse-widening **alone** would regain reasoning fidelity here — unlike
+  the siblings, whose chunk-synthesis also projects only `content` /
+  `tool_calls` and would need its own widening. **Whitespace-drift
+  consequence:** `_is_empty_cc_response`'s CC arm keeps its documented
+  `.strip()` on string `content` (the pre-existing drift this paragraph
+  also records above for KBR-277), while the sibling routes' judge uses
+  `!= ""`. On this route the custom segment now takes the `.strip()` side:
+  a whitespace-only completion ladders to the 502 D4 terminal here, while
+  the same shape is delivered on `/v1/chat/completions` and the KBR-293
+  siblings — and within this same route, the plain-POST streaming hold
+  would deliver it too. Aligning the two predicates is not this ticket's
+  scope. **Deliberate omission:** the empty arm's sleeps (pool-less backoff
+  and final-delay prologue) do not call `_raise_if_client_gone()` although
+  the helper exists in this handler — the KBR-287/293 empty arms omit it
+  too, and a dead client plus a broken upstream burns the ~60 s ladder.
+  Recorded so the omission can be revisited as a cross-cutting pass over
+  all four custom segments. **Non-streaming residual, out of scope:** the
+  non-streaming `/v1/messages` × custom-transport path (through
+  `_request_with_retry`) still returns the empty response for
+  `translate_response` to dress in fallback text and still marks the
+  backend healthy on success — pre-existing, a separate defect class from
+  the streaming silent turn; KBR-297 is scoped to the **streaming**
+  custom segment only, so the "last streaming leg" claim stays honest.
+  Tests: `tests/bridge/test_messages_custom_transport_empty_hold.py`
+  (the KBR-287/293 harness shape; content oracles parsed from Messages-API
+  events, never raw substrings; `_EMPTY_ASSISTANT_FALLBACK_TEXT` absence
+  asserted explicitly as the fabricated-text defect).
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule

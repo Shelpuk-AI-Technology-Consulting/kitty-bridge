@@ -5435,8 +5435,28 @@ class BridgeServer:
                 self._log_backend_selection()
 
                 n_backends = len(self._backends) if self._backends else 1
-                max_attempts = n_backends
+                # KBR-297: widen the attempt loop exactly as the
+                # `/v1/chat/completions` (KBR-287) and `/v1/responses` +
+                # `/v1/gemini` (KBR-293) twins did: this branch's transport
+                # errors ladder within `n_backends` via the exception path,
+                # so its "original" budget is the failover walk and only the
+                # empty ladder extends it.
+                max_attempts = n_backends + len(_EMPTY_FINAL_DELAYS)
                 for attempt in range(max_attempts):
+                    # Final-delay prologue mirrors the KBR-287/293 twins'
+                    # (grep anchor: "Empty upstream response on custom
+                    # transport: final retry in"): attempts past the
+                    # original `n_backends` walk sleep the route's
+                    # empty-ladder tail before their upstream call.
+                    if attempt >= n_backends:
+                        delay = _EMPTY_FINAL_DELAYS[attempt - n_backends]
+                        logger.warning(
+                            "Empty upstream response on custom transport: final retry in %.1fs (%d/%d)",
+                            delay,
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(delay)
                     raw_chunks: list[bytes] = []
 
                     async def _collect(chunk: bytes, _raw_chunks: list[bytes] = raw_chunks) -> None:
@@ -5453,7 +5473,7 @@ class BridgeServer:
                                 self._current_backend_idx,
                                 failure_kind=kind,
                             )
-                            if self._any_healthy_backend(require_streaming=True) and attempt < max_attempts - 1:
+                            if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
                                 try:
                                     self._select_backend(require_streaming=True)
                                 except AllBackendsUnhealthyError as all_unhealthy:
@@ -5469,12 +5489,12 @@ class BridgeServer:
                                 logger.info(
                                     "Custom-transport failover: attempt %d/%d (%s), switching backend",
                                     attempt + 1,
-                                    max_attempts,
+                                    n_backends,
                                     exc,
                                 )
                                 continue
                             # No custom-transport backend healthy — try cross-mode failover to standard backend
-                            if self._any_healthy_backend() and attempt < max_attempts - 1:
+                            if self._any_healthy_backend() and attempt < n_backends - 1:
                                 try:
                                     self._select_backend()
                                 except AllBackendsUnhealthyError:
@@ -5488,7 +5508,7 @@ class BridgeServer:
                                 logger.info(
                                     "Cross-mode failover: attempt %d/%d (%s), switching to standard backend",
                                     attempt + 1,
-                                    max_attempts,
+                                    n_backends,
                                     exc,
                                 )
                                 break
@@ -5522,6 +5542,104 @@ class BridgeServer:
                             "Parsed CC response: %s",
                             json.dumps(cc_response, ensure_ascii=False)[:2000],
                         )
+                        # KBR-297: judge-first. The branch parses the whole
+                        # upstream response before any write, so — exactly as
+                        # the `/v1/chat/completions` (KBR-287) and
+                        # `/v1/responses` + `/v1/gemini` (KBR-293) twins
+                        # record — a single up-front verdict produces the
+                        # plain-POST ladder's wire behaviour. The judge is
+                        # the whole-response twin `_is_empty_cc_response`
+                        # (KBR-285 lockstep): this branch is atomic
+                        # parse-then-emit, so no chunk synthesis is needed —
+                        # the twins synthesise chunk lists only because
+                        # their route's wire is chunks. Pre-fix a
+                        # judged-empty completion reached
+                        # `translate_response`, whose defensive fallback
+                        # fabricated the empty-assistant text and billed it
+                        # as usage; now the attempt is discarded
+                        # pre-emission and the ladder walks.
+                        carries = not self._is_empty_cc_response(cc_response)
+                        if not carries:
+                            # Empty attempt: ladder. Mirrors the KBR-287/293
+                            # twins' empty arm — one class-agnostic
+                            # `_select_backend()`; if it lands custom, stay
+                            # in this branch and re-attempt; if plain, fall
+                            # through to the standard streaming path below.
+                            # Pool-less mode takes the exponential backoff
+                            # retry; exhaustion emits the route's own D4
+                            # terminal — the bare-JSON `empty_no_finish`
+                            # shape, not the SSE siblings' in-stream error
+                            # event, because this route defers
+                            # `sr.prepare()` and answers pre-stream failures
+                            # with a JSON error (§5.3 S8). Empties never
+                            # mark a backend unhealthy (KBR-287 parity), and
+                            # the custom → plain crossing stays uncapped
+                            # like the exception path's — termination is
+                            # bounded by the capped reverse direction.
+                            if self._backends and self._current_backend_idx >= 0:
+                                if self._any_healthy_backend() and attempt < max_attempts - 1:
+                                    self._select_backend()
+                                    self._normalize_model(cc_request)
+                                    self._active_provider.normalize_request(cc_request)
+                                    if self._active_provider.use_custom_transport:
+                                        # Stay custom: refresh the custom
+                                        # keys so the next attempt's
+                                        # stream_request finds them.
+                                        cc_request["_resolved_key"] = self._active_key
+                                        cc_request["_provider_config"] = self._active_provider_config
+                                        logger.info(
+                                            "Messages stream empty response on custom transport: "
+                                            "re-selecting custom backend, attempt %d/%d",
+                                            attempt + 1,
+                                            max_attempts,
+                                        )
+                                        continue
+                                    # Cross to plain: the dispatch-loop
+                                    # tail's fall-through routes the plain
+                                    # provider into the standard streaming
+                                    # path.
+                                    cc_request.pop("_resolved_key", None)
+                                    cc_request.pop("_provider_config", None)
+                                    cc_request.pop("_original_body", None)
+                                    logger.info(
+                                        "Messages stream empty response: crossing custom → plain, "
+                                        "attempt %d/%d",
+                                        attempt + 1,
+                                        max_attempts,
+                                    )
+                                    break
+                            elif attempt < max_attempts - 1:
+                                delay = _BACKOFF_BASE * (2 ** (attempt % (_MAX_RETRIES + 1)))
+                                logger.warning(
+                                    "Messages stream empty response on custom transport: "
+                                    "retrying in %.1fs (%d/%d)",
+                                    delay,
+                                    attempt + 1,
+                                    max_attempts,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            logger.warning(
+                                "Messages stream empty response after %d attempts on custom transport, "
+                                "responding with the empty-response terminal",
+                                max_attempts,
+                            )
+                            # D4 exhaustion terminal, uniform with the
+                            # plain-POST twin's `empty_no_finish` branch:
+                            # the judge guarantees nothing was emitted, so
+                            # `sr is None` and the bare-JSON response is
+                            # legal (§5.3 S8).
+                            return _make_error_response(
+                                {
+                                    "type": "error",
+                                    "error": {
+                                        "type": "api_error",
+                                        "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                        "reason": "empty_response",
+                                    },
+                                },
+                                status=502,
+                            )
                         result = translator.translate_response(cc_response, context=self._empty_response_context())
                         logger.debug(
                             "Translated Messages API result: %s",
