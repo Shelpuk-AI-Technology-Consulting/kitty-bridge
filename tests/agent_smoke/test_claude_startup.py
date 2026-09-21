@@ -93,6 +93,7 @@ import contextlib
 import json
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -234,7 +235,13 @@ def _hermetic_env(home: Path, config_dir: Path, base_url: str) -> dict[str, str]
     return env
 
 
-async def _run_one_turn(binary: Path, env: dict[str, str], cwd: Path) -> tuple[int, str, str]:
+async def _run_one_turn(
+    binary: Path,
+    env: dict[str, str],
+    cwd: Path,
+    *,
+    extra_args: Sequence[str] = (),
+) -> tuple[int, str, str]:
     """Spawn the binary for one non-interactive turn and collect the output.
 
     Args:
@@ -245,6 +252,12 @@ async def _run_one_turn(binary: Path, env: dict[str, str], cwd: Path) -> tuple[i
             from the cwd, and a future root-level ``.claude/`` directory
             with hooks would execute them unprompted under
             ``--dangerously-skip-permissions``.
+        extra_args: Additional CLI arguments appended after
+            ``--dangerously-skip-permissions``. The default empty
+            sequence preserves T-I5's connectivity smoke byte-identical;
+            T-I6 passes ``["--settings", <path>]`` to point Claude Code
+            at a session settings file (per the precedence claim under
+            test in :mod:`tests.agent_smoke.test_claude_settings_precedence`).
 
     Returns:
         ``(returncode, stdout, stderr)`` after the process exits. The
@@ -263,6 +276,7 @@ async def _run_one_turn(binary: Path, env: dict[str, str], cwd: Path) -> tuple[i
         "-p",
         _PROMPT,
         "--dangerously-skip-permissions",
+        *extra_args,
         env=env,
         cwd=str(cwd),
         stdin=asyncio.subprocess.DEVNULL,

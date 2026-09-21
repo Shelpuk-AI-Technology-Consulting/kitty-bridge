@@ -2658,6 +2658,41 @@ behaviour; it does not ratify it. When Q10 is answered, TR-3 and register rows M
 
 Two distinct things, currently conflated, with different costs and different cadences.
 
+**What T-I5 settled.** T-I5 (KBR-97, PR #251, merged 2026-09-21)
+delivered the hermetic posture that the agent-boundary tests now
+inherit verbatim. The capture-count discovery — Claude Code in `-p`
+mode makes **more than one** `POST /v1/messages` per turn, a
+session-title-generation call precedes the user reply — is the
+reason the captures are pinned by content (`_body_has_user_message`)
+and not by count or index. The hermetic posture is **four redirects
+plus one cwd pin plus one env-key filter**: `HOME` → temp tree (so
+`~/.claude.json` writes land there, since the binary keeps that file
+outside `CLAUDE_CONFIG_DIR` per `anthropics/claude-code#25762`),
+`CLAUDE_CONFIG_DIR` → temp tree (the documented fine redirect for
+"settings / history / plugins"), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+(kills statsig / sentry / update traffic), `ANTHROPIC_BASE_URL` →
+the recorder's URL, **cwd pinned to the temp tree** (so the binary
+loads neither the checkout's `CLAUDE.md` nor any future root-level
+`.claude/` hook directory), and one env-key filter stripping the
+`ANTHROPIC_*` / `CLAUDE_CODE_*` / `CLAUDECODE` / `HTTP_PROXY` /
+`HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` / `NODE_OPTIONS` /
+`NODE_EXTRA_CA_CERTS` families. Two falsification seams carry the
+KBR-132 shape: `KITTY_AGENT_SMOKE_BINARY` (env override) and the
+factored `_resolve_default_binary()` (default branch); both must
+produce `pytest.fail`, never `pytest.skip`, when the binary is
+absent. T-I5's step file (`.system_design/steps/t_i5_agent_startup_smoke.md`)
+is the implementation notes of record; this paragraph is the design
+of record and the cross-reference.
+
+**Why the precedence claim is L4, not L3.** A precedence order is a
+fact about *Claude Code*, not kitty code; the only observable surface
+is the real binary's destination choice, and only the real binary's
+destination choice is what `kitty.launchers.claude.ClaudeAdapter.prepare_launch`
+depends on. A lower-layer test would have to mock the very thing
+under suspicion. That is why the precedence run drives a real
+`claude -p` turn against three real `BridgeFixture`s and asserts on
+their `captures`, and not on a simulated `translate_request`.
+
 **Agent smoke — per PR, hermetic.** Two distinct cases, and only the second proves the claim.
 
 *Startup smoke.* A **pinned real Claude Code binary** runs one non-interactive turn against the
