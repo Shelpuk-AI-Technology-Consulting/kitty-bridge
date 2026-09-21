@@ -1799,3 +1799,130 @@ fuzzer's distribution is the only producer.
 - The deeper nightly fuzz job ([KBR-116](https://shelpuk.atlassian.net/browse/KBR-116),
   T-K7) — the discoverer for ongoing shape drift; this ticket closes the KBR-82
   conformance-suite-discoverable crash set on the Gemini path.
+
+---
+
+## 13. Bedrock adapter — list-form CC content → Converse blocks
+
+Traces to [KBR-223](https://shelpuk.atlassian.net/browse/KBR-223). Read alongside §8
+(Converse reasoningContent emission), which owns the adapter's view of one content-block
+spelling, and `TEST_SUITE.md` §3.2.1 (M3/M4 register rows), whose truncation prose records
+the list-form gap this section closes. This section owns the adapter's view of *list-form*
+content — tool results and user turns — and the truncation sites that count their bytes.
+
+### 13.1 The rule
+
+`kitty.providers.bedrock.BedrockAdapter` translates list-form CC content part-by-part into
+Converse blocks via a shared module-level mapper. The four part kinds that matter, and
+their outputs:
+
+| CC part | Converse block | Notes |
+|---|---|---|
+| `{"type":"text","text":T}` | `{"text": T}` | text only |
+| `{"type":"image_url","image_url":{"url":"data:image/<fmt>;base64,<b64>"}}` | `{"image":{"format":<fmt>,"source":{"bytes":<decoded>}}}` | fmt ∈ {png,jpeg,gif,webp}; http(s) URLs dropped |
+| `{"type":"image","source":{"type":"base64","media_type":"image/<fmt>","data":<b64>"}}` | same image block | Anthropic-native shape arrives via the Messages→CC translator's tool_result passthrough (`tr.get("content","")`) |
+| `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":<b64>"}}` | `{"document":{"format":"pdf","name":<title or "document">,"source":{"bytes":<decoded>}}}` | DocumentBlock requires `name` and `source` per the installed service model |
+
+Anything else — non-data-URL images, `file` sources, unknown types, undecodable payloads —
+is **dropped**, the established posture for unmappable shapes (KBR-222,
+`build_user_content_message`'s `file` source drop). If every part drops, the result falls
+back to `[{"text": ""}]` — the empty list is validator-clean (measured), but a non-empty
+block list is the shape the service is documented to take, and the fallback costs one line.
+
+Two call sites:
+
+* `_translate_tool_result_msg` — list-form `content` becomes `toolResult.content`. The
+  pre-fix behaviour was a verbatim copy that left CC `{"type": …}` keys in place; botocore's
+  parameter validator rejected the body and `client.converse` failed the turn locally.
+* The user branch of `translate_to_upstream` — list-form user content becomes a list of
+  Converse blocks in part order. This replaces KBR-222's provisional flatten (which joined
+  text parts and dropped images): one Converse `text` block per text part, in order. On
+  hop-1 routes `build_user_content_message` only assembles a parts list when a non-text part
+  is present, so the common Messages-ingress turn is unaffected; a CC-native agent sending a
+  text-only parts list sees a wire-visible change from a single joined block to one block
+  per part.
+
+### 13.2 The truncation shared extractor
+
+Three sites check tool-result payloads for the 50,000-char limit: `_truncate_oversized_tool_results`
+(CC + Anthropic-native arms), `_truncate_oversized_responses_outputs` (Responses arm), and
+`_compact_messages` step 1 (CC arm, compaction-engaged only). All three now share one
+module-level size extractor in `server.py`:
+
+```python
+def _tool_result_content_size(content: str | list) -> int:
+    if isinstance(content, str):
+        return len(content)
+    try:
+        return len(json.dumps(content, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return -1  # F33-style: not measurable → leave alone
+```
+
+An over-limit list-form payload is replaced by the same `[Tool output truncated — original
+size: N chars]` notice string the string branch uses (the list collapses to the notice).
+String-arm behaviour is byte-identical to today, so the existing string-only Hypothesis
+oracles (`_expected_truncation_count`, `_apply_cc/native/responses_truncation`) keep
+passing unchanged — the change only *widens* what the sites consider.
+
+This closes the list-form gap recorded in `TEST_SUITE.md` §3.2.1 (M3, M4) as the KBR-169
+"ships untruncated" symptom — KBR-223 owns the gap per KBR-169's adjacent-scope comment.
+
+### 13.3 The contract oracle
+
+L1 asserts the adapter's emission against the live service model — the same oracle pattern
+§8 adopts for `reasoningContent`. The oracle lives on `_bedrock_body` (the pure builder
+extracted by KBR-89), so the validation is unit-pure (no hook envelope, no boto3 client):
+
+```python
+input_shape = (
+    botocore.session.Session()
+    .get_service_model("bedrock-runtime")
+    .operation_model("Converse")
+    .input_shape
+)
+model_id, body = adapter._bedrock_body(cc_request)
+botocore.validate.validate_parameters({"modelId": model_id, **body}, input_shape)
+```
+
+The oracle covers four branches:
+
+1. The KBR-264 reasoning branches (populated and `_thinking_enabled`-injected-empty),
+   re-driven through `_bedrock_body` with the same negative controls on the pre-fix
+   `{"reasoningContent": {"text": …}}` spelling.
+2. A tool result with list-form content — text + image + document variants — passes.
+3. The pre-fix verbatim copy of that list content — `[{"type":"text","text":…}]` etc. —
+   raises `botocore.exceptions.ParamValidationError`.
+4. A user turn with an image part passes; the verbatim CC parts list for that turn raises.
+
+### 13.4 Decisions, and why
+
+- **Map late in the adapter, not normalize at ingress.** KBR-169's adjacent-scope comment
+  offered "normalize the list-form shape once at the ingress boundary" as the alternative.
+  Rejected: ingress normalization to strings would destroy the image/document payloads
+  this section exists to carry (the same loss KBR-222 temporarily accepted on the user
+  branch), and it would change the CC wire shape every other adapter reads. The Bedrock
+  adapter is the only place the Converse block union is the target shape.
+- **Drop unmappable parts rather than fail the turn.** Matches KBR-222's established
+  posture (`build_user_content_message` drops `file` sources with a recorded reason). A
+  hard failure on an unmappable part would recreate this ticket's defect class one level
+  down. The all-parts-dropped fallback to `[{"text": ""}]` keeps the emitted list
+  non-empty, matching the documented shape — the client-side validator accepts `[]` and
+  `{"text":""}` (measured on the installed model), so the fallback is defence-in-depth
+  against a service-side rule the oracle can't see.
+- **Truncation collapses a list to the notice string rather than trimming within parts.**
+  The string branch's contract (one notice, size recorded) is preserved; trimming inside
+  part lists would need per-kind size budgets and would still change the shape. The size
+  measure is the serialized JSON length — what actually ships on the wire — not the
+  concatenated text length, so image/document payloads are counted too.
+- **Oracle on `_bedrock_body`, not `translate_to_upstream`.** KBR-89's scope addition names
+  the builder as the oracle's home: it is the pure function whose return value is the
+  shipped body kwargs, so the validation is unit-pure and tight. Re-attaching `modelId`
+  is the only envelope the oracle needs.
+- **Shared size extractor in `server.py`, not `bridge/`.** The three call sites already
+  live in `server.py`; a shared helper belongs beside them. Putting it in `bridge/` would
+  invert the dependency direction (a translation-time helper in a transport module).
+- **No new register row, no new wire-shape class.** The fix widens what M3/M4 consider
+  (their triggers become content-shape-aware, not string-only); TEST_SUITE.md §3.2.1's M3/M4
+  prose is updated to the closed state but the rows themselves stay. The Bedrock adapter
+  continues to declare `WireShape.OTHER`; the emitted shape family is unchanged.

@@ -225,7 +225,8 @@ class TestTruncateOversizedToolResults:
         count = server._truncate_oversized_tool_results(cc_request)
         assert count == 2
 
-    def test_non_string_tool_content_left_untouched(self):
+    def test_small_list_tool_content_under_limit_is_untouched(self):
+        """A small list stays untouched — same shape would truncate over the limit."""
         server = _make_server()
         cc_request = {
             "model": "m",
@@ -240,6 +241,95 @@ class TestTruncateOversizedToolResults:
         }
         count = server._truncate_oversized_tool_results(cc_request)
         assert count == 0
+
+    def test_cc_list_tool_result_over_limit_is_truncated(self):
+        """KBR-223: an oversized list-form CC tool result truncates like the string arm."""
+        server = _make_server()
+        cc_request = {
+            "model": "m",
+            "messages": [
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "function": {"name": "f"}}]},
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": [{"type": "text", "text": "x" * 100_000}],
+                },
+            ],
+        }
+        count = server._truncate_oversized_tool_results(cc_request)
+        assert count == 1
+        tool_msg = cc_request["messages"][1]
+        assert _NOTICE in tool_msg["content"]
+        assert len(tool_msg["content"]) < 1000
+
+    def test_native_list_tool_result_over_limit_is_truncated(self):
+        """KBR-223: an oversized structured ``tool_result`` payload truncates too."""
+        server = _make_server()
+        cc_request = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": [{"type": "text", "text": "x" * 100_000}],
+                        },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t2",
+                            "content": [{"type": "text", "text": "small"}],
+                        },
+                    ],
+                }
+            ],
+        }
+        count = server._truncate_oversized_tool_results(cc_request)
+        assert count == 1
+        blocks = cc_request["messages"][0]["content"]
+        truncated = [b for b in blocks if b["tool_use_id"] == "t1"][0]
+        kept = [b for b in blocks if b["tool_use_id"] == "t2"][0]
+        assert _NOTICE in truncated["content"]
+        assert kept["content"] == [{"type": "text", "text": "small"}]
+
+    def test_list_tool_result_under_limit_is_untouched(self):
+        server = _make_server()
+        cc_request = {
+            "model": "m",
+            "messages": [
+                {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "small"}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "ok"}]}
+                    ],
+                },
+            ],
+        }
+        before = repr(cc_request["messages"])
+        count = server._truncate_oversized_tool_results(cc_request)
+        assert count == 0
+        assert repr(cc_request["messages"]) == before
+
+    def test_non_serializable_list_tool_result_is_untouched(self):
+        """F33 parity: a payload json.dumps cannot measure is left alone, never truncated."""
+        server = _make_server()
+        unmeasurable = object()
+        cc_request = {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": [{"type": "text", "text": unmeasurable}],
+                },
+            ],
+        }
+        before = repr(cc_request["messages"])
+        count = server._truncate_oversized_tool_results(cc_request)
+        assert count == 0
+        assert repr(cc_request["messages"]) == before
 
 
 # -- FI-8.2: _is_context_too_large_error + "oversized" failure_kind ----------

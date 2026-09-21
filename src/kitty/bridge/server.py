@@ -1465,6 +1465,34 @@ _COMPACTION_CHAR_THRESHOLD = int(_MAX_REQUEST_CHARS * 0.7)  # Trigger compaction
 _COMPACTION_TAIL_COUNT = 20  # Minimum number of recent messages to preserve
 _COMPACTION_GUARANTEED_MESSAGES_MAX = int(_MAX_REQUEST_CHARS * 0.9)  # Guaranteed budget for compacted messages
 _TOOL_RESULT_TRUNCATION_LIMIT = 50_000  # Max chars for a tool result before truncation
+
+
+def _tool_result_content_size(content: object) -> int:
+    """Measure a tool-result payload in the chars the truncation sites count.
+
+    String content is its own length; list-form content (CC ``role: "tool"``
+    parts, structured ``tool_result`` blocks, Responses list ``output``) is
+    measured by its serialized JSON length — what actually ships on the wire,
+    so image/document payloads inside the list count too (KBR-223). A payload
+    ``json.dumps`` cannot serialize returns ``-1``, mirroring F33's
+    ``_safe_size``: the truncation sites treat it as unmeasurable and leave it
+    alone rather than guess at a size.
+
+    Args:
+        content: A tool-result ``content`` / ``output`` value.
+
+    Returns:
+        The payload's char size, or ``-1`` when it is not serializable.
+    """
+    if isinstance(content, str):
+        return len(content)
+    if not isinstance(content, list):
+        return -1
+    try:
+        return len(json.dumps(content, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return -1
+
 # Soft threshold (~180K tokens) above which a high-reasoning / long-context
 # request is likely to truncate or be rejected by upstreams like MiniMax-M3 /
 # z.ai GLM-5.2. Crossing it emits a WARNING; on-failure recovery uses it as a
@@ -9992,8 +10020,12 @@ class BridgeServer:
         # ── Step 1: Truncate large tool results ──────────────────────────
         compacted = []
         for msg in messages:
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
-                content_len = len(msg["content"])
+            # M4 is CC-shape only: the ``role == "tool"`` guard scopes this
+            # step to Chat Completions messages; native ``tool_result`` blocks
+            # inside a ``role == "user"`` message list are M3's exclusive
+            # concern — the unconditional pre-pass that already ran.
+            if msg.get("role") == "tool":
+                content_len = _tool_result_content_size(msg.get("content"))
                 if content_len > _TOOL_RESULT_TRUNCATION_LIMIT:
                     compacted.append(
                         {
@@ -10238,9 +10270,12 @@ class BridgeServer:
             return 0
 
         for msg in messages:
-            # Chat-Completions: role == "tool" with a string content.
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
-                content_len = len(msg["content"])
+            # Chat-Completions: ``role == "tool"`` with string or list-form
+            # content. The shared ``_tool_result_content_size`` extractor
+            # (KBR-223) measures both shapes.
+            if msg.get("role") == "tool":
+                content = msg.get("content")
+                content_len = _tool_result_content_size(content)
                 if content_len > _TOOL_RESULT_TRUNCATION_LIMIT:
                     msg["content"] = (
                         f"[Tool output truncated — original size: {content_len:,} chars]"
@@ -10249,20 +10284,18 @@ class BridgeServer:
                 continue
 
             # Anthropic-native: role == "user" with list content carrying
-            # ``tool_result`` blocks. Truncate only those whose ``content``
-            # is a string over the limit; non-string (structured) content
-            # is left untouched.
+            # ``tool_result`` blocks. Truncate those whose content (string or
+            # list of parts) exceeds the limit; non-string (structured)
+            # content is measured too via KBR-223's shared extractor, so an
+            # oversized structured payload no longer ships untruncated.
             if msg.get("role") == "user" and isinstance(msg.get("content"), list):
                 for block in msg["content"]:
-                    if (
-                        isinstance(block, dict)
-                        and block.get("type") == "tool_result"
-                        and isinstance(block.get("content"), str)
-                        and len(block["content"]) > _TOOL_RESULT_TRUNCATION_LIMIT
-                    ):
-                        original_len = len(block["content"])
+                    if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+                        continue
+                    block_size = _tool_result_content_size(block.get("content"))
+                    if block_size > _TOOL_RESULT_TRUNCATION_LIMIT:
                         block["content"] = (
-                            f"[Tool output truncated — original size: {original_len:,} chars]"
+                            f"[Tool output truncated — original size: {block_size:,} chars]"
                         )
                         count += 1
 
@@ -10278,8 +10311,9 @@ class BridgeServer:
         truncates a copy that never leaves the machine there (KBR-169). Same
         limit, same notice text.
 
-        Only string outputs are truncated; list-form outputs are left
-        untouched, exactly like the CC-shape pass.
+        String and list-form outputs are truncated (KBR-223's shared
+        ``_tool_result_content_size`` measure); non-output items
+        (``message``, ``reasoning``) are left untouched.
 
         Args:
             body: The normalized Responses request, mutated in place.
@@ -10289,14 +10323,11 @@ class BridgeServer:
         """
         count = 0
         for item in body.get("input") or []:
-            if (
-                isinstance(item, dict)
-                and item.get("type") == "function_call_output"
-                and isinstance(item.get("output"), str)
-                and len(item["output"]) > _TOOL_RESULT_TRUNCATION_LIMIT
-            ):
-                original_len = len(item["output"])
-                item["output"] = f"[Tool output truncated — original size: {original_len:,} chars]"
+            if not (isinstance(item, dict) and item.get("type") == "function_call_output"):
+                continue
+            output_size = _tool_result_content_size(item.get("output"))
+            if output_size > _TOOL_RESULT_TRUNCATION_LIMIT:
+                item["output"] = f"[Tool output truncated — original size: {output_size:,} chars]"
                 count += 1
         return count
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import uuid
@@ -57,6 +58,202 @@ def _converse_tool_choice(cc_tool_choice: object) -> dict:
     ):
         return {"tool": {"name": cc_tool_choice["function"]["name"]}}
     return {"auto": {}}
+
+
+#: Converse ``ImageFormat`` members, keyed by the media-type suffix the CC
+#: shapes carry. ``image/jpg`` normalises to ``jpeg`` — the common mis-spelling
+#: every producer emits and Converse's enum rejects verbatim.
+_IMAGE_MEDIA_SUFFIX_TO_FORMAT: dict[str, str] = {
+    "png": "png",
+    "jpg": "jpeg",
+    "jpeg": "jpeg",
+    "gif": "gif",
+    "webp": "webp",
+}
+
+#: Anthropic document ``media_type`` → Converse ``DocumentFormat``. The union
+#: is exactly {pdf, csv, doc, docx, xls, xlsx, html, txt, md} on the installed
+#: service model; a media type outside the table has no Converse spelling and
+#: the part is dropped (KBR-223's established drop posture).
+_DOCUMENT_MEDIA_TYPE_TO_FORMAT: dict[str, str] = {
+    "application/pdf": "pdf",
+    "text/csv": "csv",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "text/html": "html",
+    "text/plain": "txt",
+    "text/markdown": "md",
+}
+
+
+def _decode_base64_payload(raw: object) -> bytes | None:
+    """Decode a base64 payload, returning ``None`` when it is not decodable.
+
+    Whitespace is stripped first (MIME wrapping is common in transported
+    payloads) and decoding is strict (``validate=True``): a silently-decoded
+    garbage payload would pass schema validation and only surface as a
+    corrupted image on the service side.
+
+    Args:
+        raw: A string carrying a base64-encoded payload; non-string values
+            short-circuit to ``None``.
+
+    Returns:
+        The decoded bytes, or ``None`` when ``raw`` is not a string or fails
+        strict decoding (``binascii.Error`` / ``ValueError``).
+    """
+    if not isinstance(raw, str):
+        return None
+    try:
+        return base64.b64decode("".join(raw.split()), validate=True)
+    except ValueError:
+        return None
+
+
+def _image_block_from_media_type(media_type: object, payload: object) -> dict | None:
+    """Build a Converse ``image`` block, or ``None`` when the media type is unknown.
+
+    Args:
+        media_type: An ``image/<fmt>`` MIME string whose suffix maps to a
+            Converse ``ImageFormat`` member (png, jpeg, gif, webp). Non-string
+            values short-circuit to ``None``.
+        payload: The base64-encoded image bytes.
+
+    Returns:
+        The Converse ``{"image": {"format": …, "source": {"bytes": …}}}``
+        block, or ``None`` when either the format is unknown or the payload
+        is not decodable.
+    """
+    if not isinstance(media_type, str):
+        return None
+    fmt = _IMAGE_MEDIA_SUFFIX_TO_FORMAT.get(media_type.lower().rsplit("/", 1)[-1])
+    raw = _decode_base64_payload(payload)
+    if fmt is None or raw is None:
+        return None
+    return {"image": {"format": fmt, "source": {"bytes": raw}}}
+
+
+def _image_from_data_url(url: object) -> dict | None:
+    """Build a Converse ``image`` block from a CC ``data:`` URL, or ``None``.
+
+    RFC 2397 spells the scheme ``data:[<mediatype>][;base64],<data>``; the
+    scheme and media type are case-insensitive. Only base64 payloads map —
+    Converse takes bytes (``bytes`` source), and there is no URL form of an
+    ``ImageSource`` that would not need IO in this pure translator.
+
+    Args:
+        url: A ``data:image/<fmt>;base64,<payload>`` URL. Non-string values
+            short-circuit to ``None``.
+
+    Returns:
+        The Converse image block, or ``None`` when the URL is not a base64
+        data URL or the payload is not decodable.
+    """
+    if not isinstance(url, str):
+        return None
+    scheme, colon, rest = url.partition(":")
+    if scheme.lower() != "data" or not colon:
+        return None
+    header, comma, payload = rest.partition(",")
+    if not comma or not header.lower().endswith(";base64"):
+        return None
+    return _image_block_from_media_type(header[: -len(";base64")], payload)
+
+
+def _document_block(part: dict) -> dict | None:
+    """Build a Converse ``document`` block from an Anthropic document part, or ``None``.
+
+    Args:
+        part: An Anthropic document content block of shape
+            ``{"type": "document", "title"?: …, "source": {"type": "base64",
+            "media_type": <application/...>, "data": <base64>}}``.
+
+    Returns:
+        The Converse ``{"document": {"format": …, "name": …, "source":
+        {"bytes": …}}}`` block, or ``None`` when the source is not base64, the
+        media type has no Converse ``DocumentFormat`` mapping, or the payload
+        is not decodable. ``name`` defaults to the block's ``title`` when set
+        and non-empty, else ``"document"`` — DocumentBlock requires ``name``
+        and Anthropic blocks carry none.
+    """
+    source = part.get("source")
+    if not isinstance(source, dict) or source.get("type") != "base64":
+        return None
+    media_type = source.get("media_type")
+    fmt = (
+        _DOCUMENT_MEDIA_TYPE_TO_FORMAT.get(media_type.lower())
+        if isinstance(media_type, str)
+        else None
+    )
+    raw = _decode_base64_payload(source.get("data"))
+    if fmt is None or raw is None:
+        return None
+    # DocumentBlock requires ``name``; Anthropic blocks carry an optional
+    # ``title`` and no ``name``, so a stable default fills the gap.
+    title = part.get("title")
+    name = title if isinstance(title, str) and title else "document"
+    return {"document": {"format": fmt, "name": name, "source": {"bytes": raw}}}
+
+
+def _cc_part_to_converse_block(part: object) -> dict | None:
+    """Map one CC content part to a Converse content block, or ``None``.
+
+    The Converse ``ContentBlock`` union is keyed by member name (``text``,
+    ``image``, ``document``, …) and carries no ``type`` member, so a CC part's
+    ``type`` key selects the mapping here. Parts this bridge cannot express on
+    Converse return ``None`` and are dropped by the caller — the established
+    posture for unmappable shapes (KBR-222), which keeps an unmappable part
+    from failing the whole turn the way a verbatim copy does (KBR-223).
+    """
+    if not isinstance(part, dict):
+        return None
+    kind = part.get("type")
+    if kind == "text":
+        text = part.get("text")
+        return {"text": text} if isinstance(text, str) else None
+    if kind == "image_url":
+        # OpenAI's shape nests the URL in a dict; some CC clients send it as
+        # a plain string — both spellings name the same URL.
+        target = part.get("image_url")
+        url = target.get("url") if isinstance(target, dict) else target
+        return _image_from_data_url(url)
+    if kind == "image":
+        source = part.get("source")
+        if not isinstance(source, dict) or source.get("type") != "base64":
+            return None
+        return _image_block_from_media_type(source.get("media_type"), source.get("data"))
+    if kind == "document":
+        return _document_block(part)
+    return None
+
+
+def _converse_content_blocks(content: object) -> list[dict]:
+    """Translate CC ``content`` (string or part list) to Converse content blocks.
+
+    Args:
+        content: A Chat Completions ``content`` value — a string or a list of
+            content parts.
+
+    Returns:
+        The Converse block list. An all-parts-dropped or empty input yields
+        ``[{"text": ""}]`` so the emitted list is never empty: the client-side
+        validator accepts ``[]`` (measured on the installed model), but a
+        non-empty block list is the shape the service is documented to take,
+        and the fallback costs one line.
+    """
+    if isinstance(content, str):
+        return [{"text": content}]
+    if isinstance(content, list):
+        blocks = [
+            block
+            for part in content
+            if (block := _cc_part_to_converse_block(part)) is not None
+        ]
+        if blocks:
+            return blocks
+    return [{"text": ""}]
 
 
 class BedrockAdapter(ProviderAdapter):
@@ -251,20 +448,10 @@ class BedrockAdapter(ProviderAdapter):
                 if isinstance(content, str):
                     content = [{"text": content}]
                 elif isinstance(content, list):
-                    # KBR-222: flatten CC content parts to their text -- the
-                    # single-block shape every Messages-route turn shipped
-                    # before the fix. Converse has no mapping for an
-                    # ``image_url`` part here, and forwarding the list would
-                    # fail boto3 validation (KBR-223 owns real handling).
-                    content = [
-                        {
-                            "text": "\n".join(
-                                part.get("text", "")
-                                for part in content
-                                if isinstance(part, dict) and part.get("type") == "text"
-                            )
-                        }
-                    ]
+                    # KBR-223: list-form user content maps part-by-part to
+                    # Converse blocks, replacing KBR-222's provisional flatten,
+                    # which joined text parts and dropped image parts.
+                    content = _converse_content_blocks(content)
                 bedrock["messages"].append({"role": role, "content": content})
 
         # Translate tools
@@ -320,9 +507,14 @@ class BedrockAdapter(ProviderAdapter):
         return {"role": "assistant", "content": content_blocks or [{"text": ""}]}
 
     def _translate_tool_result_msg(self, msg: dict) -> dict:
-        """Translate a CC tool result message to Bedrock toolResult."""
-        content = msg.get("content", "")
-        result_content = [{"text": content}] if isinstance(content, str) else content
+        """Translate a CC tool result message to Bedrock toolResult.
+
+        List-form content maps part-by-part to Converse blocks (KBR-223): the
+        pre-fix behaviour copied the list verbatim, leaving CC ``{"type": …}``
+        keys in place, and botocore's parameter validator rejected the body
+        before the request reached AWS.
+        """
+        result_content = _converse_content_blocks(msg.get("content", ""))
 
         return {
             "role": "user",

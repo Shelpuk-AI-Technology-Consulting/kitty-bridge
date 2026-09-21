@@ -1096,7 +1096,12 @@ def _oversize_non_tool_cc_request() -> dict[str, Any]:
 
 
 def _oversize_non_tool_native_request() -> dict[str, Any]:
-    """Native request: an oversize non-tool user text and a structured tool_result."""
+    """Native request: an oversize non-tool user text and a small structured tool_result.
+
+    The structured payload moved to :class:`TestStructuredContentTruncated`
+    (KBR-223): an oversized one truncates now, so this fixture keeps a small
+    one and pins only the non-tool text arm.
+    """
     return {
         "model": "claude-sonnet-5",
         "max_tokens": 64,
@@ -1112,7 +1117,7 @@ def _oversize_non_tool_native_request() -> dict[str, Any]:
                     {
                         "type": "tool_result",
                         "tool_use_id": "a",
-                        "content": [{"type": "text", "text": "x" * 100_000}],
+                        "content": [{"type": "text", "text": "small"}],
                     }
                 ],
             },
@@ -1122,7 +1127,12 @@ def _oversize_non_tool_native_request() -> dict[str, Any]:
 
 
 def _oversize_non_tool_responses_body() -> dict[str, Any]:
-    """Responses body: an oversize non-output item and a list-form ``output``."""
+    """Responses body: an oversize non-output item and a small ``output``.
+
+    The list-form ``output`` moved to :class:`TestStructuredContentTruncated`
+    (KBR-223): an oversized one truncates now, so this fixture keeps a small
+    string ``output`` and pins only the non-output text arm.
+    """
     return {
         "model": "gpt-4o",
         "tools": _responses_stub_tools(),
@@ -1132,14 +1142,20 @@ def _oversize_non_tool_responses_body() -> dict[str, Any]:
             {
                 "type": "function_call_output",
                 "call_id": "a",
-                "output": [{"type": "input_text", "text": "x" * 100_000}],
+                "output": "small",
             },
         ],
     }
 
 
 class TestNonToolContentUntouched:
-    """R5: oversize non-tool text and structured tool_result content survive byte-identical."""
+    """R5: oversize non-tool text survives byte-identical (KBR-223).
+
+    Pre-KBR-223 this class also pinned that structured tool_result content and
+    list-form Responses output survived at any length — the gap the KBR-169
+    truncation comment named. Those two assertions moved to
+    :class:`TestStructuredContentTruncated`, where the new posture is asserted.
+    """
 
     def test_cc_non_tool_oversize_text_survives(self) -> None:
         """R5 CC: a user message with a 100,000-char string survives the pass untouched."""
@@ -1150,7 +1166,13 @@ class TestNonToolContentUntouched:
         assert request == snapshot
 
     def test_native_non_tool_oversize_text_survives(self) -> None:
-        """R5 native: an oversize text block on a plain user message survives untouched."""
+        """R5 native: an oversize text block on a plain user message survives untouched.
+
+        The fixture's structured ``tool_result`` was moved to
+        :class:`TestStructuredContentTruncated` so the user-text arm pins
+        alone (pre-KBR-223 the structured arm truncated too, breaking this
+        test's ``count == 0`` assertion).
+        """
         request = _oversize_non_tool_native_request()
         snapshot = copy.deepcopy(request)
         count = _server()._truncate_oversized_tool_results(request)
@@ -1159,31 +1181,104 @@ class TestNonToolContentUntouched:
         # user message equals its pre-call content.
         assert request["messages"][0]["content"][0] == snapshot["messages"][0]["content"][0]
 
-    def test_native_structured_tool_result_content_survives(self) -> None:
-        """R5 native: tool_result.content as a list (structured payload) survives at any length."""
-        request = _oversize_non_tool_native_request()
+    def test_responses_message_oversize_text_survives(self) -> None:
+        """R5 Responses: an oversize ``input_text`` part on a message item survives untouched.
+
+        The fixture's list-form ``output`` was moved to
+        :class:`TestStructuredContentTruncated` so the message-text arm pins
+        alone (pre-KBR-223 the list output truncated too, breaking this
+        test's ``body == snapshot`` assertion).
+        """
+        body = _oversize_non_tool_responses_body()
+        snapshot = copy.deepcopy(body)
+        count = _server()._truncate_oversized_responses_outputs(body)
+        assert count == 0
+        assert body == snapshot
+
+
+# ── KBR-223: structured tool-result content is measured and truncated ──────
+
+
+class TestStructuredContentTruncated:
+    """KBR-223: oversized structured tool-result payloads now truncate.
+
+    Pre-KBR-223 these sites keyed on string content only; an oversized
+    structured ``tool_result`` (native) or list-form Responses ``output``
+    shipped untruncated. The shared extractor ``_tool_result_content_size``
+    measures both arms now.
+    """
+
+    def test_native_structured_tool_result_over_limit_truncates(self) -> None:
+        request = {
+            "model": "claude-sonnet-5",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "small"}]},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "a", "name": "stub", "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "a",
+                            "content": [{"type": "text", "text": "x" * 100_000}],
+                        }
+                    ],
+                },
+            ],
+            "tools": _native_stub_tools(),
+        }
         snapshot = copy.deepcopy(request)
         count = _server()._truncate_oversized_tool_results(request)
-        assert count == 0
-        # Pin only the structured-content arm: the tool_result block's
-        # ``content`` list (an array of part dicts) equals its pre-call list.
-        assert request["messages"][2]["content"][0]["content"] == snapshot["messages"][2]["content"][0]["content"]
+        assert count == 1
+        assert "Tool output truncated" in request["messages"][2]["content"][0]["content"]
+        # The plain user text in messages[0] is untouched.
+        assert request["messages"][0] == snapshot["messages"][0]
 
-    def test_responses_message_oversize_text_survives(self) -> None:
-        """R5 Responses: an oversize ``input_text`` part on a message item survives untouched."""
-        body = _oversize_non_tool_responses_body()
+    def test_responses_list_form_output_over_limit_truncates(self) -> None:
+        body = {
+            "model": "gpt-4o",
+            "tools": _responses_stub_tools(),
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "small"}]},
+                {"type": "function_call", "call_id": "a", "name": "stub", "arguments": "{}"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "a",
+                    "output": [{"type": "input_text", "text": "x" * 100_000}],
+                },
+            ],
+        }
         snapshot = copy.deepcopy(body)
         count = _server()._truncate_oversized_responses_outputs(body)
-        assert count == 0
-        assert body == snapshot
+        assert count == 1
+        assert "Tool output truncated" in body["input"][2]["output"]
+        # The message item in input[0] is untouched.
+        assert body["input"][0] == snapshot["input"][0]
 
-    def test_responses_list_form_output_survives(self) -> None:
-        """R5 Responses: list-form function_call_output.output survives at any length."""
-        body = _oversize_non_tool_responses_body()
-        snapshot = copy.deepcopy(body)
-        count = _server()._truncate_oversized_responses_outputs(body)
-        assert count == 0
-        assert body == snapshot
+    def test_cc_compaction_step1_list_tool_result_over_limit_truncates(self) -> None:
+        """M4 stays CC-shape only (KBR-223); ``role: "tool"`` list content truncates.
+
+        A small ``max_messages_chars`` budget engages compaction regardless of
+        the static threshold, so step 1 runs without a multi-megabyte fixture.
+        """
+        server = _server()
+        messages = [
+            {"role": "user", "content": "compact me"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "a", "type": "function", "function": {"name": "stub", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": [{"type": "text", "text": "x" * 100_000}]},
+        ]
+        compacted = server._compact_messages(messages, max_messages_chars=1000)
+        tool_msgs = [m for m in compacted if m.get("role") == "tool"]
+        assert tool_msgs, "compaction dropped the tool message entirely"
+        assert "Tool output truncated" in tool_msgs[0]["content"]
 
 
 # ── Constructed: boundary (R3 + R4 exact) ──────────────────────────────────
