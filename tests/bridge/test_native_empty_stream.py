@@ -582,7 +582,7 @@ class TestErrorEventBeforeContent:
         of parity: the health model now protects a fully-erroring pool
         from the worst-case hammering the KBR-241 D2 amendment left in.
         """
-        budget = (server_module._MAX_RETRIES + 1) * 2 + len(server_module._EMPTY_FINAL_DELAYS)
+        # The pre-fix budget: (server_module._MAX_RETRIES + 1) * 2 + len(_EMPTY_FINAL_DELAYS) == 10.
         server = _balancing_server()
         for health in server._backend_health:
             health["transport_error_count"] = 1
@@ -592,21 +592,24 @@ class TestErrorEventBeforeContent:
                 m.post(_upstream(i), body=error_reply, headers=_SSE_HEADERS, repeat=True)
             status, body = await _stream(server)
             posts = _posts(m)
-        # The pool is two backends; with the cooldown charged per attempt,
-        # both are quarantined after two draws and the ladder ends well
-        # short of the pre-fix ten-attempt budget. The pre-fix literal is
-        # retained as a comment so the change is auditable.
-        assert posts < budget, (
-            f"the cooldown cuts the ladder short of the pre-fix {budget}-attempt budget; saw {posts}"
+        # The pool is two backends; with the cooldown charged per attempt, both
+        # are quarantined after two draws and the ladder ends: attempt 2's
+        # `_any_healthy_backend()` is False and the final-delay index for
+        # attempt 2 falls outside `_EMPTY_FINAL_DELAYS`, so `retry` goes False.
+        # The pre-fix budget literal is kept above so the change is auditable.
+        assert posts == 2, (
+            f"one draw per backend, then the cooldown empties the pool; saw {posts}"
         )
         assert status == 502
         assert json.loads(body)["error"]["reason"] == "upstream_error"
         assert all(not h["healthy"] for h in server._backend_health), (
             "every backend the ladder drew and found erroring carries the cooldown"
         )
-        # Each stream-error charge resets transport_error_count (failure_kind="hard"
-        # defaults reset both stream_error_count and transport_error_count), so the
-        # pre-test preset of 1 is cleared on every backend by the charge.
+        # Each stream-error charge resets transport_error_count: the charge passes a
+        # short cooldown without a failure_kind, and `_mark_backend_unhealthy`'s
+        # backward-compat rule treats that as a "stream" error (increments
+        # stream_error_count, zeroes transport_error_count). The pre-test preset of 1
+        # is cleared on every backend by the charge.
         assert [h["transport_error_count"] for h in server._backend_health] == [0, 0]
 
     async def test_truncation_before_an_error_still_fails_at_once(self):

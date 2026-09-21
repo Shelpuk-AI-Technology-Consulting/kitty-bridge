@@ -817,9 +817,10 @@ of the protocol that is not represented.
 
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 
-Only providers kitty talks to in Anthropic's own format — `anthropic`, `custom_anthropic`, `zai_coding`,
-`minimax_token`, and `opencode_go` for the models it serves on Anthropic's format — streaming or not: the `400`
-needs a reply in Anthropic's Messages shape, so a Chat Completions-translated provider never produces it. The model
+On `/v1/messages`, streaming or not, for every upstream kitty serves — native Anthropic-format providers and
+Chat Completions-translated providers alike. (The translated route reads the upstream's own `finish_reason`,
+so the `400` there is triggered by a `length` finish — or by an upstream that literally sends
+`model_context_window_exceeded` as its finish reason.) The model
 used its whole output budget — typically all of it on thinking — or filled its context window
 (`model_context_window_exceeded`) before writing anything. A retry cannot fix that, so kitty fails the request at once
 with a `400` carrying `"reason": "max_tokens_before_content"` (or `"model_context_window_exceeded_before_content"`).
