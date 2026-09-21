@@ -374,6 +374,11 @@ def _remove_if_present(path: str) -> None:
 def run_captured(argv: list[str], *, cwd: str) -> tuple[int, str]:
     """Run a command and capture its output.
 
+    The captured output is decoded as UTF-8 with ``errors="replace"``, never
+    with the locale codepage ``text=True`` alone selects: one child byte the
+    codepage cannot represent used to raise :exc:`UnicodeDecodeError` into
+    every caller (KBR-265).
+
     Args:
         argv: The command.
         cwd: The directory to run it in.
@@ -382,7 +387,9 @@ def run_captured(argv: list[str], *, cwd: str) -> tuple[int, str]:
         ``(exit_code, stdout)``. A program that cannot be started gives ``(127, "")``.
     """
     try:
-        completed = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+        completed = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
+        )
     except OSError:
         return 127, ""
     return completed.returncode, completed.stdout

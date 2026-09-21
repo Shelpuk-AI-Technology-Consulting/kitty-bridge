@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import ipaddress
 import json
@@ -1936,6 +1937,8 @@ class TestTheWindowsConsoleDetachment:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             # A private console for the launcher and everything it starts —
             # the broadcast's whole blast radius. CREATE_NEW_CONSOLE is the
             # one flag the vendor doc describes outright: "a new console that
@@ -2054,6 +2057,35 @@ class TestTheWindowsConsoleDetachment:
             "the launcher opens the snapshot path directly for writing; an "
             "exists() waiter can then read the empty file json.dump has not "
             "filled yet (KBR-275)"
+        )
+
+    def test_the_console_break_launcher_popen_decodes_with_errors_replace(self) -> None:
+        """The launcher Popen carries the pinned UTF-8/replace decode (KBR-265).
+
+        Mirrors the KBR-275 guard above: that one pins the launcher child's
+        atomic snapshot write, this one pins the parent's read-back. ``text=True``
+        alone decodes the parent's pipe wrapper with the system ANSI codepage in
+        strict mode, and one byte the codepage cannot represent (the Windows
+        runner's ``0x90``) crashed the reader thread (KBR-265). Pinning both
+        kwargs makes the decode locale-independent and crash-free.
+
+        Substring on the method's source (KBR-275 mirror): the ``Popen`` call
+        spreads across several lines, so the assertion targets the keyword
+        literals. An extraction of the ``Popen`` into a helper would trip this
+        guard, which is the guard doing its job.
+        """
+        source = inspect.getsource(
+            self.test_a_background_bridge_survives_a_console_break_in_its_launching_console
+        )
+        assert 'encoding="utf-8"' in source, (
+            "the console-break launcher Popen decodes with the locale codepage in "
+            "strict mode; one non-cp1252 byte from the launcher's traceback "
+            "crashes the reader thread (KBR-265)"
+        )
+        assert 'errors="replace"' in source, (
+            "the console-break launcher Popen decodes with the locale codepage in "
+            "strict mode; one non-cp1252 byte from the launcher's traceback "
+            "crashes the reader thread (KBR-265)"
         )
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows console behaviour")

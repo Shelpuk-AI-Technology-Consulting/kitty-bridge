@@ -606,6 +606,28 @@ def test_run_captured_reports_a_missing_program_as_a_failure(tmp_path: Path) -> 
     assert tmux_wrap.run_captured(["kitty-no-such-program-xyz"], cwd=str(tmp_path))[0] != 0
 
 
+def test_run_captured_survives_an_undecodable_byte(tmp_path: Path) -> None:
+    """A child byte the locale codepage cannot decode is mojibake, not a crash (KBR-265).
+
+    ``text=True`` decodes the parent side of the pipes with the system ANSI
+    codepage (cp1252 on ``windows-latest``, the POSIX locale elsewhere) in
+    strict mode, so one hostile byte killed ``run_captured``'s caller with
+    :exc:`UnicodeDecodeError` from ``communicate()``. The byte ``0x90`` is the
+    one the Windows leg recorded: undefined in cp1252 *and* an invalid lone
+    UTF-8 byte, so the defect reproduces on every leg and this assertion is red
+    without the ``encoding``/``errors`` pair. The ASCII trailer proves the
+    child ran past the hostile byte and that exactly one byte became one
+    replacement character; ``code == 0`` doubles as the "the child ran" check,
+    because ``run_captured``'s ``OSError`` branch returns ``(127, "")`` and
+    would fail the stdout half too.
+    """
+    code, out = tmux_wrap.run_captured(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\x90\\n!\\n'); sys.exit(0)"],
+        cwd=str(tmp_path),
+    )
+    assert (code, out) == (0, "�\n!\n")
+
+
 # --- R14: wiring into kitty.cli.main.main ------------------------------------
 
 
