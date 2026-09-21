@@ -343,6 +343,7 @@ class TestStructuralDiff:
             paths=(c.CONVERSATION_TURNS,),
             conditional=False,
             design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
         )
         narrow = r.MutationRow(
             id="Z-NARROW",
@@ -351,6 +352,7 @@ class TestStructuralDiff:
             paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
             conditional=False,
             design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
         )
 
         claimers = oracle._claim_matching(
@@ -423,6 +425,7 @@ class TestAssertion1:
             paths=(c.NOT_PROJECTABLE,),
             conditional=False,
             design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
             not_projectable_reason="test escape",
         )
         inbound = _empty_request(_envelope_with_model("a"))
@@ -514,6 +517,7 @@ def _conditional_row() -> r.MutationRow:
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
         conditional=True,
         design_ref="test",
+        scope=(r.ALL_PROVIDERS,),
     )
 
 
@@ -593,6 +597,7 @@ class TestAssertion2:
             paths=(c.CONVERSATION_TURNS,),
             conditional=False,
             design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
         )
 
         inbound = Request(
@@ -629,6 +634,7 @@ class TestAssertion2:
             paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
             conditional=False,
             design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
         )
 
         inbound = Request(
@@ -665,6 +671,7 @@ class TestAssertion2:
             paths=(c.CONVERSATION_TURNS,),
             conditional=True,
             design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
         )
         # Triggered row anchored at the narrower
         # ``conversation.turns[*].parts[*].id`` — its anchor is deeper
@@ -676,6 +683,7 @@ class TestAssertion2:
             paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
             conditional=False,
             design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
         )
 
         inbound = Request(
@@ -713,6 +721,7 @@ class TestAssertion2:
             paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
             conditional=False,
             design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
         )
 
         inbound = Request(
