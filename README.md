@@ -729,8 +729,10 @@ distinguishable in logs from the ordinary "request too large" rejection.
 
 Applies to providers kitty talks to in Anthropic's own format: `anthropic`, `custom_anthropic`, `zai_coding`,
 `minimax_token`, and `opencode_go` for the models it serves on Anthropic's format; to every provider kitty
-converts to Chat Completions; and to the custom-transport backends on `/v1/chat/completions` — Bedrock, Ollama
-Cloud, and the Codex/OpenAI subscription — whose native transport kitty drives itself. On the Anthropic-format side
+converts to Chat Completions; and to the custom-transport backends on every route — Bedrock, Ollama
+Cloud, and the Codex/OpenAI subscription, whose native transport kitty drives itself — whether your agent
+speaks Chat Completions, Responses (`/v1/responses`, Codex CLI), or Gemini (`/v1beta/...:streamGenerateContent`,
+Gemini CLI). On the Anthropic-format side
 kitty holds back the start of each streamed reply until it carries text or a tool call, so a reply with nothing in
 it — or only thinking, up to 10 MiB of it — can be retried before your agent sees it; on the translated side —
 Chat Completions, Responses, and Gemini clients over a Messages-wire upstream — a streamed reply that carries no
@@ -739,7 +741,9 @@ whether or not it ends with a completion marker — with the same release rule o
 the custom-transport side the branch synthesises the provider's translated Chat Completions reply and judges it
 through the same predicate, so a synthesised reply that carries no text, tool call, or reasoning takes the same
 ladder — a completion the branch's translation projects only `content` and `tool_calls` and whose parsers surface no
-reasoning cannot release the hold. Both streaming and non-streaming routes treat a reasoning-only reply as a
+reasoning cannot release the hold; on `/v1/responses` and `/v1/gemini` the judged content is additionally converted
+into the route's own event format before it ships, so the agent sees the route's native events either way. Both
+streaming and non-streaming routes treat a reasoning-only reply as a
 successful turn when the reasoning reaches the client: the streamed hold releases on the first `reasoning_content`
 delta on the plain-POST side, and the non-streaming detector counts `message.reasoning_content` as content. A
 reasoning-only Chat Completions reply succeeds on the first attempt on the plain-POST route; over a custom-transport
@@ -749,7 +753,7 @@ reaches the client — on the plain-POST route and on the translated routes, who
 exhaustion terminal itself is route-wide: a plain-POST Chat Completions-wire provider (OpenAI, OpenRouter, DeepSeek,
 or any other Chat Completions backend) whose every attempt comes back content-less lands on the same
 `type: "empty_response"` D4 event, and the same terminal fires for the three custom-transport backends when every
-attempt on a custom-transport route comes back content-less. Both flavours use the empty ladder — the terminal is
+attempt on any route's custom-transport segment comes back content-less. Both flavours use the empty ladder — the terminal is
 what the ladder serves. This error means every attempt kitty made came back empty. Nothing reached the agent, so
 simply resend; if it persists, the provider or model is misbehaving.
 
