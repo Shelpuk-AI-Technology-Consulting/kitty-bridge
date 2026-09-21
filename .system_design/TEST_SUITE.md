@@ -5536,6 +5536,25 @@ by what the artifact *declares*.
 
 ---
 
+### 8.7 Box-local credentials for owner-side live-verify sessions
+
+The nightly jobs' credentials come from CI secrets (§8.6). A second class of
+credentialed session exists that CI cannot serve: the **owner-performed live
+verifications** (KBR-238's AC-4 gate, KBR-246, KBR-252), which probe real
+provider behaviour and record the verdicts on tickets. Their credentials are
+**box-local, never committed**: provisioned into `~/.config/kitty/` by KBR-294
+(2026-09-21) — profile `anthropic-firstparty` (provider `anthropic`,
+`api.anthropic.com`) and profile `opencode-go` (provider `opencode_go`,
+`opencode.ai/zen/go`) — both outside every balancing pool and not default, so
+paid credits burn only in an explicitly launched probe session. Neither key
+may appear in any committed file, PR description, or Jira comment; echo paths
+mask values with length retained (`redact_url_for_display` style). The
+dependency itself is filed as a credential ticket that `blocks` the
+verification tickets until the keys exist — KBR-294 gates KBR-246 and
+KBR-252 — so the owner-side gate cannot be silently dropped.
+
+---
+
 ## 9. Gap register
 
 ### 9.1 What the current suite already does well
