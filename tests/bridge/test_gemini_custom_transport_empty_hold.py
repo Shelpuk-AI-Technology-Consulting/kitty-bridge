@@ -610,7 +610,15 @@ async def test_an_exhausted_custom_transport_empty_ladder_ends_in_the_d4_termina
 
     assert status == 200
     assert calls == 3  # n_backends (1) + len(_EMPTY_FINAL_DELAYS)
-    assert '"reason": "empty_response"' in client_body
+    # Parsed D4 discriminator (the KBR-249 vacuous-oracle trap — a raw
+    # substring on ``"reason": "empty_response"`` would pass on any payload
+    # that happens to contain that string in some other context). The
+    # Gemini D4 event is a ``data:`` payload with shape
+    # ``{"error":{"code":502,"message":...,"reason":"empty_response"}}``.
+    error_payloads = [
+        payload for payload in _parse_data_lines(client_body) if isinstance(payload.get("error"), dict)
+    ]
+    assert any(payload["error"].get("reason") == "empty_response" for payload in error_payloads)
     assert _NATIVE_EMPTY_REPLY_MESSAGE in client_body
     # The held synthesis was discarded, not flushed: no content on the wire,
     # and no raw Chat Completions chunk either.
