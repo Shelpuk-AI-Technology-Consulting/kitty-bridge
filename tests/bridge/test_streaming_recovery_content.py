@@ -774,9 +774,10 @@ class TestMessagesWirePreContentErrorQuarantine:
     erroring backend kept drawing ~1/n of the attempts on a balancing pool.
 
     Red at base: the empty ladder runs the retries without marking the
-    backend unhealthy — the assertion ``_backend_health[0]["healthy"] is
-    False`` fails today (the backend stays healthy). After the fix the
-    backend carries the stream cooldown and is marked unhealthy.
+    backend unhealthy — the assertion that exactly one backend ends the
+    request unhealthy fails today (both stay healthy). After the fix the
+    erroring backend — whichever one selection drew — carries the stream
+    cooldown and is marked unhealthy.
     """
 
     @pytest.mark.asyncio
@@ -810,13 +811,14 @@ class TestMessagesWirePreContentErrorQuarantine:
             finally:
                 await server.stop_async()
 
-        # Parity fix: the first backend carries the stream-error cooldown
+        # Parity fix: exactly one backend carries the stream-error cooldown
         # so a balancing pool stops drawing the persistently-erroring one.
-        backend_zero_health = server._backend_health[0]
-        assert backend_zero_health["healthy"] is False, (
-            "Messages-wire pre-content error must charge the backend cooldown"
+        # Selection is random, so we count rather than index.
+        quarantined = [h for h in server._backend_health if not h["healthy"]]
+        assert len(quarantined) == 1, (
+            "the erroring backend must carry the stream cooldown"
         )
-        assert backend_zero_health["failure_count"] >= 1
+        assert quarantined[0]["failure_count"] >= 1
 
 
 class TestPostEmissionTimeoutEndings:
