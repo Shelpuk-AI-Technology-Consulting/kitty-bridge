@@ -1900,11 +1900,20 @@ None`. `mutmut` closes that gap.
   Configured in `pyproject.toml` under `[tool.mutmut]`, where `source_paths` and
   `pytest_add_cli_args_test_selection` take **arrays**.
 - **Test selection:** `pytest_add_cli_args_test_selection = ["-m", "l1", "--ignore",
-  "tests/test_internal_keys_not_sent_upstream.py"]`. Mutation testing measures the L1
-  suite; letting it run L3 subsystem tests would make each mutant minutes long and attribute
-  kills to the wrong layer. The one `--ignore` is mutmut-only — the L1 gate still runs the
-  file — because mutmut's clean-run context trips it (see `.system_design/MUTATION_BASELINE.md`
-  for the rationale); the gate's own selection is unchanged.
+  "tests/test_internal_keys_not_sent_upstream.py"]` followed by one `--ignore <path>` row per
+  module in `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the fifteen §8.2
+  socket/process-binding modules, KBR-290). Mutation testing measures the L1 suite; letting it
+  run L3 subsystem tests would make each mutant minutes long and attribute kills to the wrong
+  layer. The `tests/test_internal_keys_not_sent_upstream.py` `--ignore` is mutmut-only — the
+  L1 gate still runs the file — because mutmut's clean-run context trips it (see
+  `.system_design/MUTATION_BASELINE.md` for the rationale); the §8.2 `--ignore` rows are
+  likewise mutmut-only — the Fast job's `pytest -m "l1 or l2"` selection still collects every
+  one of them on every push under KBR-272's timeout marks, while the nightly mutation run
+  never exercises loopback socket timing at all (mirroring §8.2's earlier "may want to
+  deselect this file from the mutation baseline rather than from the gate" precedent for
+  `tests/cli/test_stream_encoding.py`). The full selection list is held against the registry
+  by the l2 contract guard `tests/test_socket_binding_l1_mutation_exclusion.py`; the
+  registry is the source of truth KBR-272's timeout-mark guard also reads.
 - **Scope — narrow, but it must include the code the rationale is about.** An earlier draft
   justified the subset by "a mutation surviving in the compactor means the suite would not notice
   kitty eating a tool result", then excluded `server.py`, where the compactor lives. Corrected
@@ -4634,25 +4643,23 @@ standing amnesty:
   its reason.
 
 A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
-Twelve modules under `tests/` bind real sockets or spawn processes and are `l1` by default
-today — `test_egress_https_proxy.py` foremost among them (an earlier draft said "roughly six";
-the count has grown as Epic B, E and the KBR-132/144/176/220 fixes each landed a socket-binding
-module, and the bullet list below is now the authoritative enumeration). Since T-W5 that file's
-shared fixture plus `tests/harness/test_connect_proxy.py` must move **with** it: an
-extraction and its own regression evidence landing in two different jobs would leave one proving
-the other in a run that no longer includes it. Reclassifying them is correct and is T-K6's
-business, together with the job that runs them; doing it earlier would remove them from every
-gate. T-H1 must take that reclassification into account before it measures a mutation
-baseline, because it selects on `l1`.
+Fifteen modules under `tests/` bind real sockets or spawn processes and are `l1` by default
+today (an earlier draft said "roughly six"; the count has grown as Epic B, E and the
+KBR-132/144/176/220 fixes each landed a socket-binding module, and the bullet list below is now
+the authoritative enumeration). Since T-W5 the egress shared fixture plus
+`tests/harness/test_connect_proxy.py` must move **with** it: an extraction and its own
+regression evidence landing in two different jobs would leave one proving the other in a run
+that no longer includes it. Reclassifying them is correct and is T-K6's business, together with
+the job that runs them; doing it earlier would remove them from every gate. T-H1 must take that
+reclassification into account before it measures a mutation baseline, because it selects on
+`l1`.
 
-**Eleven modules are bulleted below — in nine bullets, since the T-W4 and T-W8 rows name two
-modules each — and `tests/cli/test_stream_encoding.py` (KBR-10) is described after them, twelve in
-all, named here so T-K6 inherits a list rather than a search** — the count
-is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph were already
-drifting apart before T-W8 added two; spelling out both is what stops the next addition
-guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it, which
-still names `tests/test_egress_https_proxy.py` and `tests/harness/test_connect_proxy.py`
-separately.)
+**Fourteen modules are bulleted below — in eleven bullets, since the T-W4, T-W8 and KBR-272-egress
+rows each name two modules — and `tests/cli/test_stream_encoding.py`
+(KBR-10) is described after them, fifteen in all, named here so T-K6 inherits a list rather than a
+search** — the count is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph
+were already drifting apart before T-W8 added two; spelling out both is what stops the next
+addition guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it.)
 
 - **KBR-132:** `tests/bridge/test_tls_certs.py` spawns a real `openssl` in one of its five cases.
   KBR-132 deliberately did **not** move it — the rule above applies to a test fixing a skip defect
@@ -4728,6 +4735,18 @@ separately.)
   legs have a result and no figure yet. One cost to know about: a bridge that misses the 5 s window fails the case
   with *"did not report ready"* rather than slowing it, so a slow runner shows up as a red leg,
   never as a quiet delay.
+- **KBR-272 (egress + CONNECT proxy, T-W5):** `tests/test_egress_https_proxy.py` performs real
+  TLS handshakes through a local TLS CONNECT proxy — every other egress test is mocked at the
+  socket layer, this module proves the unmocked path. Since T-W5 its shared fixture
+  (`tests/harness/test_connect_proxy.py`) must move **with** it; the two are one module's worth of
+  evidence, not two. Run **on demand** by the CI matrix today; the §8.3 honest-gap registry
+  acknowledges this is one of the modules the eventual Subsystem job (T-K6) will reclassify.
+- **KBR-272 (crash resilience):** `tests/bridge/test_crash_resilience.py` binds real
+  `BridgeServer`s on ephemeral ports across its cases, following the convention KBR-144 cited when
+  adding `tests/bridge/test_responses_string_input.py` (no bullet of its own then — the
+  crash-resilience tests predate the convention's articulation). Its socket-binding reality was
+  unenumerated before KBR-272 surfaced the drift; it now joins the bullets so the §8.2 set the
+  timeout registry pins matches the set the doc claims.
 
 **One cross-cutting cost, added by KBR-188's fix.** Every conformance probe now begins by waiting
 for the clock to report a new instant (§8.3). Measured at **80 calls** across the harness suite:
@@ -4751,6 +4770,20 @@ pseudo-terminal as stdin on POSIX and `NUL` on Windows, so all six legs build th
 One cost to know about: a child that gets past **both** guards — the prompts' and the menus' —
 with that stdin **blocks** waiting for keys nothing will type, so a regression there shows up as
 the runner's 60-second `TimeoutExpired`, not as a fast assertion.
+
+**KBR-290 reconciliation (2026-09-21).** The fifteen §8.2 modules are excluded from **mutmut's** test
+selection (`--ignore <path>` rows in `[tool.mutmut] pytest_add_cli_args_test_selection`) so the
+nightly mutation run never depends on loopback socket timing. The Fast job selection
+(`pytest -m "l1 or l2"`, `.github/workflows/tests.yml` line 110) is unchanged — every module here
+still runs on every push under KBR-272's timeout marks. The source of truth for the deselection
+set is `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the same tuple KBR-272's
+timeout-mark guard reads), held against `pyproject.toml` by the l2 contract guard
+`tests/test_socket_binding_l1_mutation_exclusion.py`. Three operational consequences for T-H1's
+re-measure: kills currently credited through these modules vanish (the §6.1 caveat); mutants they
+covered exclusively reclassify to `no_tests` and stay in the score denominator (most visible in
+`compaction_and_pairing` and `egress`); and the first `mutmut run` after this PR merges invalidates
+the cached verdict set entirely (per `_apply_config_change_invalidation` in pinned mutmut 3.8.0)
+— budget that run as a full re-run, not a resume.
 
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
 release, but `publish.yml` currently depends only on the reusable `tests.yml`. Putting the load
