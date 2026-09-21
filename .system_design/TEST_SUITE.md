@@ -5546,12 +5546,31 @@ provider behaviour and record the verdicts on tickets. Their credentials are
 (2026-09-21) — profile `anthropic-firstparty` (provider `anthropic`,
 `api.anthropic.com`) and profile `opencode-go` (provider `opencode_go`,
 `opencode.ai/zen/go`) — both outside every balancing pool and not default, so
-paid credits burn only in an explicitly launched probe session. Neither key
-may appear in any committed file, PR description, or Jira comment; echo paths
-mask values with length retained (`redact_url_for_display` style). The
-dependency itself is filed as a credential ticket that `blocks` the
-verification tickets until the keys exist — KBR-294 gates KBR-246 and
-KBR-252 — so the owner-side gate cannot be silently dropped.
+paid credits burn only in an explicitly launched probe session.
+
+**Redaction discipline.** Neither key may appear in any committed file, PR
+description, or Jira comment. Echo paths cover two classes: URL query values,
+fragments, and userinfo are masked by `ProviderAdapter.redact_url_for_display`
+(every value replaced by a fixed `****` mask — parameter names kept for
+diagnostic value; length is **not** preserved); request headers whose name
+or value contains a credential (`auth`, `key`, `token`, `cookie`, `secret`,
+`signature`) are masked by `BridgeServer._debug_headers` under the rule
+codified in `SYSTEM_DESIGN.md` §9.2. The first protects URL echoes; the
+second is what actually protects `x-api-key` and `Authorization: Bearer`
+echoes, since those travel in headers rather than URLs.
+
+**Gate semantics.** The credential ticket `blocks` the verification tickets
+until KBR-294 is *Done* — keys are necessary but not sufficient: account-class
+confirmation (KBR-294 AC-1's strict-prefix-check line, owner-confirmed from
+the KBR-238 probes) must also close before the link can be released. A
+reader unblocking KBR-246 cannot release KBR-294's gate on key existence
+alone.
+
+**Pool exemption.** Unlike §8.6's CI profiles — which are balancing pools
+whose "no single name here could be true of the run" constraint forbids
+assertions naming one member — these two profiles are single-named regulars
+and assertions may name them directly. §8.6's constraint is *not* imported
+here.
 
 ---
 
