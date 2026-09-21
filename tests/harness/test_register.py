@@ -779,8 +779,35 @@ class TestTheScopeColumn:
         :class:`MessagesTranslator` when ``self._active_provider.use_native_messages``
         is true. ``custom_anthropic`` and ``zai_coding`` hardcode it true;
         ``minimax_token`` is profile-driven and defaults off, so it stays in.
-        Twenty-one adapters.
+        Twenty-one adapters. The constant is pinned against a literal in
+        addition to the row's agreement with it (the M9a posture): the
+        site↔scope subset check cannot see this row — its site is a bridge
+        file, not a providers file — so a swap inside the 21-key tuple would
+        otherwise flip row and test together and still pass.
         """
+        assert set(r._TRANSLATED_MESSAGES_ADAPTERS) == {
+            "anthropic",
+            "azure",
+            "bedrock",
+            "byteplus",
+            "custom_openai",
+            "fireworks",
+            "google_aistudio",
+            "kimi",
+            "mimo",
+            "minimax",
+            "minimax_token",
+            "novita",
+            "ollama",
+            "ollama_cloud",
+            "openai",
+            "openai_subscription",
+            "openrouter",
+            "opencode_go",
+            "vertex",
+            "zai_coding_cc",
+            "zai_regular",
+        }
         m16_scope = set(_row("M16").scope)
         assert r.ALL_PROVIDERS not in m16_scope
         assert "custom_anthropic" not in m16_scope
