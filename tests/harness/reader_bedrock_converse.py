@@ -721,12 +721,19 @@ def _read_tool_specification(
     """Read a single ``ToolSpecification`` block.
 
     ``name`` and ``inputSchema`` are required (the schema marks them
-    required); ``description`` and ``strict`` are optional. A missing
-    required field residualises at its own path and the tool declaration
-    is **not** produced — a tool without a name cannot be paired with its
-    result or addressed by a register row, the same ground on which
+    required); ``description`` and ``strict`` are optional.
+
+    The ``name`` check raises (§7.4.2 rule 7 row 2, KBR-295) — a tool
+    without a name cannot be paired with its result or addressed by a
+    register row, the same ground on which
     :data:`~harness.contract.STOP_REASONS` gives ``other`` its escape
-    instead of the residual.
+    instead of the residual. A bad ``inputSchema`` — the other required
+    field — keeps its T-A5 residualise-and-omit posture: the leaf
+    residualises at its path and the tool declaration is **not** produced.
+    The optional ``description`` / ``strict`` residualise a wrong type at
+    their paths but the declaration **is** still produced with the field
+    ``None``. The name-vs-inputSchema asymmetry is pinned by
+    ``TestDeclarationNameRequired`` (KBR-295 AC-5).
 
     Args:
         tool_spec: The ``toolSpec`` value, already known to be a Mapping.
@@ -736,12 +743,9 @@ def _read_tool_specification(
 
     Returns:
         The :class:`~harness.contract.ToolDecl`, or ``None`` when a required
-        field is missing or wrongly typed.
+        field other than ``name`` is missing or wrongly typed.
     """
-    name = tool_spec.get("name")
-    if not isinstance(name, str):
-        residual[f"{prefix}.toolSpec.name"] = name
-        return None
+    name = _require_tool_call_name(tool_spec.get("name"), f"{prefix}.toolSpec.name")
 
     input_schema = tool_spec.get("inputSchema")
     if not isinstance(input_schema, Mapping):
