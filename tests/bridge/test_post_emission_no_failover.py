@@ -1042,6 +1042,47 @@ class TestResponsesEmptyVerdictAfterContent:
         # second attempt's bytes.
         assert body.count(b'"delta": "Hi"') == 1
 
+    @pytest.mark.asyncio
+    async def test_content_then_in_stream_error_ends_the_turn_with_one_accurate_error(self):
+        """Content → in-stream error (no empty verdict) ends the turn with one accurate error.
+
+        The Q14(a) arm fires for ANY in-stream error after the attempt wrote —
+        the empty verdict need not hold, because content accumulated after the
+        reset makes `response_was_empty` False. Before KBR-247 this sequence
+        fell through to the success path: the mid-stream cooldown set at
+        detection was silently reset by `_mark_backend_healthy` and the
+        synthesize reported `status: "completed"`. The pin: one error event
+        carrying the post-emission reason (not the ladder-exhaustion wording —
+        only one provider errored), `status: "incomplete"`, and the errored
+        backend keeps the cooldown its mid-stream error earned.
+        """
+        content_then_error = (
+            _CC_CONTENT_CHUNK
+            + b'data: {"error":{"code":"overloaded_error","message":"upstream hiccup"}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        server = _make_responses_server(2)
+        body, posts = await _drive_stream(
+            server,
+            "/v1/responses",
+            _RESPONSES_REQUEST,
+            content_then_error,
+        )
+
+        assert posts == 1, f"the upstream was asked {posts} times after content was emitted"
+        assert body.count(b'"delta": "Hi"') == 1
+        error_events = [data for name, data in _events(body) if name == "error"]
+        assert len(error_events) == 1, f"the body should carry one error event, found {len(error_events)}"
+        assert error_events[0]["code"] == "upstream_error"
+        assert error_events[0]["message"].startswith("Upstream provider sent an error")
+        names = [name for name, _ in _events(body)]
+        assert names[-1] == "response.completed"
+        assert body.count(b'"status": "incomplete"') >= 1
+        # The success path never ran: the errored turn is not a completion and
+        # the backend that erred mid-stream keeps its stream-error cooldown.
+        assert server._model_stats("test-model")["completions"] == 0
+        assert server._backend_health[server._current_backend_idx]["healthy"] is False
+
 
 class TestGeminiEmptyVerdictAfterContent:
     """An empty-response verdict on /v1/gemini after content reached the client ends the turn (KBR-247)."""
@@ -1216,6 +1257,91 @@ class TestGeminiEmptyVerdictAfterContent:
         assert posts >= 2, "the pre-emission ladder must still walk on Gemini"
         # The successful retry completed normally — no terminal error event
         # crossed the wire (the empty verdict was caught before any byte).
+        error_blocks = body.split(b"\n\n")
+        error_payloads = [
+            json.loads(block.split(b"data: ", 1)[1].decode())
+            for block in error_blocks
+            if block.startswith(b"data: {") and b'"error":' in block
+        ]
+        assert error_payloads == [], "the successful retry must complete, not error"
+
+    @pytest.mark.asyncio
+    async def test_tool_call_only_stream_is_still_pre_emission(self):
+        """A tool-call delta after the empty verdict writes nothing, so the ladder still runs.
+
+        The Gemini wire has no live tool-call events: a delta's arguments sit
+        in `_tool_call_buffers` until a finish chunk emits the `functionCall`
+        part. With no byte on the wire the verdict is pre-emission by
+        observation — `_request_emitted` must stay False — and the empty
+        ladder walks to a healthy backend. This is the Gemini side of the
+        Responses tool-call oracle's pre-condition: on this route the
+        "exactly one arguments-delta" assertion has no analogue, because a
+        half-delivered delta never crosses the wire at all — the splice hazard
+        is pinned by `test_empty_verdict_after_text_does_not_deliver_a_late_tool_call`.
+        A regression that keyed `_request_emitted` on translation activity
+        instead of bytes on the wire would error this turn; the pin keeps it
+        walking the ladder.
+        """
+        empty_then_tool_only = (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}],"model":"test-model","usage":null}\n\n'
+            + b'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,'
+            b'"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\\"q\\":"}}]},'
+            b'"finish_reason":null}],"model":"test-model"}\n\n'
+            + b"data: [DONE]\n\n"
+        )
+        server = _make_responses_server(2)
+        # Pin the draw: backend-0 first (empty + buffered tool call), then
+        # backend-1 (full). Same pattern as the pure-empty control above.
+        _pick = iter([0, 1])
+
+        def _fixed_select(self=server):
+            """Select backends in the scripted order, without the weighted draw."""
+            idx = next(_pick)
+            provider, key, profile = server._backends[idx]
+            server._active_provider = provider
+            server._active_key = key
+            server._active_model = profile.model
+            server._active_provider_config = profile.provider_config or {}
+            server._current_backend_idx = idx
+
+        server._select_backend = _fixed_select
+
+        with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            m.post(
+                "https://api0.example.com/v1/chat/completions",
+                body=empty_then_tool_only,
+                headers={"Content-Type": "text/event-stream"},
+                repeat=True,
+            )
+            m.post(
+                "https://api1.example.com/v1/chat/completions",
+                body=_CC_FULL_STREAM,
+                headers={"Content-Type": "text/event-stream"},
+                repeat=True,
+            )
+            port = await server.start_async()
+            try:
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1beta/models/test-model:streamGenerateContent",
+                        json=_GEMINI_REQUEST,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp,
+                ):
+                    body = await resp.read()
+            finally:
+                await server.stop_async()
+        posts = sum(
+            len(calls) for (method, _), calls in m.requests.items() if method == "POST"
+        )
+        assert posts >= 2, "the buffered tool call must not count as emission; the ladder must walk"
+        # No terminal error: the retry completed. Backend-0's buffered
+        # arguments never leaked (no `functionCall` on the wire — backend-1's
+        # stream carries none), and its text is the only text the client saw.
+        assert b"functionCall" not in body
+        assert body.count(b'"Hi"') == 1
         error_blocks = body.split(b"\n\n")
         error_payloads = [
             json.loads(block.split(b"data: ", 1)[1].decode())

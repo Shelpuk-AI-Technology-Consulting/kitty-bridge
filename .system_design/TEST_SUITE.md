@@ -6159,7 +6159,13 @@ in-stream error convention, ratified rather than invented** — the same princip
   event, then EOF — `streamGenerateContent`'s SSE has no typed completion event, so there
   is nothing to close and nothing to synthesize. The `reason: "empty_response"`
   discriminator is intentionally omitted here (KBR-247's own convention); the D4
-  exhaustion path above still carries the discriminator on the same route.
+  exhaustion path above still carries the discriminator on the same route. On this
+  route the model's late tool-call bytes sit in `_tool_call_buffers`, not in
+  `finish_events` — the guard ends the turn with them still buffered and they never
+  cross the wire (`test_empty_verdict_after_text_does_not_deliver_a_late_tool_call`);
+  a tool-call delta with no text after the verdict writes nothing at all, so that
+  stream is still pre-emission and keeps the ladder
+  (`test_tool_call_only_stream_is_still_pre_emission`).
 
 What was deliberately not chosen: opening the Responses lifecycle inside this guard
 (coupling KBR-247 to KBR-242's shape decision), and a Messages-uniform error-only ending

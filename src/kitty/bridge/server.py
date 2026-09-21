@@ -4425,22 +4425,23 @@ class BridgeServer:
                         if stream_error:
                             if events_emitted:
                                 logger.warning("Responses stream error after client events emitted; not retrying")
-                                # Q14(a) (KBR-247): the exhaustion arm below writes a
-                                # terminal error event, then falls through to the
-                                # empty-verdict check. The KBR-247 guard would then
-                                # fire a second error event on the same stream
-                                # (the post-emission empty verdict still holds
-                                # here because the original empty finish chunk
-                                # reset the translator). Mark the turn incomplete
-                                # for the post-loop synthesize, write the terminal
-                                # error event once, and break — the same shape
-                                # `_stream_messages` and `_stream_gemini` already
-                                # produce on the events_emitted branch.
+                                # Q14(a) (KBR-247): this arm fires for any in-stream
+                                # error after the attempt has written, not only after
+                                # an empty verdict. Falling through to the exhaustion
+                                # arm below would still end the turn (KBR-250's
+                                # break) but would claim "All upstream providers
+                                # returned errors" — false on a single-provider
+                                # profile that sent one mid-stream error. End the
+                                # turn here with the accurate reason; the post-loop
+                                # synthesize closes whatever the client saw open
+                                # under `status="incomplete"`.
                                 terminal_status = "incomplete"
                                 error_event = responses_format_error(
                                     {
                                         "code": "upstream_error",
-                                        "message": "All upstream providers returned errors",
+                                        "message": (
+                                            "Upstream provider sent an error after the response had begun"
+                                        ),
                                     },
                                     seq=translator._next_seq(),
                                 )
