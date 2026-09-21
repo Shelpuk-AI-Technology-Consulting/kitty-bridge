@@ -45,6 +45,12 @@ pytestmark = pytest.mark.l2
 #: stable under that duplication and still fails when a file starts minting a
 #: new key or when the visitor goes blind on a file.
 _EXPECTED_KEYS: dict[str, set[str]] = {
+    "bridge/gemini/translator.py": {
+        # KBR-213: GeminiTranslator mints the same `_top_k` the Messages
+        # route already mints (KBR-178) — the Gemini `topK` rides the same
+        # internal key; Anthropic-family adapters restore it.
+        "_top_k",
+    },
     "bridge/messages/translator.py": {
         "_effort",
         # KBR-222: the agent's `document` blocks, addressed to the CC message

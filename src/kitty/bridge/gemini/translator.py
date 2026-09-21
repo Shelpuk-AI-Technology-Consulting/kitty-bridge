@@ -222,6 +222,35 @@ class GeminiTranslator:
         if "topP" in gen_config:
             cc_request["top_p"] = gen_config["topP"]
 
+        # KBR-213: Gemini names the stop-sequence list ``stopSequences``; Chat
+        # Completions names it ``stop``. Without the rename the user's stop
+        # sequences die in the first hop and nothing downstream can restore
+        # them — the same shape KBR-178 settled for the Messages ingress.
+        # An empty list is omitted (it asks for no stop behaviour, and
+        # ``stop: []`` violates the published CC schema's ``StopConfiguration``
+        # ``minItems: 1``). Everything else is forwarded verbatim: a bare
+        # string, a list with non-string members, an over-limit list. The
+        # provider rejects the wrong shape; an explicit error beats an
+        # instruction silently thrown away. The empty-string scalar guard in
+        # CC-ingress ``_normalize_cc_stop`` does not run here — normalisation
+        # is single-site (KBR-178 R11, authority M15).
+        stop_sequences = gen_config.get("stopSequences")
+        if stop_sequences:
+            cc_request["stop"] = stop_sequences
+
+        # KBR-213 / KBR-178: Chat Completions declares no ``top_k`` at all, so
+        # a bare key would be a field no CC provider accepts. The value rides
+        # the internal key KBR-178 introduced; Anthropic-family adapters
+        # restore it and ``_INTERNAL_KEYS`` strips it everywhere else.
+        # Booleans are excluded because ``isinstance(True, int)`` is True;
+        # the harness reader excludes them from ``(int,)`` typing via
+        # ``_typed_leaf`` (the same bool/int subclass trap), so this guard
+        # mirrors the reader — a wire ``true`` should not project a value
+        # the projection itself rejects.
+        top_k = gen_config.get("topK")
+        if isinstance(top_k, int) and not isinstance(top_k, bool):
+            cc_request["_top_k"] = top_k
+
         # Tools mapping
         tools = self._translate_tools(gemini_request.get("tools", []))
         if tools:
