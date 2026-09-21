@@ -143,11 +143,12 @@ a reviewed decision.
   (P8's four callers, P5a's five-adapter family, M16's 21-adapter exclusion of
   the hardcoded-native pair, M9a's native trio, P4 excluding
   `openai_subscription`). L2 (`test_register_agreement.py::
-  TestEveryScopeNamesRealProviders`, 8): live-register guard, registry-reader
+  TestEveryScopeNamesRealProviders`, 9): live-register guard, registry-reader
   self-guard (23 keys + named members incl. the `zai_coding` →
   `ZaiAnthropicAdapter` file-class split), four falsification cases (bogus
   key / mixed sentinel / empty scope / site-scope omission), synthetic
-  mini-registry positive control, `RegisterSourceError` refusal.
+  mini-registry positive control, and two `RegisterSourceError` refusals
+  (unreadable source, empty dict literal).
 - **Design doc.** §3.2.4 rewritten to the carried-column state (reachability
   definition, KBR-160 survival boundary + open follow-up, P9e deferral, three
   derived facts, guard description); schema sentence "plus two"; §3.2.5 table
@@ -158,5 +159,10 @@ a reviewed decision.
   above); survival assertions at the custom-transport boundaries (KBR-160
   follow-up, home in §3.2.4); any markdown⇄scope mechanical reconciliation
   (same authority split as `site`).
-- **Status.** PR open; not merging (standing instruction).
+- **Review trail.** Requirements: two `system-design-reviewer` rounds (7 warnings;
+  one in-data contradiction). Diff: `code-reviewer` (two required fixes + polish
+  landed pre-push). CI reviewer: round 1 — comment the sentinel's subset-check
+  exemption (72d2144); round 2 — pin the native-trio constant against a literal
+  (fe70e55); round 3 — step-file L2 count 8 → 9 (this commit).
+- **Status.** PR #254 open; not merging (standing instruction).
 
