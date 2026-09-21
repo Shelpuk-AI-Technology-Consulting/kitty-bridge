@@ -28,7 +28,11 @@ kitty's own pre-flight (`validate_api_key`) with `valid=True` and
 (`validate_api_key` returns `valid=True` *with* a non-empty warning on
 timeout or connection error, so `warning is None` is the auth evidence).
 Neither profile is a member of any balancing pool and neither is default, so
-paid credits burn only in an explicitly launched probe session.
+paid credits burn only in an explicitly launched probe session — with the
+caveat that "not default" is a current-state property, not an invariant:
+deleting the default profile auto-promotes the first remaining profile as
+the new default (README, profile-management notes), so re-verify the
+not-default property after any profile deletion.
 
 The code change on this ticket is **documentation only** (the §8.7 note in
 `TEST_SUITE.md`): the ticket's scope is credential acquisition; the probes
@@ -61,14 +65,18 @@ fork PRs. The live-verify sessions KBR-246 / KBR-252 need are different:
   and the verification sessions are owner-side; both are explicitly out of
   scope per the ticket's "credential acquisition only" framing.
 - **No redaction helper** is added. Two existing rules together cover the
-  credential echo surface: `ProviderAdapter.redact_url_for_display` masks
-  every URL query value, fragment, and userinfo (replaced by a fixed `****`
-  mask — parameter names kept for diagnostic value, length not preserved —
-  covering the URL-echo paths at `validation.py:66` and
+  credential echo surface: `ProviderAdapter.redact_url_for_display` drops
+  userinfo outright and replaces every URL query value and the fragment with
+  a fixed `****` mask (parameter names kept for diagnostic value, length not
+  preserved — covering the URL-echo paths at `validation.py:66` and
   `BridgeServer._debug_url`); and `BridgeServer._debug_headers`, keyed on
   `_CREDENTIAL_NAME_STROKES = ("auth","key","token","cookie","secret","signature")`
-  and codified in `SYSTEM_DESIGN.md` §9.2, masks request headers whose name
-  or value contains a credential. The second is the rule that actually
+  and codified in `SYSTEM_DESIGN.md` §9.2, masks a header's value when its
+  **name**, lowercased, contains any stroke — a name-only rule, deliberately
+  divergent from the URL rule's mask-everything principle because a value
+  rule would redact the whole header dump. The corollary a probe author must
+  know: a credential echoed as the *value* of a header whose name carries no
+  stroke is **not** masked. The header rule is the one that actually
   protects `x-api-key` and `Authorization: Bearer` echoes — those travel in
   headers rather than URLs. The probe script's own printing is owned by
   KBR-246 / KBR-252.

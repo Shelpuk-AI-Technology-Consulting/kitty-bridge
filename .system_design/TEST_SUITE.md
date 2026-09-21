@@ -5546,18 +5546,26 @@ provider behaviour and record the verdicts on tickets. Their credentials are
 (2026-09-21) — profile `anthropic-firstparty` (provider `anthropic`,
 `api.anthropic.com`) and profile `opencode-go` (provider `opencode_go`,
 `opencode.ai/zen/go`) — both outside every balancing pool and not default, so
-paid credits burn only in an explicitly launched probe session.
+paid credits burn only in an explicitly launched probe session. "Not default"
+is a current-state property, not an invariant: deleting the default profile
+auto-promotes the first remaining profile as the new default (README,
+profile-management notes), so a later deletion could promote a paid profile —
+re-verify the not-default property after any profile deletion.
 
 **Redaction discipline.** Neither key may appear in any committed file, PR
-description, or Jira comment. Echo paths cover two classes: URL query values,
-fragments, and userinfo are masked by `ProviderAdapter.redact_url_for_display`
-(every value replaced by a fixed `****` mask — parameter names kept for
-diagnostic value; length is **not** preserved); request headers whose name
-or value contains a credential (`auth`, `key`, `token`, `cookie`, `secret`,
-`signature`) are masked by `BridgeServer._debug_headers` under the rule
-codified in `SYSTEM_DESIGN.md` §9.2. The first protects URL echoes; the
-second is what actually protects `x-api-key` and `Authorization: Bearer`
-echoes, since those travel in headers rather than URLs.
+description, or Jira comment. Echo paths cover two classes. URL echoes:
+`ProviderAdapter.redact_url_for_display` drops userinfo outright and replaces
+every query value and the fragment with a fixed `****` mask — parameter names
+kept for diagnostic value, length **not** preserved. Header echoes:
+`BridgeServer._debug_headers` masks a header's value when its **name**,
+lowercased, contains any of `auth`, `key`, `token`, `cookie`, `secret`,
+`signature` — a name-only rule whose divergence from the URL rule's
+mask-everything principle is deliberate and recorded in `SYSTEM_DESIGN.md`
+§9.2 (a value rule would redact the whole header dump). The corollary a
+probe author must know: a credential echoed as the *value* of a header whose
+name carries no stroke is **not** masked. Headers are the surface that
+matters for these two keys — `x-api-key` and `Authorization: Bearer` travel
+in headers, not URLs.
 
 **Gate semantics.** The credential ticket `blocks` the verification tickets
 until KBR-294 is *Done* — keys are necessary but not sufficient: account-class
