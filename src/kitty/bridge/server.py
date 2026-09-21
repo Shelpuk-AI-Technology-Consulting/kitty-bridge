@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, NoReturn, TextIO, TypedDict, cast
 import aiohttp
 from aiohttp import web
 
+from kitty.bridge.engine import TranslationEngine
 from kitty.bridge.gemini.translator import GeminiTranslator
 from kitty.bridge.messages.events import (
     format_content_block_delta_event,
@@ -38,7 +39,6 @@ from kitty.bridge.messages.events import (
 from kitty.bridge.messages.events import (
     format_error_event as messages_format_error,
 )
-from kitty.bridge.engine import TranslationEngine
 from kitty.bridge.messages.translator import (
     MessagesTranslator,
     build_user_content_message,
