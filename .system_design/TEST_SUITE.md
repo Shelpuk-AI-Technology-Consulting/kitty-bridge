@@ -4760,9 +4760,9 @@ per run, on each of the gate's six legs (four Linux interpreters, plus the Windo
 §8.4 added). It has no choice — the behaviour it proves is that kitty survives a
 hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before any in-process test
 exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~13s,
-measured on Linux), but
-T-H1 should note that mutation testing over `l1` will re-pay that cost per mutant, and may want to
-deselect this file from the mutation baseline rather than from the gate.
+measured on Linux). T-H1 should note that mutation testing over `l1` used to re-pay that cost
+per mutant — KBR-290's deselection (below) closed that question for this file together with the
+fourteen others: the mutation baseline no longer runs it, the gate still does.
 
 **KBR-204 added three of the 38**, for the same Windows family by another route: an interactive
 command whose stdin reports as a terminal while its stdout is a pipe. The children get a
@@ -4775,7 +4775,8 @@ the runner's 60-second `TimeoutExpired`, not as a fast assertion.
 selection (`--ignore <path>` rows in `[tool.mutmut] pytest_add_cli_args_test_selection`) so the
 nightly mutation run never depends on loopback socket timing. The Fast job selection
 (`pytest -m "l1 or l2"`, `.github/workflows/tests.yml` line 110) is unchanged — every module here
-still runs on every push under KBR-272's timeout marks. The source of truth for the deselection
+still runs on every push; once KBR-272 (PR #235, unmerged) lands, the same modules carry its
+120 s `pytest.mark.timeout` mark on the gate as well. The source of truth for the deselection
 set is `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the same tuple KBR-272's
 timeout-mark guard reads), held against `pyproject.toml` by the l2 contract guard
 `tests/test_socket_binding_l1_mutation_exclusion.py`. Three operational consequences for T-H1's
