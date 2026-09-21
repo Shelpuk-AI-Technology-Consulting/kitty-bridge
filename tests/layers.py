@@ -96,6 +96,7 @@ _FALLBACK_LAYER = "l1"
 _PATH_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("tests/integration/", "agent_live"),
     ("tests/acceptance/", "acceptance"),
+    ("tests/agent_smoke/", "agent_smoke"),
 )
 
 # A pytest invocation, anchored on the command position so that
