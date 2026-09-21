@@ -40,6 +40,38 @@ decision.
    `TEST_SUITE.md` §11 and update §6.1's cadence bullet with the number
    and the decision.
 
-## Delivered
+## Delivered (2026-09-22)
 
-_(implementation notes appended on completion)_
+1. **`scripts/measure_changed_code_mutation.py`** — the measurement
+   tooling. Pure core: `git diff` hunks → post-image touched lines →
+   AST body spans → touched `(class, function)` pairs (module-level +
+   class-method depth, decorator-inclusive spans, nested defs
+   attributed to their enclosing method — mutmut's mangler depth);
+   registry intersection expanding whole-module rows per touched def
+   and honouring cross-module `provider_hooks` rows against
+   `only_mutate`; function-level mangled patterns per Q11's verbatim
+   "restricted to the **functions**" framing. Runner: `subprocess.Popen`
+   in its own process group under a wall-clock cap (default 3600 s =
+   the CI job cap), SIGTERM → grace → SIGKILL, JSON summary with load
+   and monotonic-clock wall time. An empty intersection refuses
+   `--run` so zero positional patterns can never silently fall through
+   to the full `only_mutate` scope.
+2. **`tests/test_measure_changed_code_mutation.py`** (L1, 17 tests) —
+   the pure mapping, the runner contract through an injected fake, the
+   empty-intersection refusal, and the KBR-285 ground truth pinned by
+   `tests/data/kbr285_diff_snapshot.json` (a committed snapshot of the
+   analyzer's verified output for `30a91a0^1..30a91a0`, generated once
+   by a throwaway and hand-verified against the actual diff — the
+   oracle is the real diff, not a free-form list).
+3. **The measurement** (see `MUTATION_BASELINE.md`'s KBR-92 section):
+   representative PR KBR-285 (`30a91a0`); 10 §6.1-scope functions
+   covered, 1864 mutants matched; generation 112 s; the clean test
+   (the full L1 selection) 22.8 min standalone; the full local run
+   OOM-killed during stats under documented box contention.
+   **Structural finding:** positional patterns narrow only the
+   per-mutant phase — generation + clean test + stats are identical to
+   the nightly's, and the clean test alone is at the fast gate's
+   entire budget. **Q11 answered: nightly-only retained.** The tooling
+   remains valid for any future selection mechanism that can scope the
+   clean test; a CI-side confirmation measurement is the flagged
+   follow-up.

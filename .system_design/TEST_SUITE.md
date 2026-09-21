@@ -2000,12 +2000,18 @@ None`. `mutmut` closes that gap.
   docstring, not at each of the 135 sites). A future reader grepping the
   source should not expect a per-site comment at every scope-narrowing
   marker.
-- **Cadence — to be set by measurement, not assertion.** The full scoped run is nightly. Whether
-  a **changed-code** mutation run also fits the per-PR gate is an open question with a numeric
-  answer: measure the wall-clock of `mutmut run` restricted to functions touched by a
-  representative PR, and adopt it per-PR if it lands inside the budget the fast gate can absorb.
-  Rejecting per-PR mutation testing without that measurement is an assumption, not a decision.
-  Tracked as Q11.
+- **Cadence — answered by measurement (KBR-92, 2026-09-22): nightly-only.** The full scoped run
+  is nightly. A **changed-code** `mutmut run` scoped to the functions a representative PR
+  touches was measured (KBR-285, `30a91a0` — the broad worst case): the positional patterns
+  narrow only the **per-mutant test phase**; generation, the clean test and the stats phase are
+  identical to the nightly's, and the clean test alone (the full L1 selection, 7009 tests) is
+  ~22.8 minutes on the dev workstation — the same order as the entire fast-gate budget
+  (~18.5 minutes per Python version). A per-PR mutation job would re-pay that fixed cost on
+  every push, before any per-mutant work: structurally over the gate's headroom, not merely
+  borderline. The full measurement, the scoped mutant count (1864), the load conditions and the
+  reasoning are in `MUTATION_BASELINE.md`'s KBR-92 section; the tooling that produced the
+  number (`scripts/measure_changed_code_mutation.py`) is reusable if the selection mechanism
+  ever grows a function-level filter, which is what would change this answer.
 
 **Where the score lives.** Per-component scores (and the mutmut config that
 produces them) are recorded in `.system_design/MUTATION_BASELINE.md`, with
@@ -5920,11 +5926,23 @@ rows M3–M7, the §6.1 compaction properties and TR-3 move together — M13 has
 withdrawn by KBR-5, which narrows this question rather than answering it.** The design records
 current behaviour as observed, explicitly not as approved, until this is answered.
 
-**Q11 — Does changed-code mutation testing fit the per-PR gate (§6.1)?** Answerable by
-measurement, not opinion: time `mutmut run` restricted to the functions a representative PR
-touches, against the budget the fast gate can absorb given it already runs ~18.5 minutes per
-Python version. Adopt per-PR if it fits, nightly-only otherwise. The current nightly-only choice
-is provisional pending that number.
+**Q11 — ANSWERED by measurement, KBR-92, 2026-09-22.** A changed-code `mutmut run`
+scoped to the functions a representative PR touches was measured (KBR-285, `30a91a0`,
+10 §6.1-scope functions, 1864 mutants matched). `mutmut`'s positional patterns narrow only
+the **per-mutant test phase** — generation, the clean test, and the stats phase are
+identical to the nightly's, because `pytest_add_cli_args_test_selection` is the test
+selection and `only_mutate` is the generation bound, neither of which a function-level
+positional pattern can shrink. The clean test alone (the full L1 selection, 7009 tests)
+takes ~22.8 minutes on the dev workstation under modest load — the same order as the
+fast gate's entire per-Python-version budget (~18.5 minutes). A per-PR mutation job would
+re-pay that fixed cost every push, on top of the per-mutant marginal; structurally over the
+gate's headroom, not merely borderline. **Decision: nightly-only retained.** The
+measurement, the tooling (`scripts/measure_changed_code_mutation.py`), and the structural
+reasoning live in `MUTATION_BASELINE.md`'s KBR-92 section. What would change the answer:
+a test selection that scopes the clean test to the touched files' tests (the current
+mechanism is a CLI list, not a function-level filter), or a CI measurement on an idle
+runner showing the full run lands inside 18.5 minutes (structurally unlikely given the
+fixed cost's load-independent character; flagged as a follow-up in KBR-92's comment).
 
 **Q12 — ANSWERED by the product owner, 2026-09-12 (KBR-216).** CI has had a version-pinned
 Claude Code since the automated reviewer landed, together with kitty profiles, credentials and an

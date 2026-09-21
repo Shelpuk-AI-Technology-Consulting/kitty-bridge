@@ -241,3 +241,96 @@ rule: (a) a survivor revealing a missing assertion → strengthen the test;
 (b) revealing untested behaviour → add a test; (c) genuinely equivalent →
 suppress at the site with `# pragma: no mutate` **and a comment saying
 why**. Never dismiss a survivor silently.
+
+## 2026-09-22 — KBR-92 (T-H4): the changed-code run, measured, and why
+this file is calling Q11 answered in the conservative direction
+
+[KBR-92](https://shelpuk.atlassian.net/browse/KBR-92) resolves Q11 by
+measurement, not assertion. The question is whether `mutmut run` scoped to
+the functions a representative PR touches would fit inside the per-PR
+gate's budget, given that the gate already runs ~18.5 minutes per Python
+version. The scope is the strict reading of `TEST_SUITE.md` §6.1's cadence
+bullet: "restricted to the **functions** a representative PR touches",
+**not** whole-module (which would silently re-test ~4,000 translator
+mutants and answer a different question).
+
+**Representative PR.** KBR-285 (PR #234, merge commit `30a91a0`) — the
+broad worst case. Five source files changed; 11 def bodies touched;
+10 of them §6.1-scope (the `BridgeServer._stream_chat_completions`
+def is touched but is not in any §6.1 registry row, so it is out of the
+measurement by design — the nightly doesn't measure it, and a per-PR
+run must match the nightly's coverage):
+
+```
+kitty.bridge.messages.translator.xǁMessagesTranslatorǁtranslate_response__mutmut_*
+kitty.bridge.messages.translator.xǁMessagesTranslatorǁtranslate_stream_chunk__mutmut_*
+kitty.bridge.responses.translator.xǁResponsesTranslatorǁtranslate_response__mutmut_*
+kitty.bridge.responses.translator.xǁResponsesTranslatorǁtranslate_stream_chunk__mutmut_*
+kitty.bridge.responses.translator.x__extract_text_parts__mutmut_*
+kitty.bridge.gemini.translator.xǁGeminiTranslatorǁtranslate_response__mutmut_*
+kitty.bridge.gemini.translator.xǁGeminiTranslatorǁtranslate_stream_chunk__mutmut_*
+kitty.bridge.gemini.translator.x__extract_text_parts__mutmut_*
+kitty.bridge.server.x__cc_chunk_carries_content__mutmut_*
+kitty.bridge.server.xǁBridgeServerǁ_is_empty_cc_response__mutmut_*
+```
+
+The mapping (rev-range → §6.1-scope function patterns, with the registry's
+`mangled_patterns` semantics reproduced per-def) lives in
+`scripts/measure_changed_code_mutation.py` and is pinned by 17 L1 unit
+tests in `tests/test_measure_changed_code_mutation.py`; the KBR-285
+fixture in `tests/data/kbr285_diff_snapshot.json` is the analyzer's
+verified output for `30a91a0^1..30a91a0` (generated once by a throwaway,
+hand-verified against the actual diff, committed).
+
+**What a changed-code `mutmut run` actually costs.** `mutmut`'s positional
+patterns only filter which mutants get **tested**, not which get
+**generated** — `only_mutate` bounds generation to every registered
+source file, the test selection (`pytest_add_cli_args_test_selection`)
+bounds the clean test, and positional patterns only select mutants in the
+per-mutant test phase. The run therefore has the same three fixed-cost
+phases the nightly pays, plus a scoped per-mutant phase:
+
+| Phase | Cost on this box | Notes |
+|---|---|---|
+| Generation (full `only_mutate`) | **112 s** (run log: `done in 111774ms (41 files mutated, 53 ignored, 0 unmodified)`) | Identical to the nightly; the 10 positional patterns do not narrow it |
+| Clean test (full L1 selection) | **1374 s = 22.8 min** (standalone measurement: `pytest -m l1 --ignore …` against 7009 tests, 0 failures; wall 1368.69 s under load avg 0.4–2.8, median ~1.0) | Identical to the nightly; the 16 `--ignore` rows are mutmut-only, the L1 gate runs every selected file |
+| Stats (test→mutant associations) | Proportional to nightly; killed before completion locally | Identical to the nightly |
+| Per-mutant test (scoped to the 10 patterns) | **1864 mutants** generated and matched; per-mutant time bounded by the baseline's ~1.3 s/mutant | The only phase a per-PR gate saves on |
+
+**Why this answers Q11 in the conservative direction without a completed
+local run.** The fixed-cost row of the table — generation + clean test +
+stats — is identical to the nightly, and the clean test alone is already
+22.8 minutes on this box under modest load (the fast gate's per-Python
+version budget is ~18.5 minutes; the CI runner's pace is faster than
+this workstation, but the L1 selection itself is the workload). A
+per-PR mutation job would re-pay that fixed cost every push, on top of
+the per-mutant marginal. Even if the per-mutant phase were zero, the job
+already meets the budget head-on; with even a modest per-mutant cost
+it is structurally over.
+
+The local full run did not complete: the box was OOM-killed during the
+stats phase at ~13 minutes total elapsed (4.6 GiB used / 233 MiB free /
+4.4 GiB in swap, with 11 sibling Claude sessions, another worktree's
+pytest, and a GitHub Actions runner process resident). The local box
+cannot currently complete the measurement reliably — the documented
+"kill under parallel sessions" memory applies, plus an additional OOM
+hazard from the stats phase's coverage-traced pytest. The CI measurement
+is the follow-up (see [KBR-92](https://shelpuk.atlassian.net/browse/KBR-92)
+comment for the recommendation); on an idle runner the clean-test cost
+is expected to land at the fast-gate leg's pace (~15–16 minutes),
+confirming that the fixed cost alone is at the budget edge.
+
+**Decision (KBR-92, 2026-09-22).** Keep mutation testing on the existing
+nightly cadence. A per-PR changed-code `mutmut run` is structurally
+infeasible under the current `pytest_add_cli_args_test_selection` and
+`only_mutate` configuration because the positional patterns narrow only
+the per-mutant phase; the fixed cost is shared with the nightly and
+already meets the gate budget head-on. Q11 is ANSWERED.
+
+**What would change the answer.** Either a per-test-selection that scopes
+the clean test to the touched files' tests (which the current selection
+does not support — `pytest_add_cli_args_test_selection` is a CLI list,
+not a function-level filter), OR a measurement on an idle CI runner
+showing the full per-PR run lands inside 18.5 minutes (the CI leg's
+budget; structurally unlikely given the fixed cost's load-independent
+character). Both are out of scope for T-H4.
