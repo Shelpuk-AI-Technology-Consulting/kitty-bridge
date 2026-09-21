@@ -4785,7 +4785,9 @@ timeout-mark guard reads), held against `pyproject.toml` by the l2 contract guar
 re-measure: kills currently credited through these modules vanish (the §6.1 caveat); mutants they
 covered exclusively reclassify to `no_tests` and stay in the score denominator (most visible in
 `compaction_and_pairing` and `egress`); and the first `mutmut run` after this PR merges invalidates
-the cached verdict set entirely (per `_apply_config_change_invalidation` in pinned mutmut 3.8.0)
+the cached verdict set entirely (per `_apply_config_change_invalidation`, verified on the
+mutmut 3.8.0 installed in this venv; pyproject declares `mutmut>=3.0,<4` and the behaviour
+holds across the pinned range)
 — budget that run as a full re-run, not a resume.
 
 **The load gate has to be wired, not merely declared.** The table above marks Load as gating a
