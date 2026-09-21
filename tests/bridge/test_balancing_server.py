@@ -742,13 +742,19 @@ class TestBalancingAllCustomTransport:
 
         from kitty.profiles.schema import Profile
 
-        # Build SSE response that mimics Codex backend output
+        # Build the CC-SSE stream Bedrock's real ``stream_request`` writes
+        # (KBR-293 corrected the sibling stubs to this shape: the
+        # Responses-SSE stub pinned what the branch accepted, not what real
+        # Bedrock emits — and KBR-297's judge-first gate parses it to an
+        # empty completion and ladders it, so the stale stub could only
+        # pass on the fabricated fallback text).
         sse_events = [
-            b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n',
-            (
-                b'data: {"type":"response.output_item.done",'
-                b'"item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}\n\n'
-            ),
+            b'data: {"id":"resp_test","object":"chat.completion.chunk","created":0,"model":"model-0",'
+            b'"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n',
+            b'data: {"id":"resp_test","object":"chat.completion.chunk","created":0,"model":"model-0",'
+            b'"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+            b'data: {"id":"resp_test","object":"chat.completion.chunk","created":0,"model":"model-0",'
+            b'"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
             b"data: [DONE]\n\n",
         ]
 
@@ -860,14 +866,11 @@ class TestBalancingAllCustomTransport:
         NoStreamProvider = self.NoStreamProvider
         stream_provider = BedrockAdapter()
 
-        async def _fake_stream(req, write):
-            await write(b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n')
-            await write(
-                b'data: {"type":"response.output_text.delta","delta":"hello","response":{"id":"resp_test"}}\n\n'
-            )
-            await write(b"data: [DONE]\n\n")
-
-        stream_provider.stream_request = AsyncMock(side_effect=_fake_stream)
+        # KBR-297: the stub must write what Bedrock's real ``stream_request``
+        # writes — CC-SSE (the KBR-293 corrected-stub convention; the old
+        # Responses-SSE stub parsed to an empty completion, which the
+        # judge-first gate ladders instead of delivering).
+        stream_provider.stream_request = AsyncMock(side_effect=self._fake_hello_cc_stream)
 
         backends = [
             (
