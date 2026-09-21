@@ -758,9 +758,7 @@ class TestEmptyResponseNonBalancing:
         normal-looking assistant turn. KBR-99 (S11) unifies the split:
         both empty shapes now exhaust into the D4 error (Q14(a)'s rationale
         — a ``200`` carrying substituted text is the one thing the route
-        must never produce). The ``Upstream model returned an empty
-        response`` string the D4 body carries is the same constant the old
-        fallback used.
+        must never produce).
         """
         server = _make_server(1)
         port = await server.start_async()

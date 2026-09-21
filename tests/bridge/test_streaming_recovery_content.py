@@ -695,9 +695,18 @@ class TestTranslatedEmptyStreamD4Unification:
         # exhausts into the D4 error, never the M12 substitution). Assert on
         # the constant's VALUE, not its Python name.
         assert "Upstream model returned an empty response" not in body_text
-        # Two backend attempts (no third attempt because the empty ladder
-        # only runs within attempt budget, and balancing selects A then B).
-        assert upstream.requests >= 2
+        # Empty replies do not quarantine (the empty ladder's no-quarantine
+        # health model), so the ladder walks the full attempt budget on a
+        # two-backend balancing pool — `(server_module._MAX_RETRIES + 1) * 2 +
+        # len(server_module._EMPTY_FINAL_DELAYS)` attempts — before the
+        # final-delay index falls off the back of `_EMPTY_FINAL_DELAYS` and
+        # the gate exhausts into D4. Pin the exact count (not just >= 2).
+        assert upstream.requests == (
+            (server_module._MAX_RETRIES + 1) * 2
+            + len(server_module._EMPTY_FINAL_DELAYS)
+        ), (
+            f"expected the full empty-ladder attempt budget, saw {upstream.requests}"
+        )
 
 
 # ── Fix R4 — streaming D3 on the translated Messages route ───────────────
