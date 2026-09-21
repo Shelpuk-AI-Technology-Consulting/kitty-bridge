@@ -82,7 +82,8 @@ dev = [
     # Schemathesis drives the OpenAPI conformance run (T-G6 / KBR-82).
     # v4 supports OpenAPI 3.1 natively; <5 keeps a major bump a decision.
     "schemathesis>=4.9,<5",
-    # tomllib landed in 3.11; tests/test_mutmut_scope.py reads
+    # tomllib landed in 3.11; tests/test_mutmut_scope.py and
+    # tests/test_socket_binding_l1_mutation_exclusion.py read
     # pyproject.toml's [tool.mutmut] on every supported interpreter.
     "tomli>=2.0; python_version < '3.11'",
 ]
@@ -353,6 +354,42 @@ pytest_add_cli_args_test_selection = [
     "l1",
     "--ignore",
     "tests/test_internal_keys_not_sent_upstream.py",
+    # KBR-290: deselect the section-8.2 socket/process-binding modules from
+    # mutmut's nightly so it never depends on loopback socket timing. The set
+    # is held against the registry in `tests/socket_binding_l1_modules.py` by
+    # `tests/test_socket_binding_l1_mutation_exclusion.py`; both are edited
+    # together -- never the one without the other. The Fast job's
+    # `pytest -m "l1 or l2"` selection still collects every module here.
+    "--ignore",
+    "tests/bridge/test_tls_certs.py",
+    "--ignore",
+    "tests/harness/test_recorder.py",
+    "--ignore",
+    "tests/harness/test_recorder_falsification.py",
+    "--ignore",
+    "tests/harness/test_bridge.py",
+    "--ignore",
+    "tests/harness/test_bridge_falsification.py",
+    "--ignore",
+    "tests/harness/test_vertical_slice.py",
+    "--ignore",
+    "tests/harness/test_provider_aiohttp.py",
+    "--ignore",
+    "tests/harness/test_containment.py",
+    "--ignore",
+    "tests/bridge/test_responses_string_input.py",
+    "--ignore",
+    "tests/bridge/test_bridge_management.py",
+    "--ignore",
+    "tests/cli/test_bridge_state_location.py",
+    "--ignore",
+    "tests/test_egress_https_proxy.py",
+    "--ignore",
+    "tests/harness/test_connect_proxy.py",
+    "--ignore",
+    "tests/bridge/test_crash_resilience.py",
+    "--ignore",
+    "tests/cli/test_stream_encoding.py",
 ]
 only_mutate = [
     "src/kitty/bridge/messages/*",

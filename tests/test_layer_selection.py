@@ -487,6 +487,14 @@ class TestTheWholeSuiteIsCoherent:
             # from the installed mutmut), and the bucket routing is the
             # other side of the registry agreement the scope guard tests.
             "tests/test_aggregate_mutation_baseline.py",
+            # KBR-290. A §6.2.3 config-vs-registry contract: pyproject's
+            # ``[tool.mutmut] pytest_add_cli_args_test_selection`` (which
+            # deselects the §8.2 socket/process-binding modules from the
+            # nightly mutation run) must equal the selection derived from
+            # ``tests/socket_binding_l1_modules.py`` -- the same registry
+            # KBR-272's timeout-mark guard reads. Two artifacts edited by
+            # hand, held against each other in both directions.
+            "tests/test_socket_binding_l1_mutation_exclusion.py",
             # KBR-152. A §6.2.3 contract against the live branch-rules JSON
             # GitHub defines and edits: the verifier's pure decision is
             # pinned against inline snapshots of that format, so a rule
