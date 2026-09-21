@@ -176,14 +176,22 @@ class _RecordingCustomTransport(_StubProvider):
         }
 
     async def stream_request(self, cc_request: dict, write) -> None:  # noqa: ANN001
-        """Record the Responses body and write one complete SSE reply.
+        """Record the Responses body and write one content-bearing SSE reply.
 
         Args:
             cc_request: The bridge's request, carrying ``_original_body``.
             write: The bridge's byte sink for the downstream stream.
         """
         self.original_bodies.append(cc_request["_original_body"])
-        await write(b'data: {"type": "response.completed"}\n\n')
+        # Content-bearing Responses-SSE so KBR-293's judge-first custom
+        # segment lands in the content arm on the first attempt (a
+        # content-less stub would ladder to the D4 terminal — the right
+        # KBR-287 behaviour, but it would defeat this test, whose point is
+        # to pin the shipped ``_original_body``, not the empty-ladder shape).
+        await write(
+            b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+            b'data: {"type":"response.completed","response":{"model":"test-model"}}\n\n'
+        )
 
 
 def _bridge(provider: ProviderAdapter | None = None, *, model: str | None = _MODEL) -> BridgeServer:
