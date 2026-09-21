@@ -1510,3 +1510,165 @@ unavailable guard.
   missing-credential test.
 - `tests/test_doctor_cmd.py` / the profile-wizard reuse scan — corruption reported, flow
   stays reachable.
+
+## 12. Request ingress trust boundary
+
+Each bridge-protocol POST route runs a per-protocol normalizer at the trust boundary,
+**before** any translator or upstream call. The normalizer enforces the contract the
+downstream path can rely on: "every shape the translator iterates or subscripts is the
+shape the schema says." Anything else is rejected with the dialect's 400 envelope
+([KBR-82](https://shelpuk.atlassian.net/browse/KBR-82), §6.2.1 — *the bridge must never
+500 on a malformed body*). The schemathesis conformance run is the discoverer; the
+L2 pins in `tests/test_route_preflight.py` and sibling files are the deterministic
+regression gate.
+
+### 12.1 The four normalizers and their scopes
+
+| Normalizer | Protocol | Required-shape checks (→ 400) | Tolerated-as-absent (omitted from the body) |
+|---|---|---|---|
+| `_normalize_messages_request` (server.py) | `/v1/messages` (Anthropic Messages) | body, `model`, `messages`, `messages[*]`, `tools`, `tools[*]`, `tools[*].name` (non-empty string) | — (required by the Anthropic contract; missing `model`/`messages` 400s) |
+| `_normalize_chat_completions_request` (server.py) | `/v1/chat/completions` (OpenAI Chat Completions) | body, `messages`, `messages[*]` | `tools` (deliberately not validated: CC tools are passed through to the upstream without iteration; measured 200 on non-array tool bodies; CC tools nest `name` under `function`, so a flat `tool["name"]` check would 400 every legitimate CC body — there is no measured CC tools 500 to prevent) |
+| `normalize_responses_request` (`responses/translator.py`, [KBR-144](https://shelpuk.atlassian.net/browse/KBR-144)) | `/v1/responses` (OpenAI Responses) | body, `input` as string-or-list, list elements as objects, plus the five `/v1/responses` shapes closed with KBR-159 | — |
+| `_normalize_gemini_request` (server.py) | `/v1beta/...:{generate,streamGenerate}Content` | body, `contents` (list of objects) — extended with [KBR-288](https://shelpuk.atlassian.net/browse/KBR-288) to also reject required-shape defects in `contents[*].parts`, `parts[*]`, `parts[*].functionCall`/`functionResponse` member defects, `tools[*]`, `tools[*].functionDeclarations` and its members | `systemInstruction` (KBR-82), `generationConfig` (KBR-82), `toolConfig` subtree (KBR-82); `tools` itself when non-list (KBR-288 — schema permits absence) |
+
+### 12.2 Dialect 400 envelopes
+
+Each normalizer raises a dialect-specific `Invalid*Request(ValueError)`. The handler
+catches it and returns the route's published envelope (already documented in
+`openapi/kitty-bridge.yaml`):
+
+- **Anthropic Messages**: `{"type": "error", "error": {"type": "...", "message": "..."}}`.
+- **OpenAI Chat Completions**: `{"error": {"code": "invalid_request", "message": "..."}}`.
+- **OpenAI Responses**: `{"error": {"code": "invalid_input", "message": "..."}}` (the
+  `reason: "invalid_input"` discriminator introduced with KBR-144).
+- **Gemini**: `{"error": {"code": <int 400>, "message": "...", "status": "INVALID_ARGUMENT"}}`.
+
+The OpenAPI document declares each of these as the published 400; no undocumented
+statuses. The schemathesis schema-conformance check pins this contract — a guard that
+catches a new 400 the schema does not declare as well as a 500 the schema forbids.
+
+### 12.3 Disposition policy — 400 for required, tolerate-as-absent for optional
+
+The normalizers deliberately split the disposition of malformed user input, not by
+crash class but by **whether the field is required by the schema**.
+
+- **Required shapes** (the request cannot proceed without them, or a non-empty
+  iteration over the value is the contract the downstream path expects): **400**. A
+  missing or wrong-typed `contents`, a `contents[i]` that is not a `Content` object,
+  a `parts[j]` that is not a `Part` object, a `tools[*].name` that is missing —
+  these are client mistakes. The OpenAPI document calls the client out for the wrong
+  shape; the bridge's job is to surface that cleanly, not to silently reshape.
+- **Optional shapes** (`systemInstruction`, `generationConfig`, `toolConfig` on the
+  Gemini side; `tools` itself on Gemini): **tolerated as absent**. The schema
+  documents them as optional with a default; an optional field whose shape is
+  wrong is the same as the field being omitted. Reshaping silently keeps permissive
+  Gemini clients reachable (some send partial tools arrays; some omit `systemInstruction`
+  entirely) and keeps the KBR-82 conformance run from spiking on every minor shape
+  drift.
+
+**The split, not blanket tolerance.** A blanket "tolerate everything" rule would 500
+no client but would also fail the schemathesis schema-conformance check the moment a
+fuzzer sends an iterate-able-required shape (the documented `contents[*].parts[*]`
+is required when `contents` is non-empty — a tolerated-as-absent `parts` would
+silently drop a real conversation turn, breaking I1 message-fidelity rather than
+breaking I2 indistinguishability).
+
+**Why not blanket 400 either.** The schemathesis fuzzer surfaces the same class of
+shape defect on optional envelopes (`generationConfig: true`, `toolConfig: 5`) as on
+required ones; blanket 400 would 400 a real client whose implementation drifted a
+single optional field. The KBR-82 product-owner decision — split, not blanket —
+locks the policy in for every widening this ticket or its siblings propose.
+
+### 12.4 Gemini ingress — KBR-288 widening
+
+[KBR-288](https://shelpuk.atlassian.net/browse/KBR-288) closes the Gemini request
+path. Two things happened between the ticket's filing and this work: the
+skip-never-raise commits on `main` (post-KBR-82 follow-ups) made the translator
+silently skip most container-shape defects the ticket's probe list names, and
+empirical probing at HEAD (`.scratch/probe_kbr288.py` at requirements time) found
+the crash classes that survived those guards. The ticket therefore delivers two
+things:
+
+1. **Genuine crash closure** — shapes that still 500 at HEAD:
+
+| Shape | Crash at HEAD |
+|---|---|
+| `contents[i].role` present and non-hashable (list / dict) | `TypeError: unhashable type` (`_ROLE_MAP.get(role, role)`) |
+| `contents[i].parts[*].text` present and non-string | `TypeError: sequence item 0: expected str instance` (all three text branches: user, assistant, assistant-thought) |
+| `tools[i].functionDeclarations` present and `null` | `TypeError: 'NoneType' object is not iterable` (`tool.get("functionDeclarations", [])` — the default does not fire when the key is present-null) |
+| `tools[i].functionDeclarations` present and `true` | `TypeError: 'bool' object is not iterable` (same site) |
+| `systemInstruction.parts[*].text` present and non-string | `TypeError: sequence item 0` (`_extract_text` filters non-dict parts but joins unguarded text) |
+
+2. **Disposition tightening** — the Wave-2 silent-skip shapes become boundary
+   400s, per §12.3's required-shape policy (a silent drop inside a required
+   chain is an I1 message-fidelity hit, not a clean outcome):
+
+| Shape | Old disposition | New disposition | Rationale |
+|---|---|---|---|
+| `contents[i].role` present-and-non-string | crash (see above) | 400 INVALID_ARGUMENT | required Content member, documented `type: string` (PO decision 2026-09-21) |
+| `contents[i].parts` not a list | tolerated-skip | 400 INVALID_ARGUMENT | required; translator iterates it |
+| `contents[i].parts[*]` not a dict | tolerated-skip | 400 INVALID_ARGUMENT | required; per-part member access |
+| `contents[i].parts[*].text` non-string | crash (see above) | 400 INVALID_ARGUMENT | required Part member, documented `type: string` |
+| `parts[*].functionCall` non-dict / without string `name` | tolerated-skip | 400 INVALID_ARGUMENT | required-when-present member; `fc["name"]` read |
+| `parts[*].functionResponse` (mirror of functionCall) | tolerated-skip | 400 INVALID_ARGUMENT | mirror |
+| `tools[i]` not a dict | tolerated-skip | 400 INVALID_ARGUMENT | required Tool member |
+| `tools[i].functionDeclarations` present-null or non-list-non-dict | tolerated-skip (string/dict iterate empty) / crash (null, bool) | 400 INVALID_ARGUMENT | required list member; present-null defeats the `.get(..., [])` default |
+| `tools[i].functionDeclarations[*]` not a dict / without string `name` | tolerated-skip | 400 INVALID_ARGUMENT | required FunctionDeclaration member; `fd["name"]` read |
+
+The optional envelopes keep their tolerated disposition, with one
+crash-proofing fix inside the translator: `_extract_text` gains an
+`isinstance(p.get("text"), str)` filter so a non-string text inside a
+tolerated `systemInstruction` envelope does not crash the join — a tolerated
+envelope gets no boundary check, so the translator carries the leaf guard.
+
+**Key absence vs wrong type.** Every "400" row above fires on a *present*
+value whose documented type is violated. A *missing* key stays tolerated
+throughout — `{"contents": [{"role": "user"}]}` (no `parts`) proceeds with an
+empty parts list, exactly as KBR-82 left it: there is no crash class on
+absence (`content.get("parts", [])` handles it), and requiring the key would
+400 bodies the pre-KBR-288 contract accepted. The §12.3 fidelity argument
+("a tolerated-as-absent `parts` would silently drop a real conversation
+turn") is about a *present-but-wrong-typed* `parts` being silently treated
+as absent — not about the key's absence.
+
+Helpers (`_validate_gemini_content`, `_validate_gemini_part`,
+`_validate_gemini_tools`) keep the call sites readable. Each helper is
+covered by route-level L2 pins in `tests/test_route_preflight.py`
+(per-shape `assert status == 400` plus the dialect-envelope check).
+
+**Ordering dependency (verified):** validation runs first in `_handle_gemini`
+— normalizer, then translate, truncate, compaction, size check — so no 400 can
+be preempted by a later failure, and `translate_request` has exactly one call
+site (immediately after the normalizer), which is what makes the
+boundary-invariant claim structural rather than aspirational. The 400 shapes
+are all ones a schema-conforming Gemini CLI cannot send; the conformance
+fuzzer's distribution is the only producer.
+
+### 12.5 Verification
+
+- `tests/test_route_preflight.py` (L2) — per-protocol pins; the Gemini rows carry
+  every To Be-table row of §12.4 with a positive control on `:generateContent`,
+  plus one tightening shape and one crash-class shape on `:streamGenerateContent`
+  (the shared-handler proof), asserting HTTP `status == 400`, `error.code` is
+  an integer (any int — a regression writing `code: 500` over HTTP 400 would
+  still pin), `error.status == "INVALID_ARGUMENT"`, and no traceback leak.
+- `tests/test_openapi_conformance.py` (L2) — the schemathesis conformance run; the
+  discoverer. The 400 envelope is schema-documented so widening the normalizer does
+  not introduce an undocumented status.
+- `tests/test_openapi_schema.py` (L2) — pins the `INVALID_ARGUMENT` enum value.
+- `src/kitty/bridge/gemini/translator.py::translate_request` then raises no
+  exception on any user-supplied input: container shapes arrive
+  boundary-validated; the leaf-value reads (role, text, functionCall/functionResponse/
+  functionDeclaration names, tool names) carry local isinstance guards — the
+  structural-review criterion the ticket names. (`carry_gemini_tool_choice` already
+  satisfies this for the `toolConfig` subtree.)
+
+### 12.6 Out of scope
+
+- The response direction (`translate_response`, `translate_stream_chunk`) processes
+  upstream CC bodies, not user input, and is not fuzzer-reachable.
+- The Responses, Chat Completions, and Messages ingress normalizers — already
+  hardened by KBR-82, KBR-144, KBR-159, KBR-169. KBR-288 covers Gemini only.
+- The deeper nightly fuzz job ([KBR-116](https://shelpuk.atlassian.net/browse/KBR-116),
+  T-K7) — the discoverer for ongoing shape drift; this ticket closes the KBR-82
+  conformance-suite-discoverable crash set on the Gemini path.
