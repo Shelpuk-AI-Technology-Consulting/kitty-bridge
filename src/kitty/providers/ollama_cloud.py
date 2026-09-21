@@ -417,6 +417,43 @@ class OllamaCloudAdapter(ProviderAdapter):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
+    # ── Pure payload builder (register row P19) ─────────────────────────
+
+    def _ollama_body(self, cc_request: dict, *, streaming: bool) -> dict:
+        """Build the ``/api/chat`` body the two Ollama transports send.
+
+        Applies register row P19 to the hook's output: the transport, not
+        the caller, decides which Ollama endpoint mode is used, so
+        ``stream`` is set from the ``streaming`` flag after
+        :meth:`translate_to_upstream` has already copied any request-level
+        ``stream`` value.
+
+        Pure — no IO, no aiohttp session. Extracted from the two transport
+        methods so the overwrite is reachable from an L1 selection (KBR-90 /
+        T-H5: a mutation of the overwrite now fails ``TestOllamaCloudBody``
+        in ``tests/test_provider_ollama_cloud.py`` instead of living
+        untested inside a network method).
+
+        Args:
+            cc_request: CC-format request, identical to what
+                :meth:`translate_to_upstream` accepts.
+            streaming: The transport's endpoint-mode decision — ``False``
+                for :meth:`make_request`, ``True`` for
+                :meth:`stream_request`.
+
+        Returns:
+            The body dict to pass as ``json=`` to ``session.post``.
+
+        Raises:
+            KeyError: If ``cc_request`` lacks the required ``"model"`` key —
+                propagated from :meth:`translate_to_upstream`.
+        """
+        # P19: applied after the hook so a request-level `stream` value never
+        # decides the endpoint mode — the transport does.
+        ollama_body = self.translate_to_upstream(cc_request)
+        ollama_body["stream"] = streaming
+        return ollama_body
+
     # ── Custom transport: non-streaming ────────────────────────────────
 
     async def make_request(self, cc_request: dict) -> dict:
@@ -424,8 +461,7 @@ class OllamaCloudAdapter(ProviderAdapter):
         api_key = cc_request.get("_resolved_key", "")
         provider_config = cc_request.get("_provider_config", {})
 
-        ollama_body = self.translate_to_upstream(cc_request)
-        ollama_body["stream"] = False
+        ollama_body = self._ollama_body(cc_request, streaming=False)
 
         url = self._build_url(provider_config)
         headers = self.build_upstream_headers(api_key)
@@ -453,8 +489,7 @@ class OllamaCloudAdapter(ProviderAdapter):
         api_key = cc_request.get("_resolved_key", "")
         provider_config = cc_request.get("_provider_config", {})
 
-        ollama_body = self.translate_to_upstream(cc_request)
-        ollama_body["stream"] = True
+        ollama_body = self._ollama_body(cc_request, streaming=True)
 
         url = self._build_url(provider_config)
         headers = self.build_upstream_headers(api_key)

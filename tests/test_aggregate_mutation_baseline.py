@@ -365,6 +365,9 @@ def test_main_exits_zero_when_a_group_is_fully_tested(
             # bedrock_transport: the KBR-89 (T-H2) P18 builder, a specific
             # method on BedrockAdapter (added after KBR-89 landed).
             "kitty.providers.bedrock.xǁBedrockAdapterǁ_bedrock_body__mutmut_1": 1,
+            # ollama_transport: the KBR-90 (T-H5) P19 builder, a specific
+            # method on OllamaCloudAdapter (mirror of the bedrock seed).
+            "kitty.providers.ollama_cloud.xǁOllamaCloudAdapterǁ_ollama_body__mutmut_1": 1,
             # content_classifiers: KBR-285 — the streaming hold's release
             # predicate and the non-streaming detector's Chat Completions
             # arm (mirror per KBR-277). Module-level fn example key.
@@ -416,6 +419,9 @@ def test_render_markdown_table_renders_but_does_not_fail_on_unmatched(
             # bedrock_transport: the KBR-89 (T-H2) P18 builder, a specific
             # method on BedrockAdapter.
             "kitty.providers.bedrock.xǁBedrockAdapterǁ_bedrock_body__mutmut_1": 1,
+            # ollama_transport: the KBR-90 (T-H5) P19 builder, a specific
+            # method on OllamaCloudAdapter (mirror of the bedrock seed).
+            "kitty.providers.ollama_cloud.xǁOllamaCloudAdapterǁ_ollama_body__mutmut_1": 1,
             # content_classifiers: KBR-285 — the streaming hold's release
             # predicate and the non-streaming detector's Chat Completions
             # arm (mirror per KBR-277). Module-level fn example key.

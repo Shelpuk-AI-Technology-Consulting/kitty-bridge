@@ -24,9 +24,12 @@ the hook is not the boundary that ships:
 * ``bedrock`` calls the hook and the transport then pops ``modelId`` and
   ``stream`` (P18).  The pops are scalar and do not change the shape
   family (Converse remains OTHER).
-* ``ollama_cloud`` calls the hook and the transport then overwrites
-  ``stream`` (P19).  Scalar, does not change the shape family (Chat
-  Completions remains Chat Completions).
+* ``ollama_cloud`` calls the hook and the pure builder
+  ``OllamaCloudAdapter._ollama_body`` (KBR-90 / T-H5 extracted it from
+  the two transport methods so the overwrite reaches an L1 selection;
+  the transports post the returned body verbatim and add no further
+  mutation) overwrites ``stream`` (P19).  Scalar, does not change the
+  shape family (Chat Completions remains Chat Completions).
 
 This module also extends the sweep to adapters constructed with
 ``provider_config`` and to native-passthrough requests — both were
@@ -165,7 +168,11 @@ async def test_bedrock_falsification_catches_a_dishonest_body():
     assert observed is not adapter.upstream_wire_shape_for_model("kitty-test-model")
 
 
-# ── Ollama Cloud (P19: transport overwrites stream) ──────────────────────────
+# ── Ollama Cloud (P19: builder overwrites stream; mirrors KBR-89) ────────────
+#
+# The capture lands in this L2 file (matching the sibling non-streaming
+# capture's ``pytest.mark.l2``); the KBR-90 scope add's "at L1" wording is
+# informal and means "unit-level", not the ``l1`` marker.
 
 
 async def test_ollama_cloud_wire_body_classifies_as_chat_completions():
@@ -177,7 +184,7 @@ async def test_ollama_cloud_wire_body_classifies_as_chat_completions():
     ``make_request`` sets ``stream=False`` for the non-streaming path.
     """
     adapter = get_provider("ollama_cloud")
-    # ``stream=True`` so the P19 overwrite (transport sets False) is
+    # ``stream=True`` so the P19 overwrite (the builder sets False) is
     # observable, not just a set-on-absent.
     probe = copy.deepcopy(_probe_request("kitty-test-model"))
     probe["stream"] = True
@@ -195,15 +202,15 @@ async def test_ollama_cloud_wire_body_classifies_as_chat_completions():
 
     wire_body = mock_session.post.call_args.kwargs["json"]
 
-    assert wire_body["stream"] is False  # P19 pin: the transport overwrote it
+    assert wire_body["stream"] is False  # P19 pin: the builder overwrote it
     assert classify_wire_shape(wire_body) is adapter.upstream_wire_shape_for_model("kitty-test-model")
 
 
 async def test_ollama_cloud_falsification_catches_a_responses_body():
-    """A Responses-shaped body survives the transport's stream overwrite.
+    """A Responses-shaped body survives the builder's stream overwrite.
 
     The defect is on the adapter side (monkeypatched translate); the
-    transport's overwrite is scalar and does not change the shape
+    builder's overwrite is scalar and does not change the shape
     family, so the dishonesty is observable at the wire.
     """
     adapter = get_provider("ollama_cloud")
@@ -236,6 +243,88 @@ async def test_ollama_cloud_falsification_catches_a_responses_body():
 
     assert observed is WireShape.RESPONSES
     assert observed is not adapter.upstream_wire_shape_for_model("kitty-test-model")
+
+
+async def test_ollama_cloud_stream_request_wire_body_classifies_as_chat_completions():
+    """The streaming-half body handed to aiohttp is Chat Completions, as declared.
+
+    KBR-90 (T-H5): the builder ``_ollama_body`` applies the P19 overwrite
+    for both halves of the boundary, so the wire form captures the
+    streaming half with the same discipline as the non-streaming half.
+    Closes the streaming-half stated limit flagged in KBR-80 — before
+    this capture, the non-streaming capture was the only L2 witness of
+    P19's effect on the shipped body.
+    """
+    adapter = get_provider("ollama_cloud")
+    # ``stream=False`` so the builder's ``streaming=True`` overwrite is
+    # observable, not just a set-on-absent.
+    probe = copy.deepcopy(_probe_request("kitty-test-model"))
+    probe["stream"] = False
+
+    async def mock_aiter():
+        for _line in []:  # empty by construction; classification is on the body
+            yield _line
+
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.content = mock_aiter()
+    mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_response.__aexit__ = AsyncMock(return_value=False)
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_response)
+
+    with patch.object(adapter, "_get_session", return_value=mock_session):
+        await adapter.stream_request(probe, AsyncMock())
+
+    wire_body = mock_session.post.call_args.kwargs["json"]
+    assert wire_body["stream"] is True  # P19 pin: the builder overwrote it
+    assert classify_wire_shape(wire_body) is adapter.upstream_wire_shape_for_model("kitty-test-model")
+
+
+async def test_ollama_cloud_stream_request_falsification_catches_a_responses_body():
+    """A Responses-shaped body survives the builder's stream overwrite on the streaming half.
+
+    Per §1.4 the first working version ships with a falsification case
+    per capture, all defects adapter-side. The monkeypatched
+    ``translate_to_upstream`` returns a Responses-shaped body; the
+    builder's ``streaming=True`` overwrite is scalar and does not change
+    the shape family, so the dishonesty is observable at the wire.
+    """
+    adapter = get_provider("ollama_cloud")
+    dishonest = {
+        "model": "kitty-test-model",
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+        ],
+        "tools": [
+            {"type": "function", "name": "read_file", "parameters": {"type": "object"}}
+        ],
+    }
+
+    async def mock_aiter():
+        for _line in []:
+            yield _line
+
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.content = mock_aiter()
+    mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_response.__aexit__ = AsyncMock(return_value=False)
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_response)
+
+    with (
+        patch.object(adapter, "translate_to_upstream", return_value=dishonest),
+        patch.object(adapter, "_get_session", return_value=mock_session),
+    ):
+        await adapter.stream_request(copy.deepcopy(_probe_request("kitty-test-model")), AsyncMock())
+
+    wire_body = mock_session.post.call_args.kwargs["json"]
+    observed = classify_wire_shape(wire_body)
+
+    assert observed is WireShape.RESPONSES
+    assert observed is not adapter.upstream_wire_shape_for_model("kitty-test-model")
+    assert wire_body["stream"] is True
 
 
 # ── OpenAI Subscription (P13–P17: body built inside transport) ──────────────
