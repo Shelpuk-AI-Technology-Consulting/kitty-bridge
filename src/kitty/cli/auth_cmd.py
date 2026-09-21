@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from kitty.auth.oauth_session import OAuthSession
 from kitty.auth.openai_oauth import run_oauth_flow
 from kitty.cli.profile_cmd import BACKUP_PROMPT
-from kitty.credentials.store import CredentialStore
+from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import Profile
 from kitty.profiles.store import ProfileStore
 from kitty.tui.display import print_error, print_section, print_status, print_warning
@@ -56,7 +56,13 @@ async def run_oauth_for_provider(
     session = OAuthSession.create_session_file(session, auth_ref, config_dir)
 
     session_file_path = Path(session._file_path)  # type: ignore[arg-type, assignment]
-    cred_store.set(auth_ref, str(session_file_path))
+    try:
+        cred_store.set(auth_ref, str(session_file_path))
+    except CredentialError as exc:
+        # Damage-and-no-backup: surface the error cleanly instead of
+        # crashing raw on the recovery write (KBR-291 round-3 review).
+        print_error(str(exc))
+        raise SystemExit(1) from exc
 
     return auth_ref, str(session_file_path)
 

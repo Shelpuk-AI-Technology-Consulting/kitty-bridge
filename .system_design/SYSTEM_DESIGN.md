@@ -1255,11 +1255,16 @@ row + the KBR-154 scope addition). This section is the To Be state of
   `platformdirs.user_config_dir("kitty")/credentials.json` (or an explicit path), guarded
   by a `filelock` (5 s timeout, F38), written atomically (`mkstemp` + `os.replace`) with
   POSIX `0600`/`0700`. F37: a file that is not valid **JSON** is backed up
-  (`*.corrupt.<ts>.<pid>`) and the store restarts empty behind a CRITICAL log. **The F37
-  guarantee is narrower than "file corruption":** a valid-JSON-non-dict file is silently
-  treated as `{}` (no backup, no log) and an invalid-UTF-8 file raises `UnicodeDecodeError`
-  out of `read_text`, which no handler catches. Both are pre-existing KBR-154 residuals,
-  recorded here rather than silently absorbed into this ticket's contract.
+  (`*.corrupt.<ts>.<pid>`); on the success branch the store restarts empty behind a
+  CRITICAL log, on the failure branch (read-only mount, etc.) it raises
+  `CredentialError` instead of silently writing `{}` over the damaged original —
+  same silent-loss argument as the file-level guards, applied to F37. KBR-291 extends
+  the same guarantee to the other two file-level damage shapes: an invalid-UTF-8 file
+  and a valid-JSON-non-dict file are backed up the same way; `get` raises
+  `CredentialError` at the boundary, while `set`/`delete` proceed from `{}` — the
+  write path forgives because the recovery command the error names reaches a `set`
+  call, and raising there would crash the very command the message points at. The
+  CRITICAL log + backup fire on both paths, so nothing is silent.
 - **`keyring_backend.py`** — `KeyringBackend`: delegates to the `keyring` package with
   service name `"kitty"`. `get` swallows every exception to `None`; `set` wraps failures in
   `CredentialError` (F39 — headless Linux without D-Bus raises `NoKeyringError`); `delete`
@@ -1268,22 +1273,31 @@ row + the KBR-154 scope addition). This section is the To Be state of
   `CredentialStore(backends=[FileBackend(...)])`. It is the exported OS-native option; the
   §6.2.4 contract pins what it would get from `keyring` the day it is wired.
 
-### 11.2 The corruption contract (KBR-87)
+### 11.2 The corruption contract (KBR-87, KBR-291)
 
-`FileBackend.get` distinguishes **absent** from **corrupt**:
+`FileBackend.get` distinguishes **absent** from **corrupt** at two layers:
 
-- ref not in the store → `None` ("no credential");
-- ref present but the stored value is not decodable → `CredentialError` naming the ref,
-  chained (`raise ... from`) from the cause. Undecodable means one of the four measured
-  shapes: not valid base64 (`binascii.Error`), a non-ASCII string (`ValueError` — raised
-  by `b64decode`'s ASCII-encode step, independent of the `validate=` flag), decoded bytes
-  not valid UTF-8 (`UnicodeDecodeError`), or a non-string stored value (`TypeError` — the
-  file is user-editable JSON). An explicit JSON `null` value is the **absent** spelling,
-  not corruption: `set()` never writes it and `data.get(ref)` returns `None` for it, so
-  it takes the absent branch by construction — pinned by test. `binascii.Error` and
-  `UnicodeDecodeError` both subclass
-  `ValueError`, so the handler is `except (ValueError, TypeError)` — exactly as narrow as
-  naming the subtypes, and complete over every measured shape.
+- **Per-ref** (KBR-87): ref not in the store → `None` ("no credential"); ref present
+  but the stored value is not decodable → `CredentialError` naming the ref, chained
+  (`raise ... from`) from the cause. Undecodable means one of the four measured
+  shapes: not valid base64 (`binascii.Error`), a non-ASCII string (`ValueError` —
+  raised by `b64decode`'s ASCII-encode step, independent of the `validate=` flag),
+  decoded bytes not valid UTF-8 (`UnicodeDecodeError`), or a non-string stored value
+  (`TypeError` — the file is user-editable JSON). An explicit JSON `null` value is
+  the **absent** spelling, not corruption: `set()` never writes it and
+  `data.get(ref)` returns `None` for it, so it takes the absent branch by
+  construction — pinned by test. `binascii.Error` and `UnicodeDecodeError` both
+  subclass `ValueError`, so the handler is `except (ValueError, TypeError)` — exactly
+  as narrow as naming the subtypes, and complete over every measured shape.
+- **File-level** (KBR-291): the file's bytes are not valid UTF-8, or its JSON parses
+  to a non-dict (top-level list, string, number, bool, null) — both raise
+  `CredentialError` naming the file at the backend boundary. Shape (b) chains from
+  the `UnicodeDecodeError`; shape (a) does not chain (the JSON parsed cleanly, so
+  there is no underlying exception). F37 (invalid JSON) has a two-branch contract:
+  the success branch (backup rename succeeded) is unchanged — `get` returns `None`,
+  the file is reset to `{}` behind a CRITICAL log; the failure branch raises
+  `CredentialError` honestly rather than writing `{}` over the still-damaged
+  original.
 
 **Where the signal lands — per call site.** The raise is only half the contract; a signal
 nobody receives is a traceback on every startup path:
@@ -1328,6 +1342,46 @@ test: `"ab@=="` strips to the length-valid `"ab=="` and silently decodes to the
 single byte `b"i"` under `validate=False` — corruption read back as a plausible
 single-character credential — while `validate=True` rejects it outright.
 
+**Why the write path forgives file-level damage (KBR-291).** `set`/`delete` swallow the
+file-level `CredentialError` (`_read_raw_for_write` treats a damaged file as empty) while
+`get` propagates it. The recovery command the error message names (`kitty setup`) reaches
+a `set` call — if `set` raised, the wizard would crash on the very write the user is
+performing, re-creating the diagnostic failure this contract exists to eliminate. The
+CRITICAL log and backup still fire from `_read_raw` before the write path forgives, so
+nothing is silent. `CredentialStore.delete` is already best-effort
+(`contextlib.suppress(Exception)`).
+
+**Why `_read_raw_for_write` re-raises when `self._path` still exists.** When `os.replace`
+fails (e.g., a read-only bind mount on the credentials directory), the damaged file
+remains at `self._path` and the CRITICAL log claims the original was preserved at a
+backup that does not exist. The next `set` swallowing the exception would overwrite the
+damaged original with no backup anywhere — silent credential loss accompanied by a
+confident false promise. `_read_raw_for_write` checks `self._path.exists()` after the
+raise: present (backup failed) → propagate, the recovery command reports the failure;
+absent (backup succeeded) → return `{}`, the write proceeds. Neither the shape (a) arm
+nor the shape (b) arm writes `{}` after the backup — shape (a) because doing so would
+erase the `self._path.exists()` signal the guard reads, and shape (b) because the bytes
+cannot be decoded and recreating `{}` adds nothing. Both rely on that single file-system
+check to distinguish "backup succeeded" from "backup failed".
+
+**Why the F37 path also raises on backup failure.** F37's success branch (invalid JSON
+with a successful backup) is unchanged: `get` returns `None`, the file is reset to
+`{}`, no raise. The failure branch (invalid JSON with a failed backup) now raises
+`CredentialError` rather than writing `{}` over the still-damaged original — the same
+silent-loss argument as the file-level guards, applied to the pre-existing F37 path.
+The `_back_up_damaged_file` helper returns the rename's success; F37 only writes
+`{}` and returns when the rename succeeded. Acceptance criterion 3's "F37 unchanged"
+holds for the success branch; this paragraph records the explicit failure-branch
+contract change.
+
+**Why wizard `cred_store.set` sites wrap `CredentialError`.** The seven wizard set
+sites (`setup_cmd.py`, `profile_cmd.py`, `auth_cmd.py`, `egress_cmd.py`) wrap
+`cred_store.set(...)` in `try/except CredentialError: print_error(...); exit`. Without
+the wrappers, a backup-failed raise would propagate as a Python traceback at the
+recovery command — the KBR-154 diagnostic family on the very path the error names.
+The wrappers produce the same clean `Error: …` + exit the receiver map produces for
+every `get` site.
+
 ### 11.3 The keyring dependency contract
 
 §6.2.4's rule for a dependency whose behaviour varies by platform **by design** ("where no
@@ -1366,6 +1420,16 @@ unavailable guard.
   invalid base64, non-ASCII string, invalid UTF-8, non-string), absent-vs-corrupt, and
   per-ref isolation; the F37 backup tests in
   `tests/credentials/test_stage7_credentials.py` are unchanged and stay green.
+- `tests/test_credential_store.py::TestFileLevelCorruption` (KBR-291) — the file-level
+  arms: invalid-UTF-8 bytes (shape b, constructed values, chained from
+  `UnicodeDecodeError`) and valid-JSON-non-dict payloads (shape a, parametrised over
+  list/string/number/bool/null, no chaining), backup content + CRITICAL log pinning
+  path and backup path, `set`/`delete` after damage (the write-path forgiveness),
+  the write-path propagation when the backup rename fails (read-only-mount case,
+  `os.replace` monkeypatched to raise, `set` must not overwrite the damaged
+  original), the F37 backup-failure raise (the round-3 contract change — F37 no
+  longer silently resets when the rename failed), the success-branch message naming
+  the real backup path, and the F37 unchanged regression pin.
 - `tests/test_egress_store.py` — the corrupt stored gateway password raises the documented
   `ValueError` (chained, naming `kitty egress`), the twin of the existing
   missing-credential test.

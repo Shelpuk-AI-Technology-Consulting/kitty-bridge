@@ -149,6 +149,38 @@ class TestConfigureFlow:
         assert record is not None and record.auth_ref is not None
         assert cred_store.get(record.auth_ref) == "new-pass"
 
+    def test_credential_error_on_set_is_surfaced_not_crashed(self, store, cred_store, monkeypatch):
+        """KBR-291 round-4 pin: the egress wizard's `cred_store.set`
+        wrapper catches ``CredentialError`` (the backup-failed raise
+        from ``FileBackend._read_raw_for_write``) and returns cleanly
+        rather than crashing raw. Without the wrapper the recovery
+        command itself would die with a traceback — exactly the
+        KBR-154 diagnostic family this contract exists to prevent.
+        """
+        from kitty.credentials.store import CredentialError
+
+        menu = _import_menu()
+
+        def _boom(ref: str, value: str) -> None:
+            raise CredentialError("simulated damage + failed backup")
+
+        monkeypatch.setattr(cred_store, "set", _boom)
+
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
+            patch("kitty.tui.prompts._handle_attached", return_value=True, create=True),
+            patch(f"{_MOD}.SelectionMenu.show", side_effect=["Configure gateway", "Back"]),
+            patch(f"{_MOD}.prompt_text", side_effect=["proxy.example.com:3128", "myuser"]),
+            patch(f"{_MOD}.prompt_secret", return_value="s3cr3t"),
+            patch(f"{_MOD}.prompt_confirm", side_effect=[True, False]),
+            patch(f"{_MOD}.print_error") as mock_err,
+        ):
+            menu(cred_store, store)  # must not raise
+
+        mock_err.assert_called_once()
+        assert "simulated damage + failed backup" in str(mock_err.call_args)
+
 
 class TestRemoveFlow:
     def test_removes_gateway_and_credential(self, store: EgressStore, cred_store: CredentialStore):
