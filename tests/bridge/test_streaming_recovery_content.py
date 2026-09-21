@@ -691,8 +691,10 @@ class TestTranslatedEmptyStreamD4Unification:
         )
         body_text = body.decode()
         assert '"reason": "empty_response"' in body_text or '"reason":"empty_response"' in body_text
-        # The fallback text must not reach the client.
-        assert "_EMPTY_ASSISTANT_FALLBACK_TEXT" not in body_text
+        # The fallback text must not reach the client (S11: the ladder
+        # exhausts into the D4 error, never the M12 substitution). Assert on
+        # the constant's VALUE, not its Python name.
+        assert "Upstream model returned an empty response" not in body_text
         # Two backend attempts (no third attempt because the empty ladder
         # only runs within attempt budget, and balancing selects A then B).
         assert upstream.requests >= 2
