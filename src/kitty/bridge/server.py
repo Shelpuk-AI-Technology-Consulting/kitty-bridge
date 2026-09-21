@@ -10232,7 +10232,9 @@ class BridgeServer:
             return 0
 
         for msg in messages:
-            # Chat-Completions: role == "tool" with a string content.
+            # Chat-Completions: ``role == "tool"`` with string or list-form
+            # content. The shared ``_tool_result_content_size`` extractor
+            # (KBR-223) measures both shapes.
             if msg.get("role") == "tool":
                 content = msg.get("content")
                 content_len = _tool_result_content_size(content)
@@ -10271,8 +10273,9 @@ class BridgeServer:
         truncates a copy that never leaves the machine there (KBR-169). Same
         limit, same notice text.
 
-        Only string outputs are truncated; list-form outputs are left
-        untouched, exactly like the CC-shape pass.
+        String and list-form outputs are truncated (KBR-223's shared
+        ``_tool_result_content_size`` measure); non-output items
+        (``message``, ``reasoning``) are left untouched.
 
         Args:
             body: The normalized Responses request, mutated in place.
