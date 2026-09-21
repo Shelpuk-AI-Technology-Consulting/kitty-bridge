@@ -160,6 +160,241 @@ class TestTranslateRequestGenerationConfig:
         assert cc["max_tokens"] == 100
         assert cc["top_p"] == 0.9
 
+    # ── KBR-213: stopSequences → stop ────────────────────────────────────
+    #
+    # Gemini names the stop-sequence list ``stopSequences``; Chat Completions
+    # names it ``stop``. Without the rename the user's stop sequences die in
+    # the first hop and no downstream adapter can restore them. The empty and
+    # wrong-typed guards mirror KBR-178's D6 decisions on the Messages route
+    # so the two ingresses behave identically for the same shape.
+
+    def test_stop_sequences_mapped_to_stop(self):
+        """KBR-213: Gemini `stopSequences` becomes CC `stop`, verbatim."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"stopSequences": ["END", "\n\nHuman:"]},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["stop"] == ["END", "\n\nHuman:"]
+        assert "stopSequences" not in cc
+
+    def test_stop_sequences_none_is_omitted(self):
+        """A present-but-null `stopSequences` is omitted. The conformance
+        fuzzer (KBR-82) generates nulls here; `gen_config.get()` returns
+        None, the truthy guard skips it, and no `stop` key is invented.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"stopSequences": None},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "stop" not in cc
+
+    def test_no_stop_sequences_means_no_stop(self):
+        """A client that sends no stop sequences gets no `stop` key invented."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"temperature": 0.5},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "stop" not in cc
+
+    def test_empty_stop_sequences_is_omitted(self):
+        """`stop: []` is schema-invalid on the CC wire (`StopConfiguration`
+        declares ``minItems: 1``); an empty list asks for no stop behaviour,
+        so omitting it is behaviourally identical. KBR-178 D6, restated for
+        the Gemini ingress.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"stopSequences": []},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "stop" not in cc
+
+    def test_stop_sequences_string_is_forwarded(self):
+        """A bare string is forwarded verbatim as `stop`. The CC wire
+        declares ``string | array``; a scalar is a valid Chat Completions
+        shape, so kitty does not invent a drop. KBR-178's truthy-only guard
+        treats any non-empty value as a forward; this test pins the same
+        posture for the Gemini ingress.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"stopSequences": "END"},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["stop"] == "END"
+
+    def test_stop_sequences_list_with_non_string_member_is_forwarded(self):
+        """A list with a non-string member is forwarded verbatim. The CC
+        wire's list-of-strings constraint is the provider's to enforce; an
+        explicit provider error beats a silent drop. Mirrors KBR-178
+        exactly (MessagesTranslator also forwards ``[42]`` verbatim).
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"stopSequences": ["END", 42]},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["stop"] == ["END", 42]
+
+    def test_stop_sequences_empty_string_member_is_forwarded(self):
+        """An empty-string member is forwarded verbatim. The CC-ingress
+        ``_normalize_cc_stop`` guards empty-string scalars but not list
+        members; the asymmetry is deliberate (single normalisation site,
+        KBR-178 R11). Empty-string members are kept so a wire-shape choice
+        the user made is not silently rewritten at the ingress.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"stopSequences": ["END", ""]},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["stop"] == ["END", ""]
+
+    def test_over_limit_stop_sequences_forwarded_verbatim(self):
+        """KBR-178 D6: over-limit lists are forwarded, not truncated.
+        Anthropic declares no limit; Chat Completions caps at four. A user
+        request that exceeds the CC cap is legitimate upstream, and an
+        explicit provider error beats an instruction silently thrown away.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {
+                "stopSequences": ["a", "b", "c", "d", "e", "f", "g"],
+            },
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["stop"] == ["a", "b", "c", "d", "e", "f", "g"]
+
+    # ── KBR-213 / KBR-178: topK → _top_k ────────────────────────────────
+    #
+    # Chat Completions declares no ``top_k`` at all — zero occurrences in
+    # ``CreateChatCompletionRequest`` — so the value rides an internal key
+    # that Anthropic-family adapters restore; ``_INTERNAL_KEYS`` keeps it off
+    # every other provider's wire. Gemini's `topK` follows the same rule.
+
+    def test_top_k_carried_as_internal_key(self):
+        """KBR-213 / KBR-178: Gemini `topK` becomes the internal key `_top_k`."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"topK": 40},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["_top_k"] == 40
+        assert "topK" not in cc
+
+    def test_top_k_zero_is_carried(self):
+        """`topK: 0` is a value the user sent, not an absent field.
+
+        The Anthropic family treats `top_k=0` as invalid upstream and rejects
+        it; per KBR-178's forwarding rule, kitty invents no behaviour and
+        forwards verbatim — the provider error beats a silent change.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"topK": 0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["_top_k"] == 0
+
+    def test_top_k_none_is_omitted(self):
+        """A present-but-null `topK` is omitted. `gen_config.get()` returns
+        None; `isinstance(None, int)` is False, so the int guard skips it
+        and no `_top_k` key is invented.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"topK": None},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "_top_k" not in cc
+
+    def test_no_top_k_means_no_internal_key(self):
+        """A client that sends no `topK` gets no `_top_k` key invented."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"temperature": 0.5},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "_top_k" not in cc
+
+    def test_top_k_bool_is_omitted(self):
+        """`isinstance(True, int) is True` in Python, so a wire value of
+        ``true`` (JSON) decoded as Python ``True`` would otherwise land as
+        the integer 1 and silently restrict sampling. Match the harness
+        reader's ``(int,)`` typing — booleans are excluded.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"topK": True},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "_top_k" not in cc
+
+    def test_top_k_false_is_omitted(self):
+        """`False` is also an `int` (0). Excluded for the same reason as
+        `True`: it would land as 0 — a value the Anthropic family rejects
+        upstream and the wire-shape-violation should reach the provider,
+        not be silently coerced.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"topK": False},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "_top_k" not in cc
+
+    def test_top_k_float_is_omitted(self):
+        """A non-int value is wrong-typed and is omitted."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"topK": 40.0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "_top_k" not in cc
+
+    # ── KBR-213 reproduction: every published generationConfig field ─────
+
+    def test_all_five_generation_config_fields_together(self):
+        """KBR-213 reproduction: temperature, topP, maxOutputTokens,
+        stopSequences, and topK all carry together on one body — the case
+        the ticket reproduces and the existing mappings must not regress.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {
+                "temperature": 0.5,
+                "topP": 0.9,
+                "maxOutputTokens": 64,
+                "stopSequences": ["END", "\n\nHuman:"],
+                "topK": 40,
+            },
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["temperature"] == 0.5
+        assert cc["top_p"] == 0.9
+        assert cc["max_tokens"] == 64
+        assert cc["stop"] == ["END", "\n\nHuman:"]
+        assert cc["_top_k"] == 40
+
 
 class TestTranslateRequestFunctionCall:
     """functionCall parts in model messages → tool_calls."""
