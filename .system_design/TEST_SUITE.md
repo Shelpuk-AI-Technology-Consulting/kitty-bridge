@@ -167,7 +167,7 @@ error, so it mutates nothing — leaving **twenty-seven live** bridge-level rows
 | M9b | **Drop every block-level cache breakpoint** — tool declarations rebuilt from `name`/`description`/`input_schema` only, assistant text joined to a string, `tool_use` rebuilt as a `tool_calls` entry, `tool_result.content` flattened to a string *before* any carriage (KBR-271) | `_convert_native_to_cc_format` | The upstream wire is not native Messages — the same trigger M16 carries | The M9 twin of M16's three carrier paths (KBR-263 / G38): the rebuild flattens every block it touches, so a breakpoint on a tool declaration or on any content part is gone on the retried wire. Pinned at the wire by the CB-3 suite's `tool`, `image`, `user_text`, `assistant_text`, `tool_use`, `tool_result` and `tool_result_nested` sites — the last is where the converter defeats the Messages translator's KBR-198/KBR-199 preservation, flattening `tool_result.content` before any carriage. M9a's anticipatory/M16-overlap caveats apply here identically. Deliberately outside the paths: `system` survives by carriage on `zai_anthropic`/`custom_anthropic` (no drop, no row), and a nested `tool_result` *block* residualises before register matching (M16's "outside this row's paths by design") — both, plus the `minimax_token` system drop this row's trigger cannot reach, are on §9.2 G43. |
 | M10 | Inject the model from the URL path into the body | `_handle_gemini` | Gemini protocol only | Gemini carries the model in the path, not the body; `_normalize_model` needs it in the body to override it. |
 | M11 | Force `stream: False` | `_handle_gemini` | Gemini protocol, non-streaming `:generateContent` | The Gemini translator defaults `stream=True`; the non-streaming endpoint must not open an SSE stream. |
-| M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the twelve request-path rows. **Never on a streamed `/v1/messages` reply from a Messages-wire upstream**, native or translated: that stream is forwarded as the upstream sent it, so there is no translator to substitute anything (KBR-227 — before it, the translated Anthropic-wire routes pushed Anthropic SSE through the Chat Completions chunk translator and Claude Code received an empty reply). Empty replies on that branch are KBR-155's to retry. The non-streaming reply and the other inbound protocols still translate, and still can fire this row. |
+| M12 | Substitute fallback assistant text | `_EMPTY_ASSISTANT_FALLBACK_TEXT` in `bridge/messages/translator.py` **and** `bridge/responses/translator.py` | Upstream returned an empty response | **Response-side**, not part of the twelve request-path rows. **Never on a streamed `/v1/messages` reply from a Messages-wire upstream**, native or translated: that stream is forwarded as the upstream sent it, so there is no translator to substitute anything (KBR-227 — before it, the translated Anthropic-wire routes pushed Anthropic SSE through the Chat Completions chunk translator and Claude Code received an empty reply). Empty replies on that branch are KBR-155's to retry. **Nor on the streamed translated `/v1/messages` route since KBR-99 (2026-09-21):** its empty ladder now exhausts into the D4 `502 empty_response` for both empty shapes (SYSTEM_DESIGN §5.3 S11), so the fallback events the translator buffers on that path are dropped, never written. The non-streaming reply and the other inbound protocols still translate, and still can fire this row. |
 | ~~M13~~ | **Withdrawn — no longer a mutation.** Was: discard the conversation and substitute a `[Kitty Bridge: …]` user message. | `_compact_messages` / `_apply_compaction` post-condition | No non-system message survives | **Closed by KBR-5.** The post-condition now raises `CompactionFailedError` and the handler returns a protocol-native 400 downstream; nothing is substituted, so there is no mutation left to register. The row is kept struck through rather than deleted so a reader of finding F3 can still find it. **The trigger recorded here was wrong** — see F3. |
 | M14 | **Replace the destination entirely** — scheme and host are built from the profile by `build_base_url()`; the path by `get_upstream_path(_route_model(cc_request))` — the **request's normalized model**, which is the normalized profile model when there is one and the agent's model when there is not. `_route_model` is the single place that answers this; the auth scheme (P9/P20), the thinking carrier and the choice to forward a `/v1/messages` stream unchanged (`BridgeServer._serves_messages_wire`, KBR-227) read it too, and the adapter reads the same key for the body (KBR-127 — it was the raw profile model, so path and body could route differently; and on `openai_subscription`'s Responses path the adapter read the *inbound* body's model instead until KBR-160, which was harmless for routing only because that provider posts to a fixed URL and derives no header from the model). Base and path are then **composed** by `ProviderAdapter.compose_upstream_url`, not concatenated (KBR-143). | `BridgeServer._build_upstream_url` | Always | The agent addressed a loopback bridge; the request has to reach the real provider. Listed because **the destination is a mutation surface the body cannot show**: on Azure an identical body sent to the wrong deployment path is a different request entirely (§3.3.5). **The query is part of the mutation, not a passenger** (KBR-143): the endpoint joins the *path* component and the two queries merge, the endpoint's parameters winning a name clash and the base URL's others surviving unaltered. A row naming only "path" would let an oracle derive `route.query` and still not know which side owns a clash. The base URL's fragment is carried through and never sent, since no HTTP client puts one on the wire — so an oracle deriving `route.*` from the profile must expect it on the composed URL and absent from the request line. **The composed URL is redacted before it is echoed** into the 404 diagnostic or a pre-flight failure (`redact_url_for_display`): query values and the fragment are masked, which is an I2-adjacent containment property, not a fidelity one — nothing about the request changes. The composition helper is shared with `kitty.validation.validate_api_key` and `OllamaCloudAdapter._build_url`, but **this row's site is the bridge alone**: pre-flight's probe is not a request the agent made, and the register describes what happens to the agent's request. |
 | M15 | Rewrite a string `input` into the single-item list form `[{"type": "message", "role": "user", "content": [{"type": "input_text", "text": <s>}]}]` | `normalize_responses_request` (`bridge/responses/translator.py`), called from `_handle_responses` before the body forks | Always | OpenAI's `CreateResponse` defines the two forms as the **same request**: `input` is `oneOf` a string (*"a text input to the model, equivalent to a text input with the `user` role"*) or an array, and everything downstream reads the array. Fires on every request reaching the handler; a body already in the array form meets the row with a **no-op** rather than avoiding it, so there is no complement state for §3.3.2 assertion 2 to arrange, which is why it is unconditional. Listed rather than omitted because the rewrite is real bytes at the `curl_cffi` boundary of §3.2.3, where `_original_body` **is** this body; the projection cannot express the difference, so the row takes §3.3.1a's escape for P16's reason. **KBR-144.** |
@@ -2461,11 +2461,30 @@ a stream the client already had bytes on. The guard lands on both routes; the te
 route is decided in §11 Q14 (2026-09-14, this ticket). One residual
 differs in its *ending*, not in its recovery: a post-emission **transport** drop on the translated
 `/v1/messages` path still closes with `end_turn` + `message_stop` rather than the error event
-(KBR-183's decision D2, carried as a scope addition on KBR-99, so the second, third and fourth rows
-above go red on a transport-drop injection until it is settled). It is also
-the same one the real Anthropic API makes: its mid-stream failures arrive as an SSE `error` event on
-an already-`200` response and are raised to the caller, never resumed. **I2** is why that matters
-— a bridge that recovers where the provider gives up is observably not the provider.
+(KBR-183's decision D2, carried as a scope addition on KBR-99) — **where the drop lands before any
+finish chunk has been read**, i.e. the second and third rows above; verified 10/10 per cell
+(2026-09-21). The fourth row is the exception: the finish chunk's streaming path auto-resets the
+translator the moment it is read (`messages/translator.py:1037`), so a drop surfacing afterwards
+finds no live message to finalize and ends in the error event with the block left open
+(truncated) — the clean-EOF race flushes the buffered close-out instead (complete sentence).
+That cell is T-G7's genuinely two-way shape set `{complete_sentence, truncated}`, and KBR-99's
+grid pins the shape set rather than one internal path. On the rows where the residue holds it is
+also the same one the real Anthropic API makes: its mid-stream failures arrive as an SSE `error`
+event on an already-`200` response and are raised to the caller, never resumed. **I2** is why
+that matters — a bridge that recovers where the provider gives up is observably not the provider.
+
+**KBR-99 (2026-09-21) closed four of the gaps this section carried as open
+scope.** With the product owner's four decisions of that date: the Gemini
+in-stream-error exhaustion arm writes its terminal
+`{"error": {"code": 502, ...}}` SSE event (S10 of `SYSTEM_DESIGN.md` §5.3 —
+the one silent arm); the translated route's exhaustion is unified on D4 for
+both empty shapes, retiring the streaming M12 site (S11); the translated
+route gains streaming D3, failing a truncation finish-chunk empty stream at
+once with `400 reason: "<stop_reason>_before_content"` (S12); and the
+Messages-wire pre-content error ladder charges `_get_stream_error_cooldown`,
+closing the health-model half of D2's "kept, not closed" pair (S13). The
+scoped transport-drop residue above is the one asymmetry that survives, now
+pinned rather than open scope.
 
 The empty-stream case does not reach these rows at all: per Q14(b) the native passthrough holds
 its leading events until the first content event, so a contentless reply is still pre-emission
@@ -3102,12 +3121,14 @@ under KBR-235 for `/v1/messages` and KBR-250 for `/v1/responses` and Gemini**: t
 translated stream takes the same ladder as any empty reply and ends it in the D4 error (owner
 decision, recorded under Q14 below); `_is_empty_cc_response`'s Messages-shaped arm now mirrors
 `PreambleHold`'s release rule — D1 judges by block type, D3 ends the non-streaming ladder at once
-with the `400` at every gate the judgement feeds. The remainder is recorded rather than smoothed
-over: the translated route's **exhaustion is split** — a contentless reply *with* `finish_reason`
-still exhausts into the M12 fallback text while a no-finish stream exhausts into the D4 error,
-until the owner unifies them; the translated route has **no streaming D3** — a `max_tokens`
-finish-chunk empty stream is still retried and fallback-ized, the route's pre-existing
-finish-chunk behaviour this change deliberately did not touch. KBR-250's per-route application
+with the `400` at every gate the judgement feeds. The remainder was recorded rather than smoothed
+over: the translated route's **exhaustion was split** — a contentless reply *with* `finish_reason`
+still exhausted into the M12 fallback text while a no-finish stream exhausted into the D4 error,
+until the owner unified them — and the translated route had **no streaming D3** — a `max_tokens`
+finish-chunk empty stream was still retried and fallback-ized. **KBR-99 (2026-09-21) closed both:
+the exhaustion is unified on D4 for both empty shapes (S11, M12's streaming site retired) and the
+route fails a truncation finish-chunk empty stream at once with the `400` (S12); see the Q14
+amendment below.** KBR-250's per-route application
 on `/v1/responses` and Gemini is in-stream SSE error events rather than a JSON 502 response (the
 branches `sr.prepare(request)` at the top, so lazy-prepare is out of scope); the messages
 branch's post-emission arm is deliberately NOT mirrored on these two routes because
@@ -6130,10 +6151,15 @@ found cases they did not reach and one they understated. Each is decided here, w
   name line and its data line, and reading stops only when the event's lines have all arrived)
   and is deaf to everything after it (a later `message_delta` stop reason records nothing, so
   the judge's answer cannot depend on how the stream was chunked); the handler stops reading at
-  the completed error event and runs the empty ladder. Two differences are **kept, not closed**:
-  the health model stays the empty ladder's — no quarantine, unlike the CC-wire path's in-stream
-  cooldown — and the two wires now also exhaust differently, the CC-wire generic body carrying
-  neither the provider payload nor a reason marker. The `sr is not None` arm ends an
+  the completed error event and runs the empty ladder. Two differences were **kept, not closed**:
+  the health model stayed the empty ladder's — no quarantine, unlike the CC-wire path's in-stream
+  cooldown — and the two wires exhaust differently, the CC-wire generic body carrying
+  neither the provider payload nor a reason marker. **The health-model half is closed by KBR-99
+  (2026-09-21):** the pre-content error ladder now charges `_get_stream_error_cooldown`, matching
+  the CC-wire cooldown, so a persistently-erroring backend stops drawing ~1/n of the attempts
+  (`SYSTEM_DESIGN.md` §5.3 S13). The exhaustion-shape half remains open for a cross-wire decision —
+  a one-route alignment would leave clients branching inconsistently, per the KBR-247 review's
+  rider. The `sr is not None` arm ends an
   already-open stream with the provider's payload raw, or kitty's upstream-error wording when
   the payload is unusable. Three accepted residues: error-then-content
   reaches the client only when both arrive in one chunk (the SDK raises on the event, so that
@@ -6211,11 +6237,15 @@ fix, not the D4 path's. The exhaustion outcome was this ticket's one owner decis
 owner chose **D4, not M12**: a no-finish empty stream that exhausts the ladder ends in the same
 `502` `api_error` `reason: "empty_response"` as the native route — a `200` carrying substituted
 text is the one thing the route must never produce, and exhausting into an error opens no second
-exhaustion vocabulary. Two boundaries recorded with the decision: the contentless-with-
-`finish_reason` case keeps its M12 fallback exhaustion, so the route's exhaustion is deliberately
-split until the owner unifies it; and the translated route has **no streaming D3** — a
-`max_tokens` finish-chunk empty stream is still retried and fallback-ized, the route's
-pre-existing finish-chunk behaviour this change deliberately did not touch. The non-streaming
+exhaustion vocabulary. Two boundaries were recorded with the decision: the contentless-with-
+`finish_reason` case kept its M12 fallback exhaustion, so the route's exhaustion was deliberately
+split until the owner unified it; and the translated route had **no streaming D3** — a
+`max_tokens` finish-chunk empty stream was still retried and fallback-ized, the route's
+pre-existing finish-chunk behaviour that change deliberately did not touch. **Both boundaries are
+closed by KBR-99 (2026-09-21):** the route's exhaustion is now unified on D4 for both empty
+shapes (S11, M12's streaming site retired), and the route fails a truncation finish-chunk empty
+stream at once with `400 reason: "<stop_reason>_before_content"`, ending the ladder on that
+attempt (S12). The non-streaming
 judgement `_is_empty_cc_response` and the four ladders it gates were aligned with D1/D3 for
 Messages-shaped replies in the same change (§7.2.1 above): D1 by block type, mirroring
 `PreambleHold._block_start_releases`; D3 ends the ladder at once and the Messages handler returns

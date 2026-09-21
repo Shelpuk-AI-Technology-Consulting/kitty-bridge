@@ -854,6 +854,12 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # translators substitute one text part into a reply that was empty, so a
         # wildcard would also claim a delta at `reply.parts[5]` whenever this
         # trigger is declared met.
+        #
+        # KBR-99: the streamed translated /v1/messages route no longer DELIVERS
+        # the substitution — its empty ladder exhausts into the D4 502 for both
+        # empty shapes (SYSTEM_DESIGN §5.3 S11) — but the row stays live: the
+        # translators still synthesise the fallback and every non-streaming
+        # reply and other inbound protocol still writes it.
         paths=(c.reply_part_path(0),),
         conditional=True,
         design_ref="§3.2.1 · §3.3.1",

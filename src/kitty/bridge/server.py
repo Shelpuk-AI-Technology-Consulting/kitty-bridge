@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, NoReturn, TextIO, TypedDict, cast
 import aiohttp
 from aiohttp import web
 
+from kitty.bridge.engine import TranslationEngine
 from kitty.bridge.gemini.translator import GeminiTranslator
 from kitty.bridge.messages.events import (
     format_content_block_delta_event,
@@ -1347,8 +1348,10 @@ def _d3_truncation_error_body(stop_reason: str) -> dict:
 
     Q14 D3: the body is an ``invalid_request_error`` carrying a ``reason`` marker, so the
     agent sees a request-shaped failure it will not retry and operators can tell it from
-    any other ``400``. Shared by the native streaming branch and the non-streaming
-    Messages delivery (KBR-235) so the wording cannot drift.
+    any other ``400``. Shared by the native streaming branch (``_stream_messages`` on the
+    Messages-wire passthrough), the non-streaming Messages delivery (KBR-235), and the
+    translated streaming branch (``_stream_messages`` on the Chat Completions-wire upstream,
+    KBR-99 S12 — streaming D3) so the wording cannot drift across protocols.
 
     Args:
         stop_reason: The upstream stop reason that truncated the reply.
@@ -2980,6 +2983,31 @@ class BridgeServer:
         if choices and isinstance(choices[0], dict):
             return choices[0].get("finish_reason") is not None
         return False
+
+    @staticmethod
+    def _chunk_finish_reason(chunk: dict) -> str | None:
+        # pragma: no mutate block
+        """Return the raw Chat Completions ``finish_reason`` of a finish chunk.
+
+        KBR-99 (S12): the translated route's D3 check needs the upstream's own
+        spelling at buffering time — the translated stop reason only exists
+        inside the buffered event strings, which the gate would have to
+        re-parse. ``TranslationEngine.map_finish_reason`` maps ``length`` to
+        ``max_tokens`` and passes unknown spellings through unchanged, so the
+        check at the gate compares against ``_NATIVE_TRUNCATING_STOP_REASONS``
+        exactly as the native route does.
+
+        Args:
+            chunk: The upstream Chat Completions chunk.
+
+        Returns:
+            The finish reason string, or ``None`` when the chunk carries none.
+        """
+        choices = chunk.get("choices", [])
+        if choices and isinstance(choices[0], dict):
+            reason = choices[0].get("finish_reason")
+            return reason if isinstance(reason, str) else None
+        return None
 
     def _select_backend(self, *, require_streaming: bool = False) -> _BackendContext:
         # pragma: no mutate block
@@ -6327,6 +6355,27 @@ class BridgeServer:
                                 if hold.stop_reason in _NATIVE_TRUNCATING_STOP_REASONS:
                                     return _make_error_response(_d3_truncation_error_body(hold.stop_reason), status=400)
 
+                                # KBR-99 (S13): quarantine parity with the CC-wire path.
+                                # When this attempt's upstream sent the pre-content
+                                # error event the hold judged, the backend carries the
+                                # same stream-error cooldown an in-stream error charges
+                                # on the Chat Completions wire (first charge 30 s,
+                                # escalating) — KBR-241's D2 amendment kept the health
+                                # model different deliberately, and the owner closed the
+                                # difference: without it a persistently-erroring backend
+                                # kept drawing ~1/n of the attempts on a balancing pool.
+                                # The recognition rule and the exhaustion payload from
+                                # the D2 amendment are untouched.
+                                if hold.error_seen and self._backends and (
+                                    self._current_backend_idx >= 0
+                                ):
+                                    self._mark_backend_unhealthy(
+                                        self._current_backend_idx,
+                                        cooldown=self._get_stream_error_cooldown(
+                                            self._current_backend_idx
+                                        ),
+                                    )
+
                                 # Empty reply, nothing written: the translated path's
                                 # empty-response ladder, including its balancing quirk of
                                 # retrying only inside the final delays once no backend
@@ -6425,6 +6474,7 @@ class BridgeServer:
                             events_emitted = False
                             chunk_count = 0
                             finish_events: list[str] = []  # buffered finish events
+                            last_finish_reason: str | None = None  # KBR-99 S12: D3 stop-reason capture
                             # Fed the Messages-API events we emit, so the translated
                             # path is audited by the same assembler as the native one
                             # (issue #33).  Per attempt: a failover resets the stream.
@@ -6496,6 +6546,7 @@ class BridgeServer:
                                             # Buffer finish events to detect empty responses before writing
                                             if self._chunk_has_finish_reason(chunk):
                                                 last_usage = chunk.get("usage")
+                                                last_finish_reason = self._chunk_finish_reason(chunk)
                                                 finish_events.extend(events)
                                             else:
                                                 for event in events:
@@ -6532,6 +6583,7 @@ class BridgeServer:
                                                 )
                                                 if self._chunk_has_finish_reason(chunk):
                                                     last_usage = chunk.get("usage")
+                                                    last_finish_reason = self._chunk_finish_reason(chunk)
                                                     finish_events.extend(events)
                                                 else:
                                                     for event in events:
@@ -6727,6 +6779,34 @@ class BridgeServer:
                                         ).encode(),
                                     )
                                     break
+                                # KBR-99 (S12): streaming D3 on the translated route. A
+                                # truncation before content (`max_tokens` / context window)
+                                # is a failure no retry can improve — D3's native-route
+                                # rationale verbatim — so the ladder ends on this attempt
+                                # with the request-shaped 400 the agent will not retry.
+                                # The stop reason is the upstream's raw finish_reason
+                                # mapped through `TranslationEngine.map_finish_reason`
+                                # (`length` → `max_tokens`; unknown spellings pass
+                                # through), compared against the same set the native
+                                # route uses. `sr is None` here (the post-emission arm
+                                # above handled an emitting request), so the JSON error
+                                # is legal. D4 stays the exhaustion for every other
+                                # stop reason.
+                                if last_finish_reason is not None:
+                                    truncation_stop = TranslationEngine.map_finish_reason(
+                                        last_finish_reason
+                                    )
+                                    if truncation_stop in _NATIVE_TRUNCATING_STOP_REASONS:
+                                        logger.warning(
+                                            "Messages stream truncated before content "
+                                            "(%s) for %s; failing without retry",
+                                            truncation_stop,
+                                            message_id,
+                                        )
+                                        return _make_error_response(
+                                            _d3_truncation_error_body(truncation_stop),
+                                            status=400,
+                                        )
                                 retried = False
                                 if self._backends and self._current_backend_idx >= 0:
                                     if self._any_healthy_backend() and attempt < max_attempts - 1:
@@ -6841,27 +6921,37 @@ class BridgeServer:
 
                                 # KBR-235, owner decision 2026-09-14: exhausting a stream that
                                 # never produced a finish chunk ends in the D4 error, as on the
-                                # native route — not fallback text. Nothing has been written on
-                                # any attempt of this request (the gate required `sr is None`),
-                                # so the JSON error is legal; the attempt counts no completion,
-                                # and no backend health changes.
-                                if empty_no_finish:
-                                    logger.warning(
-                                        "Messages stream empty (no finish chunk) after %d attempts for %s",
-                                        attempt + 1,
-                                        message_id,
-                                    )
-                                    return _make_error_response(
-                                        {
-                                            "type": "error",
-                                            "error": {
-                                                "type": "api_error",
-                                                "message": _NATIVE_EMPTY_REPLY_MESSAGE,
-                                                "reason": "empty_response",
-                                            },
+                                # native route — not fallback text. KBR-99 (S11) unifies the
+                                # split KBR-235 deliberately kept: the finish-chunk empty arm
+                                # now exhausts into the same D4 error instead of the M12
+                                # fallback text — Q14(a)'s rationale already says a `200`
+                                # carrying substituted text is the one thing the route must
+                                # never produce, and the same upstream failure was producing
+                                # a normal-looking turn or an error depending on an accident
+                                # of the upstream's chunking. M12 stays live on non-streaming
+                                # replies and the other inbound protocols; only this streaming
+                                # write path stops delivering the substitution. Nothing has
+                                # been written on any attempt of this request (the gate's
+                                # post-emission arm above broke out when `sr is not None`),
+                                # so the JSON error is legal; the attempt counts no
+                                # completion, and no backend health changes.
+                                logger.warning(
+                                    "Messages stream empty (empty-response ladder exhausted) "
+                                    "after %d attempts for %s",
+                                    attempt + 1,
+                                    message_id,
+                                )
+                                return _make_error_response(
+                                    {
+                                        "type": "error",
+                                        "error": {
+                                            "type": "api_error",
+                                            "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                            "reason": "empty_response",
                                         },
-                                        status=502,
-                                    )
+                                    },
+                                    status=502,
+                                )
 
                             # Write buffered finish events to client
                             s = await _ensure_prepared()
@@ -8002,6 +8092,25 @@ class BridgeServer:
                         if stream_error:
                             if events_emitted:
                                 logger.warning("Gemini stream error after client events emitted; not retrying")
+                                # KBR-99 (S10): the one silent arm gets its terminal
+                                # diagnostic. The route's own KBR-247 convention — a
+                                # single `{"error": ...}` SSE data event, then EOF —
+                                # is what every sibling exhaustion arm writes; leaving
+                                # this arm silent made a Gemini CLI session see the
+                                # stream just stop (status="incomplete", no event).
+                                # The stream-error cooldown was already charged at
+                                # detection; no retry and no failover, per Q14(a).
+                                error_payload = {
+                                    "error": {
+                                        "code": 502,
+                                        "message": "Upstream provider sent an error after the response had begun",
+                                    }
+                                }
+                                error_sse = f"data: {json.dumps(error_payload)}\n\n"
+                                try:
+                                    await sr.write(error_sse.encode())
+                                except (ConnectionResetError, BrokenPipeError, OSError):
+                                    logger.debug("Client disconnected before error could be sent")
                                 break
                             if attempt < max_attempts - 1:
                                 translator.reset()  # F22: clear stale tool buffers
