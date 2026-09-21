@@ -807,11 +807,23 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
     "cross_class_exhaustion"}}\n\n` followed by `data: [DONE]\n\n`, then
     `write_eof`.
 - **The one remaining post-emission ending asymmetry is deliberate (KBR-99
-  records it as pinned residue).** On the translated `/v1/messages` branch a
-  post-emission **transport drop** still closes `end_turn` + `message_stop`
-  rather than the Q14 error event — KBR-183's decision D2, kept so the
-  branch's truncated answer reads as a completed turn to Claude Code. Every
-  other post-emission failure on every route ends in the route's error event
+  records it as pinned residue) — and it is scoped to drops that land before
+  any finish chunk is read.** On the translated `/v1/messages` branch a
+  post-emission **transport drop** at the AFTER_TEXT or MID_TOOL_ARGUMENTS
+  cells closes `end_turn` + `message_stop` rather than the Q14 error event —
+  KBR-183's decision D2, kept so the branch's truncated answer reads as a
+  completed turn to Claude Code (verified 10/10 per cell, 2026-09-21). On
+  the BEFORE_TERMINAL cell the residue does **not** hold: the finish chunk's
+  streaming path auto-resets the translator the moment it is read
+  (`messages/translator.py:1037`), so when the drop surfaces afterwards
+  `finalize_interrupted_stream()` finds no live message and returns `[]`,
+  and the transport branch falls to its error-event fallback with the block
+  left open (truncated); on the clean-EOF race the buffered close-out
+  flushes first (complete sentence). That cell is T-G7's genuinely two-way
+  shape set `{complete_sentence, truncated}`, verified 15/15 truncated under
+  the exception path — the grammar floor already composes on it, and KBR-99's
+  grid pins the shape set rather than one internal path. Every other
+  post-emission failure on every route ends in the route's error event
   (native Messages via KBR-183; Responses via KBR-247; Gemini via S10; Chat
   Completions via its `upstream_error` marker). `TEST_SUITE.md` §6.3.1 owns
   the assertion; a change here is an owner decision that must move the pin,

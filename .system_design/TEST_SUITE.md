@@ -2413,13 +2413,17 @@ a stream the client already had bytes on. The guard lands on both routes; the te
 route is decided in §11 Q14 (2026-09-14, this ticket). One residual
 differs in its *ending*, not in its recovery: a post-emission **transport** drop on the translated
 `/v1/messages` path still closes with `end_turn` + `message_stop` rather than the error event
-(KBR-183's decision D2, carried as a scope addition on KBR-99). KBR-99 (2026-09-21) resolved the
-scope by pinning, not changing: the translated-route oracles assert the `end_turn` + `message_stop`
-shape explicitly as the documented D2 residue, so a transport-drop injection is green by design
-while every other post-emission ending is the Q14 error event. It is also
-the same one the real Anthropic API makes: its mid-stream failures arrive as an SSE `error` event on
-an already-`200` response and are raised to the caller, never resumed. **I2** is why that matters
-— a bridge that recovers where the provider gives up is observably not the provider.
+(KBR-183's decision D2, carried as a scope addition on KBR-99) — **where the drop lands before any
+finish chunk has been read**, i.e. the second and third rows above; verified 10/10 per cell
+(2026-09-21). The fourth row is the exception: the finish chunk's streaming path auto-resets the
+translator the moment it is read (`messages/translator.py:1037`), so a drop surfacing afterwards
+finds no live message to finalize and ends in the error event with the block left open
+(truncated) — the clean-EOF race flushes the buffered close-out instead (complete sentence).
+That cell is T-G7's genuinely two-way shape set `{complete_sentence, truncated}`, and KBR-99's
+grid pins the shape set rather than one internal path. On the rows where the residue holds it is
+also the same one the real Anthropic API makes: its mid-stream failures arrive as an SSE `error`
+event on an already-`200` response and are raised to the caller, never resumed. **I2** is why
+that matters — a bridge that recovers where the provider gives up is observably not the provider.
 
 **KBR-99 (2026-09-21) closed four of the gaps this section carried as open
 scope.** With the product owner's four decisions of that date: the Gemini
@@ -2431,8 +2435,8 @@ route gains streaming D3, failing a truncation finish-chunk empty stream at
 once with `400 reason: "<stop_reason>_before_content"` (S12); and the
 Messages-wire pre-content error ladder charges `_get_stream_error_cooldown`,
 closing the health-model half of D2's "kept, not closed" pair (S13). The
-transport-drop ending above is the one asymmetry that survives, now as
-pinned residue rather than open scope.
+scoped transport-drop residue above is the one asymmetry that survives, now
+pinned rather than open scope.
 
 The empty-stream case does not reach these rows at all: per Q14(b) the native passthrough holds
 its leading events until the first content event, so a contentless reply is still pre-emission
