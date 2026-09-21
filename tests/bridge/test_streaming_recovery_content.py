@@ -698,6 +698,69 @@ class TestTranslatedEmptyStreamD4Unification:
         assert upstream.requests >= 2
 
 
+# ── Fix R4 — streaming D3 on the translated Messages route ───────────────
+
+
+class TestTranslatedStreamingD3:
+    """R4: a truncation before content fails at once with the D3 400.
+
+    SYSTEM_DESIGN §5.3 S12 extends D3 to the translated route: a
+    finish-chunk empty stream whose stop reason maps into
+    ``_NATIVE_TRUNCATING_STOP_REASONS`` ends the ladder on that attempt with
+    the ``400`` ``invalid_request_error`` body and
+    ``reason: "<stop_reason>_before_content"`` — the same body the native
+    route builds via ``_d3_truncation_error_body``. The scripted upstream
+    sends ``finish_reason: "length"`` (mapped to ``max_tokens``) and the
+    literal ``"model_context_window_exceeded"`` (a pass-through spelling —
+    no standard CC finish reason maps to it, so only an upstream that sends
+    that literal reaches the context-window arm).
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("finish_reason", "expected_reason"),
+        [
+            ("length", "max_tokens_before_content"),
+            ("model_context_window_exceeded", "model_context_window_exceeded_before_content"),
+        ],
+        ids=["length_maps_to_max_tokens", "literal_context_window_passthrough"],
+    )
+    async def test_translated_truncation_finish_chunk_fails_at_once_with_d3(
+        self,
+        fast_stall,
+        short_grace,  # noqa: F811 — fixture shadowing the module-level import
+        finish_reason,
+        expected_reason,
+    ) -> None:
+        finish_chunk = (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{},'
+            b'"finish_reason":"' + finish_reason.encode() + b'"}],"model":"test-model","usage":null}\n\n'
+        )
+        truncation_stream = finish_chunk + b"data: [DONE]\n\n"
+
+        async def _truncated(request: web.Request, _ordinal: int) -> web.StreamResponse:
+            return await _sse(request, truncation_stream)
+
+        upstream = _Upstream("/v1/chat/completions", _truncated)
+        async with upstream as base_url:
+            server = _build("balanced", base_url)
+            port = await server.start_async()
+            try:
+                status, body = await _drive_messages_json(port)
+            finally:
+                await server.stop_async()
+
+        # D3 ends the ladder on the FIRST attempt — no retry, no failover.
+        assert upstream.requests == 1, (
+            f"a truncation before content must not be retried; saw {upstream.requests} requests"
+        )
+        assert status == 400, f"expected the D3 400, got {status}; body: {body[:300]!r}"
+        body_text = body.decode()
+        assert f'"reason":"{expected_reason}"' in body_text or (
+            f'"reason": "{expected_reason}"' in body_text
+        )
+
+
 class TestPostEmissionTimeoutEndings:
     """A read timeout after content ends the turn per Q14(a) — no second attempt.
 

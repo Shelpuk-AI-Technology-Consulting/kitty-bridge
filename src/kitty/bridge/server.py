@@ -38,6 +38,7 @@ from kitty.bridge.messages.events import (
 from kitty.bridge.messages.events import (
     format_error_event as messages_format_error,
 )
+from kitty.bridge.engine import TranslationEngine
 from kitty.bridge.messages.translator import (
     MessagesTranslator,
     build_user_content_message,
@@ -2783,6 +2784,31 @@ class BridgeServer:
         if choices and isinstance(choices[0], dict):
             return choices[0].get("finish_reason") is not None
         return False
+
+    @staticmethod
+    def _chunk_finish_reason(chunk: dict) -> str | None:
+        # pragma: no mutate block
+        """Return the raw Chat Completions ``finish_reason`` of a finish chunk.
+
+        KBR-99 (S12): the translated route's D3 check needs the upstream's own
+        spelling at buffering time — the translated stop reason only exists
+        inside the buffered event strings, which the gate would have to
+        re-parse. ``TranslationEngine.map_finish_reason`` maps ``length`` to
+        ``max_tokens`` and passes unknown spellings through unchanged, so the
+        check at the gate compares against ``_NATIVE_TRUNCATING_STOP_REASONS``
+        exactly as the native route does.
+
+        Args:
+            chunk: The upstream Chat Completions chunk.
+
+        Returns:
+            The finish reason string, or ``None`` when the chunk carries none.
+        """
+        choices = chunk.get("choices", [])
+        if choices and isinstance(choices[0], dict):
+            reason = choices[0].get("finish_reason")
+            return reason if isinstance(reason, str) else None
+        return None
 
     def _select_backend(self, *, require_streaming: bool = False) -> _BackendContext:
         # pragma: no mutate block
@@ -6072,6 +6098,7 @@ class BridgeServer:
                             events_emitted = False
                             chunk_count = 0
                             finish_events: list[str] = []  # buffered finish events
+                            last_finish_reason: str | None = None  # KBR-99 S12: D3 stop-reason capture
                             # Fed the Messages-API events we emit, so the translated
                             # path is audited by the same assembler as the native one
                             # (issue #33).  Per attempt: a failover resets the stream.
@@ -6143,6 +6170,7 @@ class BridgeServer:
                                             # Buffer finish events to detect empty responses before writing
                                             if self._chunk_has_finish_reason(chunk):
                                                 last_usage = chunk.get("usage")
+                                                last_finish_reason = self._chunk_finish_reason(chunk)
                                                 finish_events.extend(events)
                                             else:
                                                 for event in events:
@@ -6179,6 +6207,7 @@ class BridgeServer:
                                                 )
                                                 if self._chunk_has_finish_reason(chunk):
                                                     last_usage = chunk.get("usage")
+                                                    last_finish_reason = self._chunk_finish_reason(chunk)
                                                     finish_events.extend(events)
                                                 else:
                                                     for event in events:
@@ -6374,6 +6403,34 @@ class BridgeServer:
                                         ).encode(),
                                     )
                                     break
+                                # KBR-99 (S12): streaming D3 on the translated route. A
+                                # truncation before content (`max_tokens` / context window)
+                                # is a failure no retry can improve — D3's native-route
+                                # rationale verbatim — so the ladder ends on this attempt
+                                # with the request-shaped 400 the agent will not retry.
+                                # The stop reason is the upstream's raw finish_reason
+                                # mapped through `TranslationEngine.map_finish_reason`
+                                # (`length` → `max_tokens`; unknown spellings pass
+                                # through), compared against the same set the native
+                                # route uses. `sr is None` here (the post-emission arm
+                                # above handled an emitting request), so the JSON error
+                                # is legal. D4 stays the exhaustion for every other
+                                # stop reason.
+                                if last_finish_reason is not None:
+                                    truncation_stop = TranslationEngine.map_finish_reason(
+                                        last_finish_reason
+                                    )
+                                    if truncation_stop in _NATIVE_TRUNCATING_STOP_REASONS:
+                                        logger.warning(
+                                            "Messages stream truncated before content "
+                                            "(%s) for %s; failing without retry",
+                                            truncation_stop,
+                                            message_id,
+                                        )
+                                        return _make_error_response(
+                                            _d3_truncation_error_body(truncation_stop),
+                                            status=400,
+                                        )
                                 retried = False
                                 if self._backends and self._current_backend_idx >= 0:
                                     if self._any_healthy_backend() and attempt < max_attempts - 1:
