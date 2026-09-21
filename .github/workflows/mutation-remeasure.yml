@@ -129,7 +129,16 @@ jobs:
           echo "PATTERNS=$PATTERNS" >> "$GITHUB_ENV"
           echo "Patterns: $PATTERNS"
 
+      # The step-level cap is the loss-prevention half of the resume
+      # design, and it exists because of a demonstrated failure: a job-level
+      # timeout kill can consume the cancel grace window tearing down
+      # mutmut's fork-server children, and the runner is force-killed before
+      # the always()-guarded upload ever starts -- one leg's progress was
+      # lost exactly that way (KBR-272). Ending the mutmut step at 270
+      # minutes leaves the job's remaining ~30 minutes as guaranteed room
+      # for the aggregate + upload steps, so every leg preserves its work.
       - name: Run mutmut for the group
+        timeout-minutes: 270
         run: mutmut run $PATTERNS
 
       # 🔴 `|| true`, deliberately, and why: the aggregator asserts
