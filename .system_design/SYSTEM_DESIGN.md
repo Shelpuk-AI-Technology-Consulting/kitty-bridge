@@ -1482,6 +1482,16 @@ crash-proofing fix inside the translator: `_extract_text` gains an
 tolerated `systemInstruction` envelope does not crash the join — a tolerated
 envelope gets no boundary check, so the translator carries the leaf guard.
 
+**Key absence vs wrong type.** Every "400" row above fires on a *present*
+value whose documented type is violated. A *missing* key stays tolerated
+throughout — `{"contents": [{"role": "user"}]}` (no `parts`) proceeds with an
+empty parts list, exactly as KBR-82 left it: there is no crash class on
+absence (`content.get("parts", [])` handles it), and requiring the key would
+400 bodies the pre-KBR-288 contract accepted. The §12.3 fidelity argument
+("a tolerated-as-absent `parts` would silently drop a real conversation
+turn") is about a *present-but-wrong-typed* `parts` being silently treated
+as absent — not about the key's absence.
+
 Helpers (`_require_list`, `_require_dict`) keep the call sites readable. Each
 helper carries a one-line test pinning both the OK shape and a malformed shape.
 

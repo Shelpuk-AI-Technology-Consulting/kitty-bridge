@@ -314,7 +314,10 @@ class TestGeminiToleratedShapes:
             "/v1beta/models/harness-model:generateContent",
             {"contents": [], "tools": non_list},
         )
-        assert status < 500, f"expected non-5xx for tools={non_list!r}, got {status}: {text}"
+        # The stated invariant is "tolerated, not 400" — a future commit
+        # that tightens this shape to a 400 must fail this pin, so the
+        # bound is 400, not 500.
+        assert status < 400, f"expected the tolerated shape to proceed, got {status}: {text}"
 
     @pytest.mark.parametrize("bad_text", [{"a": 1}, [1]])
     async def test_system_instruction_text_non_string_tolerated(
@@ -326,7 +329,7 @@ class TestGeminiToleratedShapes:
             "/v1beta/models/harness-model:generateContent",
             {"contents": [], "systemInstruction": {"parts": [{"text": bad_text}]}},
         )
-        assert status < 500, f"expected non-5xx, got {status}: {text}"
+        assert status < 400, f"expected the tolerated shape to proceed, got {status}: {text}"
 
     async def test_function_declarations_empty_list_tolerated(
         self, cc_bridge: BridgeFixture
@@ -338,5 +341,5 @@ class TestGeminiToleratedShapes:
             "/v1beta/models/harness-model:generateContent",
             {"contents": [], "tools": [{"functionDeclarations": []}]},
         )
-        assert status < 500, f"expected non-5xx for empty list, got {status}: {text}"
+        assert status < 400, f"expected the tolerated shape to proceed, got {status}: {text}"
 

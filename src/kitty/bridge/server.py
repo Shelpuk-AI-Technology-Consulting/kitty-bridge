@@ -371,9 +371,11 @@ def _validate_gemini_content(content: dict, index: int) -> None:
     Helper for :func:`_normalize_gemini_request`. ``role`` is optional
     with a documented default of ``"user"``; when present it must be a
     string (KBR-288 — a non-string role is a malformed Content per the
-    §12.3 required-shape policy). ``parts`` is required when ``contents[i]``
-    exists, per the Gemini schema; a missing key is allowed but a
-    present non-list / non-dict member is rejected.
+    §12.3 required-shape policy). A present ``parts`` must be a list
+    whose members are objects; a missing key is tolerated (the
+    translator treats it as an empty parts list — no turn is
+    manufactured), and a present non-list value or non-dict member is
+    rejected (KBR-288).
     """
     pfx = f"contents[{index}]"
     if "role" in content and not isinstance(content["role"], str):
