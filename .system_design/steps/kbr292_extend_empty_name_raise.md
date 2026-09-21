@@ -39,7 +39,7 @@ recorded in §7.4.2 row 2's Because cell as a sibling gap, not settled here.
 
 ## Why option (a) and not (b)
 
-The losslessness argument (`contract.py:935-941`) does not distinguish `""`
+The losslessness argument (``contract.decode_arguments``) does not distinguish `""`
 from absent — both are "no usable name", so KBR-281's rule extends mechanically.
 Under (b) the Responses reply reader would raise on absent/non-string but
 residualise `""` — one field, two outcomes, no recorded reason. And the oracle
