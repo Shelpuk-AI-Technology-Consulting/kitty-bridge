@@ -154,7 +154,7 @@ class BotocoreContainment:
 
         botocore's default legacy retry policy makes up to five attempts with
         exponential backoff — worst-case ~15 s of sleeps per failed request
-        (measured on the resolved botocore (1.43.93):
+        (measured on the resolved botocore (1.43.94):
         ``botocore/data/_retry.json`` pins
         ``max_attempts: 5`` in legacy mode and
         ``botocore/retryhandler.py``'s ``delay_exponential`` produces
