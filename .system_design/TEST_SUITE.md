@@ -5613,6 +5613,52 @@ by what the artifact *declares*.
 
 ---
 
+### 8.7 Box-local credentials for owner-side live-verify sessions
+
+The nightly jobs' credentials come from CI secrets (§8.6). A second class of
+credentialed session exists that CI cannot serve: the **owner-performed live
+verifications** (KBR-238's AC-4 gate, KBR-246, KBR-252), which probe real
+provider behaviour and record the verdicts on tickets. Their credentials are
+**box-local, never committed**: provisioned into `~/.config/kitty/` by KBR-294
+(2026-09-21) — profile `anthropic-firstparty` (provider `anthropic`,
+`api.anthropic.com`) and profile `opencode-go` (provider `opencode_go`,
+`opencode.ai/zen/go`) — both outside every balancing pool and not default, so
+paid credits burn only in an explicitly launched probe session. "Not default"
+is a current-state property, not an invariant: deleting the default profile
+auto-promotes the first remaining profile as the new default (README,
+profile-management notes), so a later deletion could promote a paid profile —
+re-verify the not-default property after any profile deletion.
+
+**Redaction discipline.** Neither key may appear in any committed file, PR
+description, or Jira comment. Echo paths cover two classes. URL echoes:
+`ProviderAdapter.redact_url_for_display` drops userinfo outright and replaces
+every query value and the fragment with a fixed `****` mask — parameter names
+kept for diagnostic value, length **not** preserved. Header echoes:
+`BridgeServer._debug_headers` masks a header's value when its **name**,
+lowercased, contains any of `auth`, `key`, `token`, `cookie`, `secret`,
+`signature` — a name-only rule whose divergence from the URL rule's
+mask-everything principle is deliberate and recorded in `SYSTEM_DESIGN.md`
+§9.2 (a value rule would redact the whole header dump). The corollary a
+probe author must know: a credential echoed as the *value* of a header whose
+name carries no stroke is **not** masked. Headers are the surface that
+matters for these two keys — `x-api-key` and `Authorization: Bearer` travel
+in headers, not URLs.
+
+**Gate semantics.** The credential ticket `blocks` the verification tickets
+until KBR-294 is *Done* — keys are necessary but not sufficient: account-class
+confirmation (KBR-294 AC-1's strict-prefix-check line, owner-confirmed from
+the KBR-238 probes) must also close before the link can be released. A
+reader unblocking KBR-246 cannot release KBR-294's gate on key existence
+alone.
+
+**Pool exemption.** Unlike §8.6's CI profiles — which are balancing pools
+whose "no single name here could be true of the run" constraint forbids
+assertions naming one member — these two profiles are single-named regulars
+and assertions may name them directly. §8.6's constraint is *not* imported
+here.
+
+---
+
 ## 9. Gap register
 
 ### 9.1 What the current suite already does well
