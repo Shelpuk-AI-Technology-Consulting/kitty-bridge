@@ -58,14 +58,32 @@ _MAX_BREAKPOINTS = 4
 
 #: Kitty's internal carriage keys — named locally because this module imports
 #: nothing from ``src/kitty`` (§3.3.1's independence rule); the registry they
-#: mirror is ``ProviderAdapter._INTERNAL_KEYS`` in ``src/kitty/providers/base.py``.
-#: After KBR-228 the Messages -> CC intermediate carries the agent's verbatim
-#: system blocks and thinking blocks under these keys as *cargo*: they are not
-#: the wire this detector measures, so their breakpoints are not findings.  If
-#: kitty ever mints a carriage key this list misses, the KBR-198/KBR-199
-#: characterisations fail loudly and force the update — the drift corrects
-#: itself in the red.
-_KITTY_CARRIAGE_KEYS = frozenset({"_anthropic_system", "_thinking_blocks"})
+#: mirror is ``ProviderAdapter._INTERNAL_KEYS`` (top-level) and
+#: ``ProviderAdapter._INTERNAL_MESSAGE_KEYS`` (message-level) in
+#: ``src/kitty/providers/base.py``. After KBR-228 the Messages -> CC
+#: intermediate carries the agent's verbatim system blocks and thinking
+#: blocks under these keys as *cargo*; KBR-296 added three more carriage
+#: keys at the M9 site (``_cache_control`` and ``_tool_cache_controls`` at
+#: request level, ``_cache_control`` and ``_tool_call_cache_controls`` at
+#: message level). They are not the wire this detector measures, so their
+#: breakpoints are not findings. If kitty ever mints a carriage key this
+#: list misses, the KBR-198/KBR-199 characterisations fail loudly and force
+#: the update — the drift corrects itself in the red.
+_KITTY_CARRIAGE_KEYS = frozenset(
+    {
+        "_anthropic_system",
+        "_thinking_blocks",
+        # KBR-296 — top-level carriage (request-level).
+        "_cache_control",
+        "_tool_cache_controls",
+        # KBR-296 — message-level carriage (assistant / tool messages).
+        # Listed here even though they live in ``_INTERNAL_MESSAGE_KEYS``:
+        # ``find_breakpoints`` walks message dicts by recursion, so a
+        # message-level key containing ``cache_control`` is matched unless
+        # the mirror covers it.
+        "_tool_call_cache_controls",
+    }
+)
 
 _MODEL = "claude-sonnet-5"
 _TOOL_NAME = "read_file"

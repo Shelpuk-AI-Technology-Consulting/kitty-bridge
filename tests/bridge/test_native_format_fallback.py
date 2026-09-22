@@ -281,6 +281,78 @@ class TestConvertNativeToCCFormat:
         assert tool_msgs[0]["tool_call_id"] == "call_abc123"
         assert "total 42" in tool_msgs[0]["content"]
 
+    def test_marked_text_only_user_turn_keeps_its_breakpoint(self):
+        """KBR-296 AC-8: a marked text block on a text-only user turn survives.
+
+        The CB-3 fixture's user turn always carries document/image siblings,
+        so the parts-list carve for a marked text-only turn is unexercised
+        there. The carve is conditional: an unmarked text-only turn keeps the
+        joined string (``test_text_only_content_unchanged`` pins it); this
+        marked one becomes a parts list so the breakpoint survives the join,
+        and the adapter's rebuild restores it on the wire.
+        """
+        breakpoint = {"type": "ephemeral", "ttl": "1h"}
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Please read README.md.", "cache_control": dict(breakpoint)},
+                    ],
+                },
+            ],
+        }
+        cc = _convert_native_to_cc_format(body)
+        assert cc["messages"][0]["content"] == [
+            {"type": "text", "text": "Please read README.md.", "cache_control": dict(breakpoint)},
+        ]
+
+        wire = AnthropicAdapter().translate_to_upstream(cc)
+        assert wire["messages"][0]["content"] == [
+            {"type": "text", "text": "Please read README.md.", "cache_control": dict(breakpoint)},
+        ]
+
+    def test_marked_assistant_text_blocks_last_marked_wins(self):
+        """KBR-296 AC-8: the joined assistant text carries the last marked block's breakpoint.
+
+        The rebuild expresses one text block; when two marked blocks join,
+        the latest breakpoint is the effective cache write, so the last one
+        wins. The CB-3 fixture marks one text block per body, so this
+        tiebreak is unexercised there.
+        """
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "first", "cache_control": {"type": "ephemeral"}},
+                        {
+                            "type": "text",
+                            "text": "second",
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                        },
+                    ],
+                },
+            ],
+        }
+        cc = _convert_native_to_cc_format(body)
+        assert cc["messages"][1]["content"] == "first\nsecond"
+        assert cc["messages"][1]["_cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+        wire = AnthropicAdapter().translate_to_upstream(cc)
+        assert wire["messages"][1]["content"] == [
+            {
+                "type": "text",
+                "text": "first\nsecond",
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            },
+        ]
+
     def test_anthropic_tools_become_cc_tools(self):
         body = _anthropic_body_with_tool_use()
         result = _convert_native_to_cc_format(body)

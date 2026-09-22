@@ -1148,6 +1148,22 @@ def _convert_native_to_cc_format(body: dict) -> dict:
                 if isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking")
             ]
 
+            # KBR-296: among the joined text blocks, the LAST marked one's
+            # breakpoint is carried — the latest breakpoint is the effective
+            # cache write, and Claude Code marks one breakpoint per text run
+            # today, so this is a no-op for the common case and a strict
+            # superset for the rare multi-marked case. The rebuild expresses
+            # one text block; a first-wins or any-breakpoint reading would
+            # cache a shorter prefix than the agent asked for.
+            text_cc = next(
+                (
+                    b["cache_control"]
+                    for b in reversed(text_blocks)
+                    if isinstance(b, dict) and b.get("cache_control") is not None
+                ),
+                None,
+            )
+
             if tool_use_blocks:
                 text = "\n".join(b.get("text", "") for b in text_blocks) if text_blocks else None
                 cc_msg: dict = {"role": "assistant", "content": text or None}
@@ -1162,6 +1178,21 @@ def _convert_native_to_cc_format(body: dict) -> dict:
                     }
                     for tu in tool_use_blocks
                 ]
+                # KBR-296: per-tool_use breakpoints ride an index-keyed
+                # message-level carriage; ``_translate_assistant_msg`` reads
+                # them back onto the rebuilt ``tool_use`` blocks.
+                tool_call_cache_controls = {
+                    idx: tu["cache_control"]
+                    for idx, tu in enumerate(tool_use_blocks)
+                    if isinstance(tu, dict) and tu.get("cache_control") is not None
+                }
+                if tool_call_cache_controls:
+                    cc_msg["_tool_call_cache_controls"] = tool_call_cache_controls
+                # KBR-296: the joined text block's breakpoint rides the
+                # message-level ``_cache_control`` carriage — attached only
+                # when text survives the rebuild (a non-empty join).
+                if text and text_cc is not None:
+                    cc_msg["_cache_control"] = text_cc
                 if carried_blocks:
                     cc_msg["_thinking_blocks"] = carried_blocks
                 messages.append(cc_msg)
@@ -1170,6 +1201,8 @@ def _convert_native_to_cc_format(body: dict) -> dict:
             # Text-only content — flatten to string
             text = "\n".join(b.get("text", "") for b in text_blocks)
             text_only = {**msg, "content": text or None}
+            if text and text_cc is not None:
+                text_only["_cache_control"] = text_cc
             if carried_blocks:
                 text_only["_thinking_blocks"] = carried_blocks
             messages.append(text_only)
@@ -1183,26 +1216,32 @@ def _convert_native_to_cc_format(body: dict) -> dict:
             # lesson, a mapping hop 1 learns and the fallback misses is lost
             # again on this exact path. The shared builder emits text and
             # images and collects documents; placement keeps the fallback's
-            # text-first order.
+            # text-first order. KBR-296: the M9 path opts into the part-level
+            # ``cache_control`` carriage; hop 1 keeps the default (its drops
+            # stay M16-claimed until the KBR-258/KBR-263 product halves).
             if others:
-                messages.append(build_user_content_message(others, documents))
+                messages.append(build_user_content_message(others, documents, carry_cache_control=True))
 
             for tr in tool_results:
                 result_content = tr.get("content", "")
-                if isinstance(result_content, list):
-                    # tool_result content can be a content block array
-                    result_parts = []
-                    for rb in result_content:
-                        if isinstance(rb, dict) and rb.get("type") == "text":
-                            result_parts.append(rb.get("text", ""))
-                    result_content = "\n".join(result_parts)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tr.get("tool_use_id", ""),
-                        "content": result_content if isinstance(result_content, str) else str(result_content or ""),
-                    }
-                )
+                # KBR-296: list-form content is forwarded verbatim, as
+                # MessagesTranslator does — flattening it to a string here
+                # is what defeated hop 1's KBR-198/KBR-199 nested
+                # preservation, losing any breakpoint on an inner block.
+                # Chat Completions accepts a content array on a tool
+                # message, and ``AnthropicAdapter._tool_result_block``
+                # passes it through verbatim on the rebuild.
+                tool_msg: dict = {
+                    "role": "tool",
+                    "tool_call_id": tr.get("tool_use_id", ""),
+                    "content": result_content if isinstance(result_content, (str, list)) else str(result_content or ""),
+                }
+                # KBR-296: the tool_result block's own breakpoint rides the
+                # internal ``_cache_control`` key; ``_tool_result_block``
+                # restores it onto the rebuilt block.
+                if tr.get("cache_control") is not None:
+                    tool_msg["_cache_control"] = tr["cache_control"]
+                messages.append(tool_msg)
 
             # A turn with no blocks at all keeps the pre-KBR-222 verbatim
             # passthrough: M17's stripping leaves ``content: []`` behind and
@@ -1237,6 +1276,15 @@ def _convert_native_to_cc_format(body: dict) -> dict:
     if "max_tokens" in body:
         result["max_tokens"] = body["max_tokens"]
 
+    # KBR-296: the agent's top-level automatic-caching form rides on the
+    # internal ``_cache_control`` key, restored by ``AnthropicAdapter
+    # .translate_to_upstream`` onto the rebuilt Anthropic body. The same
+    # value already reached the upstream on attempt 0 (native passthrough
+    # ships the raw body verbatim), so the retry cannot newly 400 —
+    # attempt-0 parity, no gating.
+    if body.get("cache_control") is not None:
+        result["_cache_control"] = body["cache_control"]
+
     if "tools" in body:
         result["tools"] = [
             {
@@ -1249,6 +1297,17 @@ def _convert_native_to_cc_format(body: dict) -> dict:
             }
             for t in body["tools"]
         ]
+        # KBR-296: per-tool ``cache_control`` breakpoints ride on the internal
+        # ``_tool_cache_controls`` dict, **name-keyed** to align with the
+        # register's P30 vocabulary (``conversation.tools[<name>].cache_control``)
+        # and to survive any future normalisation that reorders tools. The
+        # adapter's ``_translate_tools`` looks up by ``func.get("name")``.
+        tool_cache_controls: dict[str, dict] = {}
+        for t in body["tools"]:
+            if isinstance(t, dict) and t.get("cache_control") is not None:
+                tool_cache_controls[t.get("name", "")] = t["cache_control"]
+        if tool_cache_controls:
+            result["_tool_cache_controls"] = tool_cache_controls
 
     for key in ("temperature", "top_p"):
         if key in body:

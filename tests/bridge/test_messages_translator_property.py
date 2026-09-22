@@ -288,10 +288,18 @@ def test_request_level_internal_keys_match_the_provider_registry() -> None:
     translator output; ``_thinking_blocks`` rides on *message* dicts under
     ``ProviderAdapter._INTERNAL_MESSAGE_KEYS``, which the top-level strip
     never sees.
+
+    KBR-296 (2026-09-23) grew the registry with ``_cache_control`` and
+    ``_tool_cache_controls`` — M9 fallback converter outputs, not hop-1
+    translator outputs, so case (a) does not apply to the *translator* side
+    and the pinned literal simply extends (the hop-1 property still never
+    sees them; the derivation above stays honest because the registry is
+    the one source).
     """
     assert frozenset(
         {
             "_anthropic_system",
+            "_cache_control",
             "_documents",
             "_effort",
             "_metadata",
@@ -305,6 +313,7 @@ def test_request_level_internal_keys_match_the_provider_registry() -> None:
             "_thinking_budget_tokens",
             "_thinking_display",
             "_thinking_enabled",
+            "_tool_cache_controls",
             "_top_k",
         }
     ) == _REQUEST_LEVEL_INTERNAL_KEYS

@@ -78,8 +78,62 @@ class TestFindBreakpoints:
         assert cb.find_breakpoints(body) == [{"type": "ephemeral"}]
 
     def test_finds_a_private_prefixed_key(self) -> None:
-        """A ``_cache_control`` key is found, so a carry-through on a private key turns the absence tests red."""
-        assert cb.find_breakpoints({"_cache_control": {"type": "ephemeral"}}) == [{"type": "ephemeral"}]
+        """An unregistered private key containing ``cache_control`` is still found.
+
+        KBR-296 registered ``_cache_control`` / ``_tool_cache_controls`` /
+        ``_tool_call_cache_controls`` as kitty carriage keys (the mirror in
+        ``_KITTY_CARRIAGE_KEYS``), so a literal ``_cache_control`` is now
+        skipped — see the mirror-falsification tests below. The detector's
+        ``"cache_control" in key`` substring match still catches a different
+        unregistered private key, which is what this test now covers: a
+        carry-through on an unknown private key would turn the absence
+        tests red.
+        """
+        assert cb.find_breakpoints({"_my_cache_control": {"type": "ephemeral"}}) == [
+            {"type": "ephemeral"}
+        ]
+
+    def test_skips_top_level_registered_carriage_keys(self) -> None:
+        """KBR-296: request-level carriage keys are cargo, not findings.
+
+        The mirror in ``_KITTY_CARRIAGE_KEYS`` keeps the KBR-198/KBR-199
+        absence characterisations honest: a carried value on a registered
+        carriage must not surface as a phantom breakpoint, the way an
+        unregistered private key still would.
+        """
+        assert cb.find_breakpoints(
+            {
+                "_cache_control": cb.BREAKPOINT,
+                "_tool_cache_controls": {"read_file": cb.BREAKPOINT},
+            }
+        ) == []
+
+    def test_skips_message_level_registered_carriage_keys(self) -> None:
+        """KBR-296: message-level carriage keys are cargo, not findings.
+
+        The detector walks message dicts by recursion, so a message-level
+        key containing ``cache_control`` matches the substring rule — the
+        mirror covers the registered names so their carried values ride as
+        cargo on the intermediate.
+        """
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "hi",
+                    "_cache_control": cb.BREAKPOINT,
+                    "_tool_call_cache_controls": {0: cb.BREAKPOINT},
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "x",
+                    "content": "ok",
+                    "_cache_control": cb.BREAKPOINT,
+                },
+            ]
+        }
+
+        assert cb.find_breakpoints(body) == []
 
     def test_finds_the_breakpoint_value_under_an_unrelated_key(self) -> None:
         """The exact breakpoint value is found under a key that does not say ``cache_control``."""
