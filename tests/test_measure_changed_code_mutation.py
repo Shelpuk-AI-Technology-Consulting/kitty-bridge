@@ -415,6 +415,9 @@ def test_runner_wall_clock_cap_sends_sigterm_and_classifies_over_budget(
     assert proc.signals[:1] == [signal.SIGTERM]
     assert signal.SIGKILL in proc.signals
     assert summary["status"] == "over_budget"
+    # After the bounded reap wait the kernel has (per the fake) delivered the
+    # signal, so the summary carries the real -SIGKILL marker, not null.
+    assert summary["exit_code"] == -signal.SIGKILL
     assert summary["wall_clock_seconds"] >= 0.05
 
 
@@ -444,3 +447,29 @@ def test_runner_sigterm_within_grace_skips_sigkill(
     assert signal.SIGKILL not in proc.signals
     assert summary["status"] == "over_budget"
     assert summary["exit_code"] == -signal.SIGTERM
+
+
+def test_runner_exception_propagates_without_nameerror(
+    mcm: ModuleType, tmp_path: Path
+) -> None:
+    """A runner that raises must surface its exception, not a `NameError`.
+
+    Without defensive initialisation, the `finally` block's
+    ``getattr(proc, "close_log", None)`` would dereference an unbound
+    `proc` and raise `NameError`, replacing the runner's real exception
+    with a confusing secondary failure. The runner's exception must
+    propagate verbatim.
+    """
+    class _RunnerError(RuntimeError):
+        pass
+
+    def boom(command: list[str], **kwargs: Any) -> _FakeProc:
+        raise _RunnerError("runner could not spawn")
+
+    with pytest.raises(_RunnerError, match="runner could not spawn"):
+        mcm.run_mutmut(
+            mcm.build_command(["kitty.bridge.server.x__f__mutmut_*"]),
+            repo_root=str(tmp_path),
+            log_path=tmp_path / "logs" / "run.log",
+            runner=boom,
+        )

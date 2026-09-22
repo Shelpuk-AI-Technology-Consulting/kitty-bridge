@@ -580,10 +580,17 @@ def run_mutmut(
     """
     load1, load5, load15 = os.getloadavg()
     start = time.monotonic()
-    proc = runner(list(command), repo_root=repo_root, log_path=log_path)
+    # `proc` is initialised inside the `try` so a runner exception still runs
+    # the `finally` and closes whatever the runner exposed — even when the
+    # runner raised before returning a handle (e.g. mkdir failure, or a
+    # custom runner that opened a log and then failed). Without this, the
+    # `finally`'s `getattr(proc, "close_log", None)` would NameError and mask
+    # the runner's original exception.
+    proc: _ProcLike | None = None
     status = "error"
     exit_code: int | None = None
     try:
+        proc = runner(list(command), repo_root=repo_root, log_path=log_path)
         while True:
             exit_code = proc.poll()
             if exit_code is not None:
@@ -603,15 +610,24 @@ def run_mutmut(
                     time.sleep(_POLL_SECONDS)
                 if proc.poll() is None:
                     proc.send_signal(signal.SIGKILL)
-                status = "over_budget"
+                    # Bounded reap wait — the kernel sets `returncode` only
+                    # after the child is reaped, so reading it immediately
+                    # after SIGKILL would emit `null` in the JSON summary and
+                    # lose the `-9` signal marker. A short poll loop bounds
+                    # the wait without blocking forever on a stuck zombie.
+                    reap_deadline = time.monotonic() + 2.0
+                    while proc.poll() is None and time.monotonic() < reap_deadline:
+                        time.sleep(_POLL_SECONDS)
                 exit_code = proc.returncode
+                status = "over_budget"
                 break
             time.sleep(_POLL_SECONDS)
     finally:
         wall = time.monotonic() - start
-        close = getattr(proc, "close_log", None)
-        if callable(close):
-            close()
+        if proc is not None:
+            close = getattr(proc, "close_log", None)
+            if callable(close):
+                close()
     return {
         "status": status,
         "exit_code": exit_code,
@@ -784,7 +800,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.log_dir is not None
         else Path(args.repo) / "mutants" / "logs"
     )
-    log_path = log_dir / f"changed_code_{int(time.time())}.log"
+    # `time.time_ns()` makes the filename unique across same-second
+    # invocations (the alternative `int(time.time())` collides if two
+    # `--run`s start inside one second; the second would append to the
+    # first's log without warning).
+    log_path = log_dir / f"changed_code_{time.time_ns()}.log"
 
     diff = diff_meta_from_git_range(args.rev_range, args.repo)
     registry = _load_registry(args.repo)
