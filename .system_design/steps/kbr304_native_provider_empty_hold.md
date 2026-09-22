@@ -130,8 +130,13 @@ was needed there.
   handles it without translating); the recorded residual is unchanged.
 - **Verification:** the four KBR-300 test files (145 existing tests) plus
   the KBR-298 messages file and the merged `tests/bridge/test_empty_response_retry.py`
-  suite ran 161 passed, 0 failed, 0 deselected (~4 minutes wall-clock); the
-  16 new tests went RED on the unfixed code (`status == 200` from the M12
-  fallback) and GREEN after the four conjunct drops. `ruff check .`,
+  suite ran 161 passed, 0 failed, 0 deselected (~4 minutes wall-clock);
+  **only the 4 `test_an_empty_native_completion_ends_in_the_d4_terminal`
+  tests went RED on the unfixed code** (`status == 200` from the M12
+  fallback — the gate's `use_native_messages is false` conjunct excluded
+  them, so the empty CC-shaped reply fell through to the fabricated
+  fallback) and GREEN after the four conjunct drops; the other 12 new tests
+  are regression pins passing under both predicates (the gate never fires
+  on a content-bearing / tool-call-only / crossed reply). `ruff check .`,
   `mypy src/kitty` clean on the diff. `python3 scripts/regenerate_step_index.py`
   exits 0.
