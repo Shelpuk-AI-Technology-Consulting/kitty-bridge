@@ -828,18 +828,23 @@ class TestPrefixedProfileModel:
 
         # Leg 2 — auth scheme: Messages-routed models take Anthropic's headers.
         # The recorder stores headers verbatim as (name, value) pairs; the
-        # names are matched exactly as the adapter spells them.
-        header_names = {name for name, _ in captured.headers}
-        assert "x-api-key" in header_names, (
-            f"a Messages-routed model must carry x-api-key; got {sorted(header_names)}"
+        # name is matched as the adapter spells it, and the value must be
+        # non-empty — a present-but-empty ``x-api-key`` with the credential
+        # riding in some other header would pass a name-only check.
+        headers = dict(captured.headers)
+        assert headers.get("x-api-key"), (
+            f"a Messages-routed model must carry x-api-key; got {sorted(headers)}"
         )
-        assert "Authorization" not in header_names, (
+        assert "Authorization" not in headers, (
             "a Messages-routed model must not carry Bearer auth; "
-            f"got {sorted(header_names)}"
+            f"got {sorted(headers)}"
         )
 
         # Leg 3 — body shape: the Messages reader accepts the capture, and
-        # the oracle's full run passes with every delta claimed.
+        # the oracle's full run passes with exactly the M1-claimed model
+        # delta (the T-D2 precedent's exact-equality form — a spurious
+        # additional delta from a future translator change must fail here,
+        # not slip past a membership check).
         oracle._reader_for(WireFormat.ANTHROPIC_MESSAGES).read_request(captured)
         report = oracle.assert_no_unclaimed_mutation(
             inbound=inbound,
@@ -849,4 +854,4 @@ class TestPrefixedProfileModel:
             register=r.REGISTER,
             triggers_met=_ROUTE_TRIGGERS,
         )
-        assert "envelope.model" in report.deltas
+        assert report.deltas == ("envelope.model",)
