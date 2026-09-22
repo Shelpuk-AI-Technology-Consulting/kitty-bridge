@@ -82,9 +82,9 @@ gated on the sibling's own floor shape).
 from __future__ import annotations
 
 import enum
-import os
 import sys
 from collections.abc import Callable, Generator, Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -257,9 +257,18 @@ def _enforce_containment_completeness() -> Iterator[None]:
     # a landed slice's probes may never be attempted while other slices'
     # phases did run and satisfied the witness. The gate's premise — the
     # session was the full harness suite — does not hold there, so the
-    # gate stands down for mutmut runs entirely (MUTMUT_DEPENDENCY_DEPTH
-    # is exported by mutmut itself and set by nothing else).
-    if "MUTMUT_DEPENDENCY_DEPTH" in os.environ:
+    # gate stands down for mutmut runs entirely.
+    #
+    # The signal is the conftest's own location, not an environment
+    # variable: mutmut exports MUTMUT_DEPENDENCY_DEPTH only while
+    # *collecting* stats, and a resumed run loads the stats cache instead —
+    # so on every resumed leg the variable is absent and an env-keyed
+    # suppression is dead exactly when it is needed (leg 8 re-fired the
+    # gate that way, after the suppression had landed). The copied tree's
+    # path (…/mutants/tests/harness/conftest.py) is present in both full
+    # and resumed runs, because mutmut runs every pytest invocation with
+    # the mutants tree as its working directory.
+    if Path(__file__).resolve().parent.parent.parent.name == "mutants":
         return
     if not _all_landed_slice_phases_ran():
         return
