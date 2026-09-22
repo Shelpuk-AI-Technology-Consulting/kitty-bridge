@@ -40,8 +40,13 @@ Per-route D4 body (all HTTP `502`, all before `_log_usage` and `_mark_backend_he
 
 - Messages — `{"type": "error", "error": {"type": "api_error", "message":
   _NATIVE_EMPTY_REPLY_MESSAGE, "reason": "empty_response"}}` (KBR-298's body, unchanged).
-- Responses — `{"type": "error", "error": {"code": "empty_response", "message":
-  _NATIVE_EMPTY_REPLY_MESSAGE, "reason": "empty_response"}}` (KBR-293's streaming
+- Responses — `{"error": {"code": "empty_response", "message":
+  _NATIVE_EMPTY_REPLY_MESSAGE, "reason": "empty_response"}}` — no top-level `type`
+  (**ticket correction, PR review round 1:** the ticket spelled the body wrapped in
+  `type: "error"`, but that wrapper is the Anthropic Messages error convention, not
+  the Responses route's — all eight other non-streaming error envelopes on the route
+  return `{"error": {...}}` only, and OpenAI's documented Responses error shape puts
+  the error class inside `error`). KBR-293's streaming
   `code: "empty_response"` discriminator, carried to the non-streaming JSON shape with the
   `reason` marker).
 - Gemini — `{"error": {"code": 502, "message": _NATIVE_EMPTY_REPLY_MESSAGE, "reason":

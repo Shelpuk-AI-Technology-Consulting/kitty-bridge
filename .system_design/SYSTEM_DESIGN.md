@@ -898,10 +898,21 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   KBR-298's bare-JSON `502` + `_NATIVE_EMPTY_REPLY_MESSAGE` +
   `reason: "empty_response"` (`type: "error"`, `error.type: "api_error"`);
   `/v1/responses` adds `reason: "empty_response"` over the streaming
-  `code: "empty_response"` discriminator (`type: "error"`, `error.code` /
-  `error.reason`); a client branching on `(code == "empty_response")`
-covers both stream modes on this route, with `reason` a non-streaming-only
-marker. `/v1/gemini` byte-mirrors the streaming SSE error
+  `code: "empty_response"` discriminator (`error.code` / `error.reason`,
+  no top-level `type` — **ticket correction:** the ticket spelled the body
+  wrapped in `type: "error"`, but that wrapper is the Anthropic Messages
+  error convention (KBR-298's shape), not the Responses route's: all eight
+  other non-streaming error envelopes on `/v1/responses` return
+  `{"error": {...}}` only, and OpenAI's documented Responses error shape
+  puts the error class inside `error`; the wrapper was dropped in PR
+  review round 1 so the route's D4 follows its own protocol's convention
+  like the Gemini and Chat Completions cells do); the discriminator
+  `code: "empty_response"` appears in both stream modes on this route,
+  with `reason` a non-streaming-only marker — its JSON depth differs by
+  wire (top level in the streaming SSE event data, nested under `error`
+  in the non-streaming body), which is each wire's native envelope
+  convention, not a divergence.
+  `/v1/gemini` byte-mirrors the streaming SSE error
   payload (`code: 502` integer, no top-level `type`); `/v1/chat/completions`
   byte-mirrors KBR-287's streaming D4 (`error.type: "empty_response"`,
   verbatim CC carries `type`, not `reason`). All four `502`; all four

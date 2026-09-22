@@ -755,7 +755,6 @@ async def test_an_empty_custom_transport_completion_ends_in_the_d4_terminal(
     assert status == 502
     assert calls == len(server_module._EMPTY_RETRY_DELAYS) + len(server_module._EMPTY_FINAL_DELAYS) + 1
     error_body = _parse_response(client_body)
-    assert error_body["type"] == "error"
     assert error_body["error"]["code"] == "empty_response"
     assert error_body["error"]["reason"] == "empty_response"
     assert _NATIVE_EMPTY_REPLY_MESSAGE in error_body["error"]["message"]
@@ -974,7 +973,6 @@ async def test_an_empty_raw_cc_completion_ends_in_the_d4_terminal(monkeypatch):
     assert status == 502
     assert calls == len(server_module._EMPTY_RETRY_DELAYS) + len(server_module._EMPTY_FINAL_DELAYS) + 1
     error_body = _parse_response(client_body)
-    assert error_body["type"] == "error"
     assert error_body["error"]["code"] == "empty_response"
     assert error_body["error"]["reason"] == "empty_response"
     assert _NATIVE_EMPTY_REPLY_MESSAGE in error_body["error"]["message"]

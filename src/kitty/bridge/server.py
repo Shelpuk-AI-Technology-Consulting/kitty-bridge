@@ -4026,9 +4026,13 @@ class BridgeServer:
             # for a judged-empty completion. The gate uses the ticket's literal
             # predicate (`not use_native_messages and _is_empty_cc_response`); the
             # `use_native_messages` conjunct is a one-conjunct drop away from a wider
-            # sweep (recorded in REQUIREMENTS.md D1, filed for PO review). Reasoning-
-            # only trade-off (KBR-287/293/297/298) carries over unchanged: custom
-            # transports drop reasoning in the parser → ladder; raw-CC counts
+            # sweep (proposed follow-up, not yet filed — PO to decide). The D4 body
+            # carries no top-level `type` wrapper — every other non-streaming error
+            # envelope on this route returns `{"error": {...}}` only, and OpenAI's
+            # documented Responses error shape puts the error class inside `error`
+            # (ticket correction, PR review round 1; recorded in SYSTEM_DESIGN §5.4).
+            # Reasoning-only trade-off (KBR-287/293/297/298) carries over unchanged:
+            # custom transports drop reasoning in the parser → ladder; raw-CC counts
             # reasoning_content (KBR-277) → release on first attempt.
             if not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response):
                 logger.warning(
@@ -4038,7 +4042,6 @@ class BridgeServer:
                 )
                 return web.json_response(
                     {
-                        "type": "error",
                         "error": {
                             "code": "empty_response",
                             "message": _NATIVE_EMPTY_REPLY_MESSAGE,
