@@ -111,8 +111,13 @@ class TestBotocoreOracleSlice:
            never emitted into the body.
         3. The oracle's §3.3.2 assertion 1 holds with the claim machinery
            genuinely exercised: the model rewrite produces a real
-           ``envelope.model`` delta, M1 and P18 claim it, and the run is
-           green.
+           ``envelope.model`` delta, M1 (``PROFILE_SETS_MODEL``) claims
+           it, and the run is green. P18 is not active in this run — its
+           ``ALWAYS`` trigger is not in ``triggers_met``, and must not
+           be: the oracle's claim matching activates a row only when its
+           trigger is in the set (``oracle.py``, ``_claim_matching``), so
+           including ``ALWAYS`` would let P18 claim ``envelope.model``
+           and disarm the falsification test's trigger omission.
         """
         body = minimal_inbound_body(InboundProtocol.MESSAGES, _SENTINEL)
 
