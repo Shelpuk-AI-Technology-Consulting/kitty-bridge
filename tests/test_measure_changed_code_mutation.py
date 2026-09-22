@@ -21,6 +21,7 @@ import importlib.util
 import json
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -340,7 +341,16 @@ def test_main_refuses_run_on_empty_intersection(
 
 
 class _FakeProc:
-    """Minimal proc handle satisfying the runner contract."""
+    """Minimal proc handle satisfying the runner contract.
+
+    ``reap_delay`` simulates the kernel not having reaped the child yet —
+    after a SIGKILL, ``poll()`` returns ``None`` for that many real-time
+    seconds before the fake surfaces the exit code. With ``reap_delay=0``
+    the fake mimics the OLD runner behaviour (immediate read after
+    SIGKILL); with ``reap_delay > 0`` it forces the runner's bounded
+    reap loop to do real work before reading ``returncode``, so the
+    over-budget test catches a regression to the immediate-read path.
+    """
 
     def __init__(
         self,
@@ -348,23 +358,33 @@ class _FakeProc:
         hang: bool = False,
         *,
         dies_on_sigterm: bool = False,
+        reap_delay: float = 0.0,
     ) -> None:
         self.returncode = returncode
         self._hang = hang
         self._dies_on_sigterm = dies_on_sigterm
+        self._reap_delay = reap_delay
+        self._sigkill_at: float | None = None
         self.signals: list[int] = []
 
     def poll(self) -> int | None:
-        return self.returncode if not self._hang else None
+        if not self._hang:
+            return self.returncode
+        if self._sigkill_at is not None:
+            elapsed = time.monotonic() - self._sigkill_at
+            if elapsed >= self._reap_delay:
+                self.returncode = -signal.SIGKILL
+                self._hang = False
+                return self.returncode
+        return None
 
     def send_signal(self, sig: int) -> None:
         self.signals.append(sig)
-        dies = (self._dies_on_sigterm and sig == signal.SIGTERM) or (
-            sig == signal.SIGKILL
-        )
-        if dies:
+        if sig == signal.SIGTERM and self._dies_on_sigterm:
             self._hang = False
             self.returncode = -sig
+        elif sig == signal.SIGKILL:
+            self._sigkill_at = time.monotonic()
 
 
 def test_runner_builds_the_positional_pattern_command_and_records_load(
@@ -398,8 +418,15 @@ def test_runner_builds_the_positional_pattern_command_and_records_load(
 def test_runner_wall_clock_cap_sends_sigterm_and_classifies_over_budget(
     mcm: ModuleType, tmp_path: Path
 ) -> None:
-    """A run outliving the budget is SIGTERMed, then SIGKILLed, not hung."""
-    proc = _FakeProc(returncode=None, hang=True)
+    """A run outliving the budget is SIGTERMed, then SIGKILLed, not hung.
+
+    ``reap_delay`` is positive so the fake mimics a real kernel that has
+    not yet reaped the SIGKILL'd child — the bounded reap loop in
+    ``run_mutmut`` must do real work to see ``returncode``. With the OLD
+    immediate-read code this assertion would fail (``exit_code`` would be
+    ``None``), so the test pins the reap-wait behaviour.
+    """
+    proc = _FakeProc(returncode=None, hang=True, reap_delay=0.2)
 
     def fake_runner(command: list[str], **kwargs: Any) -> _FakeProc:
         return proc
@@ -410,13 +437,13 @@ def test_runner_wall_clock_cap_sends_sigterm_and_classifies_over_budget(
         log_path=tmp_path / "logs" / "run.log",
         runner=fake_runner,
         budget_seconds=0.05,
-        grace_seconds=0.2,
+        grace_seconds=0.5,
     )
     assert proc.signals[:1] == [signal.SIGTERM]
     assert signal.SIGKILL in proc.signals
     assert summary["status"] == "over_budget"
-    # After the bounded reap wait the kernel has (per the fake) delivered the
-    # signal, so the summary carries the real -SIGKILL marker, not null.
+    # After the bounded reap wait the kernel has (per the fake) delivered
+    # the signal, so the summary carries the real -SIGKILL marker, not null.
     assert summary["exit_code"] == -signal.SIGKILL
     assert summary["wall_clock_seconds"] >= 0.05
 
@@ -473,3 +500,33 @@ def test_runner_exception_propagates_without_nameerror(
             log_path=tmp_path / "logs" / "run.log",
             runner=boom,
         )
+
+
+def test_runner_handles_platforms_without_os_getloadavg(
+    mcm: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows lacks ``os.getloadavg``; the runner must report ``None`` and
+    not raise.
+
+    Pins the platform-portability contract: the load keys remain present
+    in the JSON summary with ``None`` values so downstream consumers see a
+    uniform schema.
+    """
+    # Simulate Windows: ``os.getloadavg`` raises ``AttributeError``.
+    monkeypatch.delattr("os.getloadavg", raising=False)
+    proc = _FakeProc(returncode=0)
+
+    def fake_runner(command: list[str], **kwargs: Any) -> _FakeProc:
+        return proc
+
+    summary = mcm.run_mutmut(
+        mcm.build_command(["kitty.bridge.server.x__f__mutmut_*"]),
+        repo_root=str(tmp_path),
+        log_path=tmp_path / "logs" / "run.log",
+        runner=fake_runner,
+    )
+    assert summary["status"] == "ok"
+    assert summary["load_avg_1m"] is None
+    assert summary["load_avg_5m"] is None
+    assert summary["load_avg_15m"] is None
+    assert summary["cpu_count"] is not None  # cpu_count exists on Windows

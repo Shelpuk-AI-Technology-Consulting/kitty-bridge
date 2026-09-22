@@ -33,6 +33,7 @@ import ast
 import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -196,6 +197,7 @@ def _hunk_post_lines(rev_range: str, path: str, repo_root: str) -> set[int]:
         cwd=repo_root,
         capture_output=True,
         text=True,
+        encoding="utf-8",  # cp1252 (Windows default) mojibakes non-ASCII
         check=True,
     )
     lines: set[int] = set()
@@ -219,8 +221,9 @@ def _post_blob(rev: str, path: str, repo_root: str) -> str | None:
         cwd=repo_root,
         capture_output=True,
         text=True,
+        encoding="utf-8",  # cp1252 (Windows default) mojibakes non-ASCII
     )
-    if proc.returncode != 0:
+    if proc.returncode != 0 or proc.stdout is None:
         return None
     return proc.stdout
 
@@ -249,9 +252,13 @@ def diff_meta_from_git_range(rev_range: str, repo_root: str) -> DiffMeta:
         cwd=repo_root,
         capture_output=True,
         text=True,
+        encoding="utf-8",  # cp1252 (Windows default) mojibakes server.py
         check=True,
     )
-    post = rev_range.split("..")[-1]  # "A..B" and "A...B" both yield B
+    # "A..B" splits on ".." to ['A', 'B']; "A...B" splits to ['A', '.B']
+    # (because "..." = ".." + "."). Split on the run of 2–3 dots so both
+    # forms resolve to the post-image revision correctly.
+    post = re.split(r"\.{2,3}", rev_range)[-1]
     modules: set[str] = set()
     defs: dict[str, set[tuple[str | None, str]]] = {}
     for path in (ln.strip() for ln in proc.stdout.splitlines()):
@@ -577,15 +584,28 @@ def run_mutmut(
         ``"error"``), ``exit_code``, ``wall_clock_seconds``,
         ``load_avg_{1m,5m,15m}``, ``cpu_count``, ``log_path``.
         The dict is JSON-serialisable.
+
+    Notes:
+        ``load_avg_*`` is ``None`` on platforms without ``os.getloadavg``
+        (Windows). The keys remain present so downstream consumers can
+        rely on the schema.
     """
-    load1, load5, load15 = os.getloadavg()
+    load1: float | None
+    load5: float | None
+    load15: float | None
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except (AttributeError, OSError):
+        # Windows has no ``os.getloadavg``; report ``None`` so the
+        # schema is uniform across platforms.
+        load1 = load5 = load15 = None
     start = time.monotonic()
-    # `proc` is initialised inside the `try` so a runner exception still runs
-    # the `finally` and closes whatever the runner exposed — even when the
-    # runner raised before returning a handle (e.g. mkdir failure, or a
-    # custom runner that opened a log and then failed). Without this, the
-    # `finally`'s `getattr(proc, "close_log", None)` would NameError and mask
-    # the runner's original exception.
+    # ``proc`` is initialised to ``None`` BEFORE the ``try`` so a runner
+    # exception (mkdir, open, or a custom runner that opened a log and
+    # then failed) still runs the ``finally`` and surfaces verbatim —
+    # without this, the ``finally``'s ``getattr(proc, "close_log", None)``
+    # would ``NameError`` and mask the runner's original exception. The
+    # runner assigns the real handle inside the ``try`` once it returns.
     proc: _ProcLike | None = None
     status = "error"
     exit_code: int | None = None
