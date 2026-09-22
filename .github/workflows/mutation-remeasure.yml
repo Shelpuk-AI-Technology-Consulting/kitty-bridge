@@ -99,8 +99,20 @@ jobs:
           fi
           echo "Restoring artifact ${ARTIFACT_ID} (${ARTIFACT_NAME})."
           gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > "${RUNNER_TEMP}/mutants.zip"
-          mkdir -p mutants
-          unzip -q "${RUNNER_TEMP}/mutants.zip" -d mutants
+          mkdir -p ${RUNNER_TEMP}/restored mutants
+          unzip -q "${RUNNER_TEMP}/mutants.zip" -d "${RUNNER_TEMP}/restored"
+          # Verdict-bearing files ONLY. mutmut's regeneration check is
+          # mtime-based (source_mtime < mutant_mtime means unmodified), and
+          # a whole-tree restore re-dates every carried file newer than the
+          # fresh checkout -- so stale carried files, tests/ included, are
+          # kept forever. Leg 7 re-fired the old containment gate from a
+          # restored conftest that predated its fix. Restoring src/ (mangled
+          # files + .meta verdicts) and the stats cache leaves tests/,
+          # pyproject and the also_copy entries to regenerate from the
+          # checkout; changed sources regenerate their mutants and mutmut
+          # resets the affected verdicts via its function-hash check.
+          cp -a "${RUNNER_TEMP}/restored/src" mutants/src
+          cp "${RUNNER_TEMP}/restored/mutmut-stats.json" mutants/ 2>/dev/null || true
           echo "Restored $(find mutants -name '*.meta' | wc -l) per-mutant result files."
 
       # The scope registry is the machine-readable form of TEST_SUITE.md §6.1;
