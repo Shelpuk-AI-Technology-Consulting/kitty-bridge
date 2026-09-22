@@ -1287,6 +1287,100 @@ class TestDeclarationNameRequired:
         assert projected.conversation.tools == (c.ToolDecl(name="get_weather", schema={}),)
 
 
+class TestCustomDeclarationNameRequired:
+    """A ``custom`` / built-in / ``mcp`` declaration whose ``name`` is ``""`` raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a tool nobody can name cannot be paired with its result or
+    addressed by a register row. KBR-295 settled the ``FunctionTool`` branch
+    on the strict raise; KBR-299 closes the same reader's remaining three
+    sub-branches with a deliberately narrower posture: only the empty shape
+    raises. Absent / null / non-string ``name`` keeps the kind-derived label
+    (``str(kind)``) or the ``server_label``-derived label (``mcp:<label>``) —
+    an absent label is wire-derived identity (built-in declarations carry no
+    ``name`` field at all), a different loss profile than a value that names
+    nothing (§7.4.2 rule 7 row 2).
+    """
+
+    @staticmethod
+    def _body_with_declaration(entry: dict[str, Any], name: Any) -> dict[str, Any]:
+        """Return a Responses body whose one non-``function`` tool carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the published
+        shape for built-in declarations, which carry no ``name`` field.
+        """
+        tool = dict(entry)
+        if name is not None:
+            tool["name"] = name
+        return {"input": "hi", "tools": [tool]}
+
+    # -- controls: the kind- and server_label-derived postures stay --
+
+    def test_absent_custom_tool_name_is_labelled_by_kind(self) -> None:
+        """A ``custom`` tool with no ``name`` projects the kind label (KBR-299)."""
+        projected = project(self._body_with_declaration({"type": "custom"}, None))
+
+        assert projected.conversation.tools == (c.ToolDecl(name="custom", schema={"type": "custom"}),)
+
+    def test_non_string_custom_tool_name_is_labelled_by_kind(self) -> None:
+        """A ``custom`` tool with a non-string ``name`` projects the kind label."""
+        projected = project(self._body_with_declaration({"type": "custom"}, 42))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="custom", schema={"type": "custom", "name": 42}),
+        )
+
+    def test_absent_builtin_tool_name_is_labelled_by_kind(self) -> None:
+        """A built-in tool has no ``name`` field; the kind is the label."""
+        projected = project(self._body_with_declaration({"type": "web_search_preview"}, None))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="web_search_preview", schema={"type": "web_search_preview"}),
+        )
+
+    def test_non_string_builtin_tool_name_is_labelled_by_kind(self) -> None:
+        """A built-in tool with a non-string ``name`` projects the kind label."""
+        projected = project(self._body_with_declaration({"type": "web_search_preview"}, 42))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="web_search_preview", schema={"type": "web_search_preview", "name": 42}),
+        )
+
+    def test_absent_mcp_tool_name_is_named_by_server_label(self) -> None:
+        """An ``mcp`` tool is named by its server, not its (absent) ``name``."""
+        projected = project(self._body_with_declaration({"type": "mcp", "server_label": "docs"}, None))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="mcp:docs", schema={"type": "mcp", "server_label": "docs"}),
+        )
+
+    def test_non_string_mcp_tool_name_is_named_by_server_label(self) -> None:
+        """An ``mcp`` tool with a non-string ``name`` is still named by its server."""
+        projected = project(self._body_with_declaration({"type": "mcp", "server_label": "docs"}, 42))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="mcp:docs", schema={"type": "mcp", "server_label": "docs", "name": 42}),
+        )
+
+    # -- the empty shape raises --
+
+    def test_empty_custom_tool_name_raises(self) -> None:
+        """A ``custom`` tool with an empty ``name`` raises (KBR-299)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_declaration({"type": "custom"}, ""))
+
+    def test_empty_builtin_tool_name_raises(self) -> None:
+        """A built-in tool with an empty ``name`` raises (KBR-299)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_declaration({"type": "web_search_preview"}, ""))
+
+    def test_empty_mcp_tool_name_raises(self) -> None:
+        """An ``mcp`` tool with an empty ``name`` raises (KBR-299)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_declaration({"type": "mcp", "server_label": "docs"}, ""))
+
+
 class TestFunctionCallOutput:
     """`function_call_output` in both published `output` shapes."""
 

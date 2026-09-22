@@ -279,16 +279,22 @@ def _require_tool_call_name(name: Any, path: str) -> str:
     The strict name-required rule shared by the request reader's
     :meth:`ResponsesProjection._read_function_call`, the reply projection's
     ``function_call`` branch, and — since KBR-295 — the ``FunctionTool``
-    declaration branch: one spelling of the rule for both directions and
-    the declaration path, per §7.4.1's within-module anti-drift rule,
+    declaration branch: one spelling of the strict rule for both directions
+    and the declaration path, per §7.4.1's within-module anti-drift rule,
     mirroring Ollama's :func:`_require_tool_call_name`
     (``reader_ollama.py:1007``) so the readers' strict-name helpers grep
-    together. ``""`` for a name is not a lossless projection
+    together. The module also carries a **second**, deliberately narrower
+    inline spelling in :meth:`ResponsesProjection._read_tool`'s
+    non-``function`` fallback (KBR-299): an empty-only raise that fires
+    before the kind dispatch. The strict and narrow spellings share the
+    same error-message shape (``f"{path} must be a non-empty string name"``).
+    ``""`` for a name is not a lossless projection
     (``contract.decode_arguments``): it claims a tool *named* empty-string,
-    and a call nobody can name cannot be paired with its result or addressed
-    by a register row (KBR-281 settled four invocation readers; KBR-292
-    extended it to the remaining invocations; KBR-295 closes the
-    declarations).
+    and a call nobody can name cannot be paired with its result or
+    addressed by a register row (KBR-281 settled four invocation readers;
+    KBR-292 extended it to the remaining invocations; KBR-295 closed the
+    ``FunctionTool`` declaration branch; KBR-299 closed the ``custom`` /
+    built-in / ``mcp`` sub-branches with the narrower inline spelling).
 
     Args:
         name: The raw ``name`` value.
@@ -1244,7 +1250,11 @@ class ResponsesProjection:
             UnreadableBodyError: When a ``function`` declaration's ``name``
                 is absent, empty, or not a string — via
                 :func:`_require_tool_call_name` (§7.4.2 rule 7 row 2,
-                KBR-295).
+                KBR-295). When a ``custom`` / built-in / ``mcp``
+                declaration's ``name`` is the empty string — the inline
+                empty-only check (KBR-299), narrower than the helper
+                because absent / null / non-string keep the kind-derived
+                label posture on these schema-optional sub-branches.
         """
         kind = entry.get("type")
 
@@ -1289,6 +1299,14 @@ class ResponsesProjection:
         # servers named by bare `type` would both occupy `conversation.tools[mcp]`,
         # a collision §3.3.1a's by-name addressing cannot recover from.
         name = entry.get("name")
+        # `""` is never a legal wire value, and a declaration nobody can name
+        # cannot be paired with its result or addressed by a register row
+        # (`contract.decode_arguments`). Absent / null / non-string keep the
+        # kind-derived labels — an absent label is wire-derived identity
+        # (`str(kind)` here, `mcp:<server_label>` below), a different loss
+        # profile than a value that names nothing (§7.4.2 rule 7 row 2, KBR-299).
+        if isinstance(name, str) and not name:
+            raise c.UnreadableBodyError(f"{c.residual_key(path, 'name')} must be a non-empty string name")
         if kind == "mcp":
             label = entry.get("server_label")
             name = _mcp_tool_name(label) if isinstance(label, str) else "mcp"

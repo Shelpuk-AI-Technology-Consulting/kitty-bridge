@@ -936,9 +936,13 @@ def decode_arguments(raw: Any, path: str, residual: dict[str, Any]) -> Mapping[s
     declaration branches (Gemini ``FunctionDeclaration``, Responses
     ``FunctionTool``, Converse ``toolSpec``, Chat Completions
     ``function.name``, Anthropic ``tools[].name``, Ollama
-    ``tools[].function.name``) — §7.4.2 rule 7 row 2, settled KBR-281 + KBR-292
-    + KBR-295.  Gemini, Ollama, Bedrock Converse, and both
-    Responses directions route through the per-module ``_require_tool_call_name``
+    ``tools[].function.name``) — plus the Responses ``custom`` / built-in /
+    ``mcp`` declaration sub-branches, which raise on the empty shape only
+    (absent / null / non-string keep the kind-derived label posture there,
+    since built-in declarations carry no ``name`` field at all) — §7.4.2
+    rule 7 row 2, settled KBR-281 + KBR-292 + KBR-295 + KBR-299.  Gemini,
+    Ollama, Bedrock Converse, and both Responses directions route through
+    the per-module ``_require_tool_call_name``
     helper; Chat Completions and Anthropic raise inline at the call site.
     Converse's
     declaration branch keeps the residualise+omit posture for the
