@@ -421,16 +421,18 @@ class TestEmptyResponse:
         assert choice["message"]["content"] == ""
         assert choice["finish_reason"] == "stop"
 
-    async def test_chat_completions_streaming_is_a_well_formed_skeleton(
+    async def test_chat_completions_streaming_is_a_content_less_completion(
         self, recorder: RecordingUpstream
     ) -> None:
-        """F4.d — streaming CC: role chunk + [DONE], the recorded well-formed-skeleton shape.
+        """F4.d — streaming CC: role chunk + [DONE], the content-less completion.
 
-        Recorded behaviour, not empty-retry: on the CC wire the role chunk
-        itself sets the bridge's `has_content` flag (KBR-232), so this shape is
-        forwarded without a ladder. The test pins that recorded shape; a
-        consumer needing the CC empty ladder must script a stream that forwards
-        nothing (REQUIREMENTS.md §5, "What is not tested here").
+        Since KBR-276 this shape is what fires the empty ladder on the raw-CC
+        route: the pre-emission hold withholds non-content lines on every CC
+        upstream, so the role chunk no longer sets the bridge's `has_content`
+        flag (KBR-232's converter-gated semantics are gone). The test pins the
+        shape the ladder judges — a role-only chunk, no content delta, no
+        finish chunk, terminated by [DONE]; the ladder itself is exercised
+        against a real bridge in ``tests/bridge/test_raw_cc_empty_hold.py``.
         """
         recorder.responder = failures_module.empty_response(
             WireFormat.CHAT_COMPLETIONS, stream=True

@@ -729,8 +729,10 @@ distinguishable in logs from the ordinary "request too large" rejection.
 
 Applies to providers kitty talks to in Anthropic's own format: `anthropic`, `custom_anthropic`, `zai_coding`,
 `minimax_token`, and `opencode_go` for the models it serves on Anthropic's format; to every provider kitty
-converts to Chat Completions; and to the custom-transport backends on `/v1/chat/completions` — Bedrock, Ollama
-Cloud, and the Codex/OpenAI subscription — whose native transport kitty drives itself. On the Anthropic-format side
+converts to Chat Completions; and to the custom-transport backends on every route — Bedrock, Ollama
+Cloud, and the Codex/OpenAI subscription, whose native transport kitty drives itself — whether your agent
+speaks Chat Completions, Responses (`/v1/responses`, Codex CLI), or Gemini (`/v1beta/...:streamGenerateContent`,
+Gemini CLI). On the Anthropic-format side
 kitty holds back the start of each streamed reply until it carries text or a tool call, so a reply with nothing in
 it — or only thinking, up to 10 MiB of it — can be retried before your agent sees it; on the translated side —
 Chat Completions, Responses, and Gemini clients over a Messages-wire upstream — a streamed reply that carries no
@@ -739,7 +741,9 @@ whether or not it ends with a completion marker — with the same release rule o
 the custom-transport side the branch synthesises the provider's translated Chat Completions reply and judges it
 through the same predicate, so a synthesised reply that carries no text, tool call, or reasoning takes the same
 ladder — a completion the branch's translation projects only `content` and `tool_calls` and whose parsers surface no
-reasoning cannot release the hold. Both streaming and non-streaming routes treat a reasoning-only reply as a
+reasoning cannot release the hold; on `/v1/responses` and `/v1/gemini` the judged content is additionally converted
+into the route's own event format before it ships, so the agent sees the route's native events either way. Both
+streaming and non-streaming routes treat a reasoning-only reply as a
 successful turn when the reasoning reaches the client: the streamed hold releases on the first `reasoning_content`
 delta on the plain-POST side, and the non-streaming detector counts `message.reasoning_content` as content. A
 reasoning-only Chat Completions reply succeeds on the first attempt on the plain-POST route; over a custom-transport
@@ -749,12 +753,18 @@ reaches the client — on the plain-POST route and on the translated routes, who
 exhaustion terminal itself is route-wide: a plain-POST Chat Completions-wire provider (OpenAI, OpenRouter, DeepSeek,
 or any other Chat Completions backend) whose every attempt comes back content-less lands on the same
 `type: "empty_response"` D4 event, and the same terminal fires for the three custom-transport backends when every
-attempt on a custom-transport route comes back content-less. Both flavours use the empty ladder — the terminal is
+attempt on any route's custom-transport segment comes back content-less. Both flavours use the empty ladder — the terminal is
 what the ladder serves. This error means every attempt kitty made came back empty. Nothing reached the agent, so
 simply resend; if it persists, the provider or model is misbehaving.
 
 The response is a `502` carrying `"reason": "empty_response"` for clients that expect JSON
-(`/v1/messages` non-stream and streamed). For streaming clients that expect SSE
+(`/v1/messages` non-stream and streamed; `/v1/responses` non-stream to Codex CLI;
+`/v1beta/...:generateContent` non-stream to Gemini CLI; `/v1/chat/completions`
+non-stream to Kilo, OpenCode, and any Chat Completions client) — each carrying the
+route's own discriminator fields alongside the universal `"reason": "empty_response"`
+marker (`code` on `/v1/responses`, `code: 502` mirroring the streaming integer on
+`/v1beta/...:generateContent`, `type: "empty_response"` on `/v1/chat/completions`).
+For streaming clients that expect SSE
 (`/v1/responses` to Codex CLI; `/v1beta/...:streamGenerateContent` to Gemini CLI;
 `/v1/chat/completions` to Kilo, OpenCode, and any Chat Completions client) the
 exhaustion is delivered inside the open stream as an SSE error event carrying the
@@ -773,9 +783,9 @@ agent shows its spinner, not live thinking, until the first text or tool call ar
 
 ### "Kitty Bridge received an empty response from the upstream provider after content had already been sent"
 
-Applies to streamed `/v1/messages` requests on providers kitty talks to in Chat Completions format. The provider's reply opened with an "empty" verdict and produced its words only after it, so part of the answer had already reached your agent. Kitty ends the turn there instead of asking the provider again — a second attempt would append a second answer to text you have already seen. Simply resend the turn; if it keeps happening, the provider is misbehaving.
+Applies to streamed requests on the routes kitty converts to Chat Completions — `/v1/messages`, `/v1/responses`, and `/v1beta/models/...:streamGenerateContent` (Gemini). The provider's reply opened with an "empty" verdict and produced its words only after it, so part of the answer had already reached your agent. Kitty ends the turn there instead of asking the provider again — a second attempt would append a second answer to text you have already seen. Simply resend the turn; if it keeps happening, the provider is misbehaving.
 
-There is no `"reason":` marker to grep for: the reply arrives as an ordinary `200` SSE stream that ends in a single `error` event carrying the message above.
+There is no `"reason":` marker to grep for, and the wire uses the generic `code: "upstream_error"` (Responses) or `code: 502` (Gemini) rather than a dedicated discriminator: the reply arrives as an ordinary `200` SSE stream that ends in one terminal outcome in the route's own convention — on `/v1/messages` a single `error` event, on `/v1/responses` an `error` event (with the message above) followed by `response.completed` with `status: "incomplete"`, on Gemini a `data: {"error": {"code": 502, "message": <the message above>}}` event and EOF (streamGenerateContent has no typed completion event).
 
 ### A 502 whose error carries `"reason": "upstream_error"`
 
@@ -813,9 +823,10 @@ of the protocol that is not represented.
 
 ### "Kitty Bridge received a reply from the upstream provider that stopped (max_tokens) before producing any content"
 
-Only providers kitty talks to in Anthropic's own format — `anthropic`, `custom_anthropic`, `zai_coding`,
-`minimax_token`, and `opencode_go` for the models it serves on Anthropic's format — streaming or not: the `400`
-needs a reply in Anthropic's Messages shape, so a Chat Completions-translated provider never produces it. The model
+On `/v1/messages`, streaming or not, for every upstream kitty serves — native Anthropic-format providers and
+Chat Completions-translated providers alike. (The translated route reads the upstream's own `finish_reason`,
+so the `400` there is triggered by a `length` finish — or by an upstream that literally sends
+`model_context_window_exceeded` as its finish reason.) The model
 used its whole output budget — typically all of it on thinking — or filled its context window
 (`model_context_window_exceeded`) before writing anything. A retry cannot fix that, so kitty fails the request at once
 with a `400` carrying `"reason": "max_tokens_before_content"` (or `"model_context_window_exceeded_before_content"`).

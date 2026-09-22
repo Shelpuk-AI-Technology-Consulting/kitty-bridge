@@ -1,5 +1,6 @@
 """Tests for providers/bedrock.py — BedrockAdapter."""
 
+import base64
 import json
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +10,7 @@ import botocore.validate
 import pytest
 
 from kitty.providers.base import ProviderError
-from kitty.providers.bedrock import BedrockAdapter
+from kitty.providers.bedrock import BedrockAdapter, _converse_content_blocks
 
 # ── CC format samples ────────────────────────────────────────────────────
 
@@ -151,54 +152,6 @@ class TestBedrockTranslateToUpstream:
         result = self.adapter.translate_to_upstream(cc)
         assert result["messages"][0] == {"role": "user", "content": [{"text": "Hello"}]}
 
-    def test_user_content_parts_list_flattens_to_its_text(self):
-        """A parts-list user turn degrades to the single text block every pre-KBR-222 turn had.
-
-        Hop 1 (KBR-222) ships image-bearing turns as CC content parts. Converse
-        has no mapping for them here (KBR-223's territory), so the list must
-        flatten — forwarding it would fail boto3 validation on every
-        Messages-route image turn, a regression this fix would otherwise
-        manufacture.
-        """
-        cc = {
-            "model": "anthropic.claude-sonnet-4-20250514",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "look at this"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
-                        },
-                    ],
-                }
-            ],
-            "stream": False,
-        }
-        result = self.adapter.translate_to_upstream(cc)
-        assert result["messages"][0] == {"role": "user", "content": [{"text": "look at this"}]}
-
-    def test_user_content_image_only_list_flattens_to_the_pre_fix_empty_text(self):
-        """An image-only list flattens to ``[{"text": ""}]`` — the pre-fix shape for that turn."""
-        cc = {
-            "model": "anthropic.claude-sonnet-4-20250514",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
-                        }
-                    ],
-                }
-            ],
-            "stream": False,
-        }
-        result = self.adapter.translate_to_upstream(cc)
-        assert result["messages"][0] == {"role": "user", "content": [{"text": ""}]}
-
     def test_max_tokens_inference_config(self):
         cc = {
             "model": "anthropic.claude-sonnet-4-20250514",
@@ -318,7 +271,10 @@ class TestBedrockTranslateToUpstream:
         published service model the T-A5 reader (KBR-37) checks the union
         members against. The negative control pins that the pre-KBR-264
         spelling is rejected by the same oracle, so a regression to the old
-        shape fails here instead of at AWS.
+        shape fails here instead of at AWS. Since KBR-89 the oracle drives
+        ``_bedrock_body`` — the pure builder whose return value is the shipped
+        body kwargs — so the validation is unit-pure, re-attaching ``modelId``
+        as the only envelope (the re-home KBR-223's new shape branches share).
         """
         input_shape = (
             botocore.session.Session()
@@ -347,8 +303,8 @@ class TestBedrockTranslateToUpstream:
             ],
             "stream": False,
         }
-        converse_request = self.adapter.translate_to_upstream(cc)
-        botocore.validate.validate_parameters(converse_request, input_shape)
+        model_id, body = self.adapter._bedrock_body(cc)
+        botocore.validate.validate_parameters({"modelId": model_id, **body}, input_shape)
 
         # Empty branch — ``_thinking_enabled`` injects an empty reasoningContent
         # for the first assistant turn. This branch ships on every thinking
@@ -374,8 +330,10 @@ class TestBedrockTranslateToUpstream:
             "stream": False,
             "_thinking_enabled": True,
         }
-        empty_branch_request = self.adapter.translate_to_upstream(cc_empty)
-        botocore.validate.validate_parameters(empty_branch_request, input_shape)
+        empty_model_id, empty_body = self.adapter._bedrock_body(cc_empty)
+        botocore.validate.validate_parameters(
+            {"modelId": empty_model_id, **empty_body}, input_shape
+        )
 
         # Negative control: the pre-KBR-264 spelling is rejected by the same
         # oracle — populated and empty — so a partial regression (one branch
@@ -406,6 +364,93 @@ class TestBedrockTranslateToUpstream:
         assert tool_msg["content"][0]["toolResult"]["toolUseId"] == "call_abc"
         assert tool_msg["content"][0]["toolResult"]["status"] == "success"
 
+    def test_user_content_parts_list_maps_text_and_image_to_converse_blocks(self):
+        """A parts-list user turn becomes Converse blocks in part order.
+
+        KBR-223: replaces KBR-222's provisional flatten, which joined the text
+        parts and dropped the image. The list now maps part-by-part — text to
+        ``{"text": …}``, a base64 data-URL ``image_url`` part to a Converse
+        ``image`` block — so a Messages-route image turn carries its image to
+        the wire instead of failing boto3 validation (pre-KBR-222) or losing
+        it silently (KBR-222).
+        """
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look at this"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+                        },
+                    ],
+                }
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["messages"][0] == {
+            "role": "user",
+            "content": [
+                {"text": "look at this"},
+                {"image": {"format": "png", "source": {"bytes": b"icon"}}},
+            ],
+        }
+
+    def test_user_content_image_only_list_yields_converse_image_block(self):
+        """An image-only parts list maps to its image block — no empty-text residue.
+
+        KBR-222 flattened this to ``[{"text": ""}]`` (the pre-fix shape); the
+        real mapping keeps the image and, with no text part present, emits none.
+        """
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+                        }
+                    ],
+                }
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["messages"][0] == {
+            "role": "user",
+            "content": [{"image": {"format": "png", "source": {"bytes": b"icon"}}}],
+        }
+
+    def test_user_content_unmappable_only_list_yields_empty_text_block(self):
+        """A user list whose every part is unmappable degrades to ``[{"text": ""}]``.
+
+        An http(s) image URL cannot map to a Converse image block without IO
+        (``ImageSource`` takes bytes), so the part drops; the all-dropped
+        fallback keeps the emitted list non-empty.
+        """
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/cat.png"},
+                        }
+                    ],
+                }
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        assert result["messages"][0] == {"role": "user", "content": [{"text": ""}]}
+
     def test_model_in_body(self):
         cc = {
             "model": "us.anthropic.claude-sonnet-4-20250514",
@@ -414,6 +459,474 @@ class TestBedrockTranslateToUpstream:
         }
         result = self.adapter.translate_to_upstream(cc)
         assert result["modelId"] == "us.anthropic.claude-sonnet-4-20250514"
+
+
+# ── Bedrock list-form content → Converse blocks (KBR-223) ─────────────────
+
+
+class TestBedrockListContent:
+    """L1 — list-form CC content maps part-by-part to Converse blocks (KBR-223).
+
+    The mapper is the shared module-level ``_converse_content_blocks``; these
+    tests pin each part kind's output at the unit level, and the schema oracle
+    in :class:`TestBedrockListContentOracle` proves the emitted shapes against
+    the live service model.
+    """
+
+    def setup_method(self):
+        self.adapter = BedrockAdapter()
+
+    # ── Mapper unit level ──
+
+    def test_text_part_maps_to_converse_text_block(self):
+        assert _converse_content_blocks([{"type": "text", "text": "ok"}]) == [{"text": "ok"}]
+
+    def test_string_content_passthrough_is_unchanged(self):
+        assert _converse_content_blocks("plain") == [{"text": "plain"}]
+
+    def test_anthropic_image_part_maps_to_image_block(self):
+        """The Anthropic-native shape arrives via the Messages→CC tool_result passthrough."""
+        part = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aWNvbg=="},
+        }
+        assert _converse_content_blocks([part]) == [
+            {"image": {"format": "png", "source": {"bytes": b"icon"}}}
+        ]
+
+    def test_image_url_data_url_part_maps_to_image_block(self):
+        part = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,aWNvbg=="}}
+        assert _converse_content_blocks([part]) == [
+            {"image": {"format": "jpeg", "source": {"bytes": b"icon"}}}
+        ]
+
+    def test_image_url_as_plain_string_maps_to_image_block(self):
+        """Some CC clients send the URL as a plain string instead of a dict."""
+        part = {"type": "image_url", "image_url": "data:image/webp;base64,aWNvbg=="}
+        assert _converse_content_blocks([part]) == [
+            {"image": {"format": "webp", "source": {"bytes": b"icon"}}}
+        ]
+
+    def test_jpg_media_type_normalises_to_jpeg(self):
+        part = {"type": "image_url", "image_url": {"url": "data:image/jpg;base64,aWNvbg=="}}
+        assert _converse_content_blocks([part]) == [
+            {"image": {"format": "jpeg", "source": {"bytes": b"icon"}}}
+        ]
+
+    def test_data_url_case_insensitivity_and_whitespace(self):
+        """RFC 2397: scheme/media type are case-insensitive; base64 may carry whitespace."""
+        part = {"type": "image_url", "image_url": {"url": "DATA:image/PNG;base64,aW Nv bg=="}}
+        assert _converse_content_blocks([part]) == [
+            {"image": {"format": "png", "source": {"bytes": b"icon"}}}
+        ]
+
+    def test_document_part_maps_to_document_block_with_default_name(self):
+        """DocumentBlock requires ``name``; the Anthropic block has none, so a default fills it."""
+        part = {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(b"%PDF-1.4").decode(),
+            },
+        }
+        assert _converse_content_blocks([part]) == [
+            {
+                "document": {
+                    "format": "pdf",
+                    "name": "document",
+                    "source": {"bytes": b"%PDF-1.4"},
+                }
+            }
+        ]
+
+    def test_document_part_title_becomes_name(self):
+        part = {
+            "type": "document",
+            "title": "Q3 report",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(b"%PDF-1.4").decode(),
+            },
+        }
+        blocks = _converse_content_blocks([part])
+        assert blocks[0]["document"]["name"] == "Q3 report"
+
+    def test_unmappable_parts_are_dropped(self):
+        """Non-dict parts, wrong-typed fields, unknown types, undecodable payloads drop."""
+        bad_parts = [
+            "a bare string",
+            {"type": "text"},  # text missing / not a string
+            {"type": "text", "text": 5},
+            {"type": "image"},  # no source
+            {"type": "image", "source": {"type": "file"}},  # unexpressable source
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/svg+xml", "data": "aGk="},
+            },  # no Converse format
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "!!!not-b64"},
+            },  # undecodable
+            {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
+            {"type": "tool_use"},  # an assistant-side block has no user/tool-result meaning
+            {"type": "thinking", "thinking": "x"},
+        ]
+        assert _converse_content_blocks(bad_parts) == [{"text": ""}]
+
+    def test_empty_content_yields_empty_text_block(self):
+        assert _converse_content_blocks([]) == [{"text": ""}]
+        assert _converse_content_blocks(None) == [{"text": ""}]
+
+    # ── Through the adapter ──
+
+    def test_tool_result_list_content_maps_part_by_part(self):
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "run it"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_abc",
+                    "content": [{"type": "text", "text": "15°C and cloudy"}],
+                },
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        tool_result = result["messages"][2]["content"][0]["toolResult"]
+        assert tool_result["content"] == [{"text": "15°C and cloudy"}]
+
+    def test_tool_result_image_part_becomes_converse_image_block(self):
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "screenshot?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "take_screenshot", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_abc",
+                    "content": [
+                        {"type": "text", "text": "here it is"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aWNvbg==",
+                            },
+                        },
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        tool_result = result["messages"][2]["content"][0]["toolResult"]
+        assert tool_result["content"] == [
+            {"text": "here it is"},
+            {"image": {"format": "png", "source": {"bytes": b"icon"}}},
+        ]
+
+    def test_tool_result_image_url_part_becomes_converse_image_block(self):
+        """The CC data-URL shape maps through the tool-result branch too (AC1).
+
+        The Anthropic-native image shape arrives via the Messages→CC
+        passthrough; a CC-native client sends ``image_url`` data-URL parts.
+        Same mapper, so this pins the branch's wire-in rather than the shape
+        table.
+        """
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "screenshot?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "take_screenshot", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_abc",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,aWNvbg=="}}
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        tool_result = result["messages"][2]["content"][0]["toolResult"]
+        assert tool_result["content"] == [
+            {"image": {"format": "jpeg", "source": {"bytes": b"icon"}}}
+        ]
+
+    def test_tool_result_document_part_becomes_converse_document_block(self):
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "read it"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "fetch_pdf", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_abc",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": base64.b64encode(b"%PDF-1.4").decode(),
+                            },
+                        }
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        tool_result = result["messages"][2]["content"][0]["toolResult"]
+        assert tool_result["content"] == [
+            {
+                "document": {
+                    "format": "pdf",
+                    "name": "document",
+                    "source": {"bytes": b"%PDF-1.4"},
+                }
+            }
+        ]
+
+    def test_tool_result_string_content_keeps_todays_output(self):
+        """The string branch is byte-identical to the pre-KBR-223 shape."""
+        cc = {
+            "model": "anthropic.claude-sonnet-4-20250514",
+            "messages": CC_MESSAGES_WITH_TOOLS,
+            "stream": False,
+        }
+        result = self.adapter.translate_to_upstream(cc)
+        tool_msg = result["messages"][2]
+        assert tool_msg["content"][0]["toolResult"]["content"] == [
+            {"text": CC_MESSAGES_WITH_TOOLS[2]["content"]}
+        ]
+
+
+class TestBedrockListContentOracle:
+    """L1 — list-form emissions survive the live botocore Converse schema (KBR-223).
+
+    Same oracle pattern as KBR-264's reasoningContent test: the oracle is
+    ``botocore.validate.validate_parameters`` against the installed
+    ``bedrock-runtime`` ``Converse.input_shape``, driven through
+    ``_bedrock_body`` (the pure builder KBR-89 extracted — the function whose
+    return value is the shipped body kwargs). The negative controls pin that
+    the pre-fix verbatim copies are rejected by the same oracle, so a
+    regression to the verbatim copy fails here instead of at AWS.
+    """
+
+    def setup_method(self):
+        self.adapter = BedrockAdapter()
+        self.input_shape = (
+            botocore.session.Session()
+            .get_service_model("bedrock-runtime")
+            .operation_model("Converse")
+            .input_shape
+        )
+
+    def _validated_body(self, cc: dict) -> dict:
+        model_id, body = self.adapter._bedrock_body(cc)
+        request = {"modelId": model_id, **body}
+        botocore.validate.validate_parameters(request, self.input_shape)
+        return request
+
+    def test_tool_result_text_list_content_passes_schema_validation(self):
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "run it"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_abc",
+                    "content": [{"type": "text", "text": "15°C and cloudy"}],
+                },
+            ],
+            "stream": False,
+        }
+        request = self._validated_body(cc)
+        tool_result = request["messages"][2]["content"][0]["toolResult"]
+        assert tool_result["content"] == [{"text": "15°C and cloudy"}]
+
+    def test_tool_result_image_and_document_content_passes_schema_validation(self):
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "screenshot?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "take_screenshot", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_abc",
+                    "content": [
+                        {"type": "text", "text": "here it is"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aWNvbg==",
+                            },
+                        },
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": base64.b64encode(b"%PDF-1.4").decode(),
+                            },
+                        },
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+        request = self._validated_body(cc)
+        content = request["messages"][2]["content"][0]["toolResult"]["content"]
+        assert content[0] == {"text": "here it is"}
+        assert content[1]["image"]["format"] == "png"
+        assert content[2]["document"]["format"] == "pdf"
+
+    def test_pre_fix_verbatim_tool_result_content_is_rejected_by_the_same_oracle(self):
+        """The negative control: the verbatim CC copy is exactly what botocore rejects."""
+        for verbatim in (
+            [{"type": "text", "text": "ok"}],
+            [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "aWNvbg=="},
+                }
+            ],
+        ):
+            with pytest.raises(botocore.exceptions.ParamValidationError):
+                botocore.validate.validate_parameters(
+                    {
+                        "modelId": "us.anthropic.claude-sonnet-4-20250514",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "toolResult": {
+                                            "toolUseId": "call_abc",
+                                            "content": verbatim,
+                                            "status": "success",
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    self.input_shape,
+                )
+
+    def test_user_image_turn_passes_schema_validation(self):
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look at this"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+                        },
+                    ],
+                }
+            ],
+            "stream": False,
+        }
+        request = self._validated_body(cc)
+        assert request["messages"][0]["content"] == [
+            {"text": "look at this"},
+            {"image": {"format": "png", "source": {"bytes": b"icon"}}},
+        ]
+
+    def test_pre_fix_verbatim_user_parts_list_is_rejected_by_the_same_oracle(self):
+        with pytest.raises(botocore.exceptions.ParamValidationError):
+            botocore.validate.validate_parameters(
+                {
+                    "modelId": "us.anthropic.claude-sonnet-4-20250514",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "look at this"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "data:image/png;base64,aWNvbg=="},
+                                },
+                            ],
+                        }
+                    ],
+                },
+                self.input_shape,
+            )
 
 
 # ── Bedrock Converse body builder (KBR-89 / T-H2) ─────────────────────────

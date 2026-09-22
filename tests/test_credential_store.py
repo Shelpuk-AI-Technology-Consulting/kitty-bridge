@@ -2,6 +2,8 @@
 
 import base64
 import json
+import logging
+import re
 import uuid
 from unittest.mock import MagicMock
 
@@ -214,3 +216,422 @@ class TestKeyringBackend:
         backend = KeyringBackend()
         backend.delete("ref")
         mock_keyring.delete_password.assert_called_once_with("kitty", "ref")
+
+
+# ── KBR-291: file-level corruption shapes the F37 path did not cover ────
+#
+# Two residuals SYSTEM_DESIGN.md §11.1 recorded as "not fixed" after
+# KBR-87 closed the per-ref half. Both raise at the same boundary
+# (`FileBackend.get`) per-ref corruption already raises from, so the
+# KBR-87 receiver map (§11.2) produces the existing clean message at
+# every call site — a damaged file is reported as damage, not as absence
+# (the F37 message, misleading) and not as a traceback (the shape (b)
+# crash).
+
+
+class TestFileLevelCorruption:
+    """KBR-291: `FileBackend.get` surfaces file-level damage as `CredentialError`.
+
+    Two residuals SYSTEM_DESIGN.md §11.1 recorded as "not fixed" after
+    KBR-87 closed the per-ref half: the file's bytes are not valid UTF-8
+    (shape b — previously raised `UnicodeDecodeError` uncaught on every
+    launch), and its JSON parses to a non-dict (shape a — previously
+    silently returned `{}` so the next `set` destroyed the original).
+    Both now raise at the same boundary (`FileBackend.get`) per-ref
+    corruption already raises from, so the KBR-87 receiver map (§11.2)
+    produces the existing clean message at every call site.
+    """
+
+    def test_invalid_utf8_bytes_raise_credential_error(self, tmp_path, caplog):
+        """Shape (b): bytes that are not valid UTF-8 raise `CredentialError`.
+
+        The bytes are constructed literally (KBR-154 AC3, verbatim) — a
+        byte sequence no host locale would decode, so the test does not
+        depend on `LANG`/`LC_ALL`. The CRITICAL log line names both the
+        file path and the backup path (AC7); the exception message
+        matches the file path so the per-ref template ("Credential for
+        ref …") cannot be silently reused (AC8).
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(b"\xff\xfe\xfd")  # invalid UTF-8 start bytes
+        backend = FileBackend(path=path)
+
+        with (
+            caplog.at_level(logging.CRITICAL, logger="kitty.credentials.file_backend"),
+            pytest.raises(CredentialError, match=re.escape(str(path))),
+        ):
+            backend.get("any-ref")
+
+        critical = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+        assert critical, "Expected CRITICAL log for non-UTF-8 credentials file"
+        message = critical[-1].getMessage()
+        assert str(path) in message, f"CRITICAL log missing path: {message!r}"
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert backups, "Expected a backup file at credentials.json.corrupt.*"
+        assert str(backups[0]) in message, f"CRITICAL log missing backup path: {message!r}"
+
+    def test_invalid_utf8_backup_preserves_the_original_bytes(self, tmp_path):
+        """Shape (b): the backup carries the original (non-decodable) bytes."""
+        path = tmp_path / "creds.json"
+        original = b"\xff\xfe\xfd not utf-8"
+        path.write_bytes(original)
+        backend = FileBackend(path=path)
+
+        with pytest.raises(CredentialError):
+            backend.get("any-ref")
+
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert len(backups) == 1, f"Expected exactly 1 backup, got {backups}"
+        assert backups[0].read_bytes() == original
+
+    def test_invalid_utf8_then_set_does_not_lose_the_backup(self, tmp_path):
+        """Shape (b): after the damage event, `set` starts fresh and the
+        backup stays untouched — the recovered record."""
+        path = tmp_path / "creds.json"
+        original = b"\xff\xfe\xfd"
+        path.write_bytes(original)
+        backend = FileBackend(path=path)
+
+        with pytest.raises(CredentialError):
+            backend.get("any-ref")
+
+        backend.set("new-ref", "new-value")
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == original
+        assert backend.get("new-ref") == "new-value"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b"\xff\xfe\xfd",  # shape (b) — invalid UTF-8
+            b'["not", "a", "dict"]',  # shape (a) — non-dict JSON
+        ],
+    )
+    def test_write_path_forgives_without_a_preceding_get(self, tmp_path, caplog, payload):
+        """D6 pin: `set` swallows the file-level raise via
+        ``_read_raw_for_write`` so the recovery command stays reachable.
+
+        Critically, no ``backend.get(...)`` runs first — without D6, this
+        test would fail with ``CredentialError`` on the ``set`` itself,
+        re-creating the KBR-154 diagnostic family this ticket exists to
+        eliminate. The preceding-``get`` variants in
+        ``test_invalid_utf8_then_set_does_not_lose_the_backup`` and
+        ``test_valid_json_non_dict_then_set_preserves_the_backup`` pass
+        even if ``_read_raw_for_write`` were removed, because the first
+        ``get`` already resets the file to ``{}``; this test is the one
+        that fails without D6.
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        with caplog.at_level(logging.CRITICAL, logger="kitty.credentials.file_backend"):
+            backend.set("new-ref", "new-value")  # must not raise
+
+        # The CRITICAL log + backup fired from the write path's first
+        # ``_read_raw`` before the raise was swallowed.
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert len(backups) == 1, "Write path must back up the corrupt file"
+        assert backups[0].read_bytes() == payload
+        assert any(r.levelno >= logging.CRITICAL for r in caplog.records), (
+            "Write path must log CRITICAL even though it swallowed the raise"
+        )
+        # The write succeeded — the new ref reads back.
+        assert backend.get("new-ref") == "new-value"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b'["not", "a", "dict"]',  # top-level list
+            b'"just a string"',  # top-level string
+            b"42",  # top-level number
+            b"true",  # top-level bool
+            b"null",  # top-level null
+        ],
+    )
+    def test_valid_json_non_dict_raises_credential_error(self, tmp_path, caplog, payload):
+        """Shape (a): JSON that parses to a non-dict raises `CredentialError`.
+
+        Before KBR-291 this returned `{}` silently — no backup, no log
+        — and the next `set` overwrote the file with no trace of the
+        original. The CRITICAL log names both the file path and the
+        backup path (AC7); the exception message matches the file path
+        so the per-ref template ("Credential for ref …") cannot be
+        silently reused (AC8).
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        with (
+            caplog.at_level(logging.CRITICAL, logger="kitty.credentials.file_backend"),
+            pytest.raises(CredentialError, match=re.escape(str(path))),
+        ):
+            backend.get("any-ref")
+
+        critical = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+        assert critical, "Expected CRITICAL log for non-dict JSON credentials file"
+        message = critical[-1].getMessage()
+        assert str(path) in message, f"CRITICAL log missing path: {message!r}"
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert backups, "Expected a backup file at credentials.json.corrupt.*"
+        assert str(backups[0]) in message, f"CRITICAL log missing backup path: {message!r}"
+
+    def test_valid_json_non_dict_backup_preserves_the_original(self, tmp_path):
+        """Shape (a): the backup carries the original non-dict payload."""
+        path = tmp_path / "creds.json"
+        payload = b'["not", "a", "dict"]'
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        with pytest.raises(CredentialError):
+            backend.get("any-ref")
+
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert len(backups) == 1, f"Expected exactly 1 backup, got {backups}"
+        assert backups[0].read_bytes() == payload
+
+    def test_valid_json_non_dict_then_set_preserves_the_backup(self, tmp_path):
+        """Shape (a): after the damage event, `set` starts fresh and the
+        backup stays untouched — the recovered record.
+
+        This is the acceptance-criterion-2 arm: without the backup, the
+        next `set` would have silently overwritten the original (the
+        §11.1 recorded residual).
+        """
+        path = tmp_path / "creds.json"
+        payload = b'["not", "a", "dict"]'
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        with pytest.raises(CredentialError):
+            backend.get("any-ref")
+
+        backend.set("new-ref", "new-value")
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == payload
+        assert backend.get("new-ref") == "new-value"
+
+    def test_error_chains_from_the_underlying_cause(self, tmp_path):
+        """Shape (b) chains (`raise ... from`) so `__cause__` preserves
+        the underlying `UnicodeDecodeError` for any consumer that
+        introspects it (AC5a).
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(b"\xff\xfe\xfd")
+        backend = FileBackend(path=path)
+
+        with pytest.raises(CredentialError) as excinfo:
+            backend.get("any-ref")
+        assert isinstance(excinfo.value.__cause__, UnicodeDecodeError)
+
+    def test_error_does_not_chain_for_shape_a(self, tmp_path):
+        """Shape (a) does **not** chain (AC5b): the JSON parsed cleanly,
+        so there is no underlying exception to preserve. `__cause__` is
+        `None`; a regression that adds `from json.JSONDecodeError` here
+        would attach an unrelated exception to a non-error condition.
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(b'["not", "a", "dict"]')
+        backend = FileBackend(path=path)
+
+        with pytest.raises(CredentialError) as excinfo:
+            backend.get("any-ref")
+        assert excinfo.value.__cause__ is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b"\xff\xfe\xfd",  # shape (b)
+            b'["not", "a", "dict"]',  # shape (a)
+        ],
+    )
+    def test_delete_does_not_raise_after_file_level_damage(self, tmp_path, payload):
+        """The write path forgives file-level damage (D6) — `delete`
+        succeeds so the recovery command (`kitty setup`) does not crash
+        on its own write. The CRITICAL log + backup still fire from
+        `_read_raw`; nothing is silent.
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        # The damage event itself surfaces to `get` (read path) —
+        # verify before testing the write-path forgiveness.
+        with pytest.raises(CredentialError):
+            backend.get("any-ref")
+
+        backend.delete("any-ref")  # must not raise
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert len(backups) == 1, "Backup was not preserved across the delete"
+
+    def test_f37_invalid_json_path_is_unchanged(self, tmp_path):
+        """F37 regression pin (acceptance criterion 3): invalid JSON keeps
+        the F37-original behaviour — `get` returns `None`, the file is
+        reset to `{}`, no raise. The new shapes are additive, not a
+        regression on the JSON path."""
+        path = tmp_path / "creds.json"
+        path.write_text("this is not json {{{", encoding="utf-8")
+        backend = FileBackend(path=path)
+
+        assert backend.get("any-ref") is None
+        assert path.read_text(encoding="utf-8").strip() == "{}"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b"\xff\xfe\xfd",  # shape (b) — invalid UTF-8
+            b'["not", "a", "dict"]',  # shape (a) — non-dict JSON
+        ],
+    )
+    def test_write_path_propagates_when_backup_could_not_be_made(self, tmp_path, monkeypatch, payload):
+        """Pin the read-only-mount fallback: when ``os.replace`` fails
+        inside ``_read_raw``, the file remains at ``self._path`` and
+        the user was promised the original was preserved at the
+        backup path. Letting the write path swallow the raise would
+        overwrite the still-damaged original with no backup anywhere
+        — silent credential loss with a false promise.
+
+        The fix in ``_read_raw_for_write`` re-raises when
+        ``self._path`` still exists after the damage event; this test
+        pins that contract by simulating ``os.replace`` failure.
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        # Simulate a read-only filesystem: os.replace raises OSError
+        # because the rename onto the backup path fails. The
+        # credentials file stays at self._path (still damaged).
+        def _raise_oserror(src: object, dst: object) -> None:
+            raise OSError("simulated read-only mount")
+
+        monkeypatch.setattr("kitty.credentials.file_backend.os.replace", _raise_oserror)
+
+        # `get` still raises (the read-path signal is intact).
+        with pytest.raises(CredentialError, match="could not be backed up"):
+            backend.get("any-ref")
+
+        # The damaged file is still at the path — the message claims
+        # it was preserved at a backup that does not exist.
+        assert path.exists(), "Expected damaged file to remain at path when backup fails"
+
+        # `set` MUST propagate the error too — the original would be
+        # silently overwritten without a backup otherwise. Without the
+        # `_read_raw_for_write` self._path.exists() guard, this would
+        # succeed and silently destroy the damaged file's bytes.
+        with pytest.raises(CredentialError):
+            backend.set("new-ref", "new-value")
+
+        # The damaged file is still there — the user can recover by
+        # hand once write access is restored.
+        assert path.exists()
+        assert path.read_bytes() == payload
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b'["not", "a", "dict"]',  # shape (a) — non-dict JSON
+            b"\xff\xfe\xfd",  # shape (b) — invalid UTF-8
+            b"not json at all {{{",  # F37 — invalid JSON (deliberate unchanged path)
+        ],
+    )
+    def test_success_branch_message_names_the_backup(self, tmp_path, payload):
+        """The success-branch message claims 'the original is preserved
+        at {backup}' — verify it names the real backup path and that the
+        backup actually exists at that path (no false promise).
+
+        The F37 case here hits the success branch (backup succeeds), so
+        ``get`` still returns ``None`` (acceptance criterion 3 — F37 is
+        unchanged in the normal case).
+        """
+        path = tmp_path / "creds.json"
+        path.write_bytes(payload)
+        backend = FileBackend(path=path)
+
+        if payload == b"not json at all {{{":
+            # F37's success branch returns None, not raise.
+            assert backend.get("any-ref") is None
+        else:
+            with pytest.raises(CredentialError) as excinfo:
+                backend.get("any-ref")
+            message = str(excinfo.value)
+            backups = list(tmp_path.glob("creds.json.corrupt.*"))
+            assert backups, "Expected backup to exist"
+            assert str(backups[0]) in message, f"Success-branch message must name the backup path: {message!r}"
+            assert "could not be backed up" not in message
+
+    def test_f37_backup_failure_now_raises_instead_of_silent_reset(self, tmp_path, monkeypatch, caplog):
+        """F37 regression-plus-fix: invalid JSON with a FAILED backup
+        must raise `CredentialError` (honest message), not silently
+        write `{}` over the damaged original.
+
+        The acceptance criterion 3 contract — F37 behaves exactly as
+        today — holds for the normal (backup-succeeds) case, which
+        `test_f37_invalid_json_path_is_unchanged` and the stage-7 suite
+        pin. This test pins the round-3 fix for the failure branch:
+        when the rename fails, `_write_raw({})` would overwrite the
+        still-damaged original with no backup anywhere; the raise is
+        the only honest signal.
+        """
+        path = tmp_path / "creds.json"
+        original = b"not json at all {{{"
+        path.write_bytes(original)
+        backend = FileBackend(path=path)
+
+        def _raise_oserror(src: object, dst: object) -> None:
+            raise OSError("simulated read-only mount")
+
+        monkeypatch.setattr("kitty.credentials.file_backend.os.replace", _raise_oserror)
+
+        with (
+            caplog.at_level(logging.CRITICAL, logger="kitty.credentials.file_backend"),
+            pytest.raises(CredentialError, match="could not be backed up"),
+        ):
+            backend.get("any-ref")
+
+        # The damaged original survived — no silent overwrite.
+        assert path.read_bytes() == original
+        assert any(r.levelno >= logging.CRITICAL for r in caplog.records), (
+            "Expected CRITICAL log even in the backup-failed branch"
+        )
+        # Round-4 pin: the CRITICAL log line itself must be honest in the
+        # failure branch — a user reading the log to recover the original
+        # must not be sent to a backup path that holds nothing.
+        critical_messages = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.CRITICAL
+        ]
+        assert any("could not be backed up" in m for m in critical_messages), (
+            f"Failure-branch CRITICAL log must name the failed rename: {critical_messages!r}"
+        )
+        assert not any("Backed up to" in m for m in critical_messages), (
+            f"Failure-branch log must not claim the backup was made: {critical_messages!r}"
+        )
+
+    def test_success_branch_log_names_the_backup_path(self, tmp_path, caplog):
+        """Round-4 pin: the success branch's CRITICAL log names the
+        backup path with the 'Backed up to' wording, so a user reading
+        the log can find the original."""
+        path = tmp_path / "creds.json"
+        path.write_bytes(b'["not", "a", "dict"]')
+        backend = FileBackend(path=path)
+
+        with (
+            caplog.at_level(logging.CRITICAL, logger="kitty.credentials.file_backend"),
+            pytest.raises(CredentialError),
+        ):
+            backend.get("any-ref")
+
+        backups = list(tmp_path.glob("creds.json.corrupt.*"))
+        assert backups, "Expected backup to exist in the success branch"
+        critical_messages = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.CRITICAL
+        ]
+        assert any("Backed up to" in m and str(backups[0]) in m for m in critical_messages), (
+            f"Success-branch log must name the backup path: {critical_messages!r}"
+        )
+        assert not any("could not be backed up" in m for m in critical_messages), (
+            f"Success-branch log must not claim failure: {critical_messages!r}"
+        )

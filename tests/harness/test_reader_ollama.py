@@ -1417,3 +1417,56 @@ class TestExtraCarriedWhole:
         key = label.split(" as ")[0]
         assert req.envelope.extra[key] == expected
         assert req.residual == {}
+
+
+class TestDeclarationNameRequired:
+    """A declaration's ``function.name`` that is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a tool nobody can name cannot be paired with its result or
+    addressed by a register row. KBR-279 landed the rule for the Ollama
+    *invocation* sites; KBR-295 extends it to the declaration side
+    (§7.4.2 rule 7 row 2, the seven invocation readers and the six
+    declaration branches). The Ollama declaration branch today is the worst
+    of the six — `_typed_leaf(...) or ""` silently projects
+    `ToolDecl(name="")` for every bad shape, with no raise at all.
+    """
+
+    @staticmethod
+    def _body_with_function_tool(name: Any) -> dict[str, Any]:
+        """Return an Ollama body whose one declaration carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published schema calls required and no published example shows.
+        """
+        function: dict[str, Any] = {"parameters": {}}
+        if name is not None:
+            function["name"] = name
+        return {
+            "model": "m",
+            "messages": [{"role": "user", "content": "x"}],
+            "tools": [{"type": "function", "function": function}],
+        }
+
+    def test_missing_function_tool_name_raises(self) -> None:
+        """A declaration's ``function`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.function\.name"):
+            _project(self._body_with_function_tool(None))
+
+    def test_empty_function_tool_name_raises(self) -> None:
+        """A declaration's ``function`` with an empty ``name`` raises (KBR-295)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.function\.name"):
+            _project(self._body_with_function_tool(""))
+
+    def test_non_string_function_tool_name_raises(self) -> None:
+        """A declaration's ``function`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.function\.name"):
+            _project(self._body_with_function_tool(42))
+
+    def test_named_function_tool_control_is_clean(self) -> None:
+        """Control — a named declaration projects cleanly."""
+        req = _project(self._body_with_function_tool("get_weather"))
+
+        assert req.conversation.tools[0].name == "get_weather"
+        assert req.residual == {}

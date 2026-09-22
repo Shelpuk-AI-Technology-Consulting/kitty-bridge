@@ -539,26 +539,6 @@ class TestTools:
 
         assert projected.conversation.tools[0].description is None
 
-    def test_a_tool_without_name_residualises(self) -> None:
-        """A tool without a name cannot be paired or addressed."""
-        projected = project_untotalled(
-            {
-                "messages": [],
-                "toolConfig": {
-                    "tools": [
-                        {
-                            "toolSpec": {
-                                "inputSchema": {"type": "object"},
-                            }
-                        }
-                    ]
-                },
-            }
-        )
-
-        assert "toolConfig.tools[0].toolSpec.name" in projected.residual
-        assert projected.conversation.tools == ()
-
     def test_tools_are_addressed_by_name(self) -> None:
         """Tools appear in declaration order, not index-paired."""
         projected = project(
@@ -1518,23 +1498,6 @@ class TestEveryOptionalLeafFailsClosed:
         assert part.media_type == "7"
         assert part.digest == c.image_digest(b"x")
 
-    def test_a_non_string_tool_use_name_residualises(self) -> None:
-        """``toolUse.name`` must be a string."""
-        projected = project_untotalled(
-            {
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {"toolUse": {"toolUseId": "x", "name": 42, "input": {}}}
-                        ],
-                    }
-                ]
-            }
-        )
-
-        assert "messages[0].content[0].toolUse.name" in projected.residual
-
     def test_an_unknown_tool_result_status_residualises(self) -> None:
         """``status`` outside the enum residualises; ``is_error`` stays False."""
         projected = project_untotalled(
@@ -1557,6 +1520,130 @@ class TestEveryOptionalLeafFailsClosed:
         )
 
         assert "messages[0].content[0].toolResult.status" in projected.residual
+
+
+class TestNameRequired:
+    """A ``toolUse`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers, KBR-281 for Chat Completions / Gemini / Anthropic;
+    KBR-292 extends it here (§7.4.2 rule 7 row 2, seven strict readers).
+    The ``toolSpec`` declaration branch raises on ``name`` too since KBR-295
+    closed the deliberate sibling (its ``inputSchema`` failure keeps the
+    residualise-and-omit posture — see ``TestDeclarationNameRequired``).
+    """
+
+    @staticmethod
+    def _body_with_tool_use(name: Any) -> dict[str, Any]:
+        """Return a Converse body whose one ``toolUse`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published examples never show and the schema calls required.
+        """
+        tool_use: dict[str, Any] = {"toolUseId": "call_1", "input": {"city": "Toronto"}}
+        if name is not None:
+            tool_use["name"] = name
+        return {"messages": [{"role": "assistant", "content": [{"toolUse": tool_use}]}]}
+
+    def test_missing_tool_use_name_raises(self) -> None:
+        """A ``toolUse`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="toolUse.name"):
+            project_untotalled(self._body_with_tool_use(None))
+
+    def test_empty_tool_use_name_raises(self) -> None:
+        """A ``toolUse`` with an empty ``name`` raises (KBR-292)."""
+        with pytest.raises(c.UnreadableBodyError, match="toolUse.name"):
+            project_untotalled(self._body_with_tool_use(""))
+
+    def test_non_string_tool_use_name_raises(self) -> None:
+        """A ``toolUse`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match="toolUse.name"):
+            project_untotalled(self._body_with_tool_use(42))
+
+    def test_named_tool_use_control_is_clean(self) -> None:
+        """Control — a named ``toolUse`` projects cleanly."""
+        projected = project(self._body_with_tool_use("get_weather"))
+
+        tool_use = projected.conversation.turns[0].parts[0]
+        assert isinstance(tool_use, c.ToolUse)
+        assert tool_use.name == "get_weather"
+        assert tool_use.arguments == {"city": "Toronto"}
+        assert tool_use.id == "call_1"
+
+
+class TestDeclarationNameRequired:
+    """A ``toolSpec`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a tool nobody can name cannot be paired with its result or
+    addressed by a register row. KBR-279 landed the rule for the Ollama
+    readers, KBR-281 for Chat Completions / Gemini / Anthropic invocations,
+    KBR-292 for the remaining invocation readers; KBR-295 extends it to the
+    declaration side (§7.4.2 rule 7 row 2, the seven invocation readers and
+    the six declaration branches). The
+    omit-the-declaration posture that T-A5 settled for a missing ``name``
+    field is tightened to raise for the name field only; ``inputSchema`` and
+    the other field failures keep their residualise+omit posture.
+    """
+
+    @staticmethod
+    def _body_with_tool_spec(name: Any) -> dict[str, Any]:
+        """Return a Converse body whose one ``toolSpec`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published examples never show and the schema calls required.
+        """
+        tool_spec: dict[str, Any] = {"inputSchema": {"type": "object"}}
+        if name is not None:
+            tool_spec["name"] = name
+        return {"messages": [], "toolConfig": {"tools": [{"toolSpec": tool_spec}]}}
+
+    def test_missing_tool_spec_name_raises(self) -> None:
+        """A ``toolSpec`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"toolSpec\.name"):
+            project_untotalled(self._body_with_tool_spec(None))
+
+    def test_empty_tool_spec_name_raises(self) -> None:
+        """A ``toolSpec`` with an empty ``name`` raises (KBR-295)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"toolSpec\.name"):
+            project_untotalled(self._body_with_tool_spec(""))
+
+    def test_non_string_tool_spec_name_raises(self) -> None:
+        """A ``toolSpec`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"toolSpec\.name"):
+            project_untotalled(self._body_with_tool_spec(42))
+
+    def test_named_tool_spec_control_is_clean(self) -> None:
+        """Control — a named ``toolSpec`` projects cleanly."""
+        projected = project(self._body_with_tool_spec("get_weather"))
+
+        assert projected.conversation.tools == (c.ToolDecl(name="get_weather", schema={"type": "object"}),)
+
+    def test_input_schema_failure_still_omits_the_declaration(self) -> None:
+        """Asymmetry pin (KBR-295 AC-5): ``name`` raises, ``inputSchema`` omits.
+
+        The schema marks both fields required, but only ``name`` raises: a bad
+        name is unreadable (§7.4.2 rule 7 row 2, the strict posture), while a
+        bad ``inputSchema`` keeps its T-A5 residualise+omit posture (the
+        declaration is not produced, the caller appends only non-``None``).
+        """
+        projected = project_untotalled(
+            {
+                "messages": [],
+                "toolConfig": {
+                    "tools": [
+                        {"toolSpec": {"name": "get_weather", "inputSchema": 7}},
+                    ]
+                },
+            }
+        )
+
+        assert "toolConfig.tools[0].toolSpec.inputSchema" in projected.residual
+        assert projected.conversation.tools == ()
 
 
 # --------------------------------------------------------------------------

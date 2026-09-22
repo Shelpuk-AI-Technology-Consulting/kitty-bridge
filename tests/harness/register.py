@@ -41,10 +41,18 @@ it, so there is no complement to write and §3.2.2 lists the row as unconditiona
 A trigger is arranged by one of four kinds — :class:`ArrangingBy` — and only
 :attr:`~ArrangingBy.REQUEST` can be varied by a corpus entry (KBR-186).
 
-**There is deliberately no scope column, and the site does not supply one.**
+**Scope is carried, and it names reachability, not survival (KBR-139).**
 §6.2.3's completeness guard and T-D8's coverage check both need to know, per
-adapter, which rows are reachable.  The register does not carry it, and the
-tempting shortcut — read the scope off the site's class — is wrong twice:
+adapter, which rows are reachable, so every row now states its ``scope``: the
+provider registry keys on which at least one request path executes the row's
+site, or :data:`ALL_PROVIDERS` when every adapter can reach it.  Reachability
+is deliberately **not** "the row's effect survives to the capture boundary" —
+KBR-160 caught M1 true at its site while a consumer one layer down discarded
+its effect, with site, trigger, conditionality *and* scope all accurate.  A
+wrong scope entry is falsifiable today: the guard below checks every key
+against the registry read by AST, and the oracle run (KBR-51) fails a real
+capture that contradicts the data.  The tempting shortcut — read the scope off
+the site's class — is wrong twice:
 
 * P8's site is ``ProviderAdapter._inject_empty_reasoning_content``, a **base
   class** method.  The site reads as all 23 adapters; only four call it
@@ -56,10 +64,14 @@ tempting shortcut — read the scope off the site's class — is wrong twice:
   reachable on ``custom_anthropic``, ``zai_coding``, ``minimax_token`` and
   ``opencode_go`` as well.  No static rule over the class hierarchy finds that.
 
-Scope is therefore its own task, filed rather than guessed.  Authoring it here
-would ship data that **nothing in this change could prove wrong** — there is no
-wire-level capture yet to contradict a bad entry — which is exactly what plan
-§1.4's harness rule forbids.  See `KBR-139`.
+Scope is therefore populated by reading each override and delegation chain —
+the per-adapter facts are recorded on the rows and in
+``.system_design/steps/kbr139_register_scope.md`` — and held honest by the
+guards in this module.  What scope still does not carry is the *survival*
+question (which bridge-level rows survive to the capture boundary on the three
+custom-transport adapters); that is an assertion at the §3.2.3 boundary, per
+KBR-160, and is recorded in §3.2.4 as a follow-up rather than smuggled into
+this data.
 
 **A declared trigger is not a verified one.**  §7.4 hands the oracle
 ``triggers_met`` as an argument, and §3.3.2 asserts only in one direction: a
@@ -334,6 +346,14 @@ class MutationRow:
         conditional: Whether §3.3.2 assertion 2 applies — whether a corpus entry
             must exist in which this row's mutation is provably absent.
         design_ref: Where the design document specifies the row.
+        scope: The provider registry keys on which the row's site is **reachable**
+            — at least one request path through that adapter executes the site —
+            or the single-sentinel tuple ``(ALL_PROVIDERS,)`` when every adapter
+            can reach it.  Reachability, **not** survival to §3.2.3's capture
+            boundary (KBR-160: a row can be true at its site and false one layer
+            down; survival lives at the boundary).  Validated by
+            :func:`scope_problems`; no default, so a future row author must
+            decide explicitly (the register's anti-silent-default culture).
         not_projectable_reason: Required when, and only when, ``paths`` is the
             escape.  §3.3.1a: "an empty cell would leave those rows silently
             unfalsifiable; an explicit value with a reason does not."
@@ -345,6 +365,7 @@ class MutationRow:
     paths: tuple[str, ...]
     conditional: bool
     design_ref: str
+    scope: tuple[str, ...]
     not_projectable_reason: str | None = None
 
     @property
@@ -356,6 +377,27 @@ class MutationRow:
             :data:`~harness.contract.NOT_PROJECTABLE` escape.
         """
         return self.paths != (c.NOT_PROJECTABLE,)
+
+
+def row_is_in_scope(row: MutationRow, provider_key: str) -> bool:
+    """Return whether ``row``'s site is reachable on the provider ``provider_key``.
+
+    Reachability is the §3.2.4 definition: at least one request path through
+    that adapter executes the row's site (KBR-160: not survival to §3.2.3's
+    capture boundary). The :data:`ALL_PROVIDERS` sentinel matches every key;
+    otherwise the key must be a member of ``row.scope``.
+
+    Args:
+        row: The register row to check.
+        provider_key: A key of :data:`providers.registry._registry`.
+
+    Returns:
+        ``True`` if ``row.scope`` is the sentinel or contains ``provider_key``;
+        ``False`` otherwise.  Does **not** validate that ``provider_key`` is a
+        real registry key — that is :func:`scope_problems`' job, called once
+        over the whole register rather than per row at consumer time.
+    """
+    return ALL_PROVIDERS in row.scope or provider_key in row.scope
 
 
 def row_shape_problems(row: MutationRow) -> tuple[str, ...]:
@@ -401,6 +443,69 @@ _BASE = "kitty/providers/base.py"
 _SUBSCRIPTION = "kitty/providers/openai_subscription.py"
 _OLLAMA_CLOUD = "kitty/providers/ollama_cloud.py"
 _BEDROCK = "kitty/providers/bedrock.py"
+
+#: The "every provider" sentinel for :attr:`MutationRow.scope`.  An entry of
+#: this single element means at least one request path through **every**
+#: registered provider reaches the row's site (KBR-139).
+ALL_PROVIDERS: str = "*"
+
+#: The three adapters whose ``use_native_messages`` is true — hardcoded or
+#: profile-driven — and so the only ones whose request path can set
+#: ``_native_messages_request`` (server.py:5048) and reach the M9 fallback
+#: converter.  ``anthropic`` is *not* one: ``AnthropicAdapter`` inherits the
+#: base property, which returns False.
+_NATIVE_MESSAGES_ADAPTERS: tuple[str, ...] = (
+    "custom_anthropic",
+    "minimax_token",
+    "zai_coding",
+)
+
+#: Every registry key except the two adapters that hardcode
+#: ``use_native_messages = True`` (``custom_anthropic.py:77``,
+#: ``zai_anthropic.py:72``): the /v1/messages handler skips
+#: :class:`MessagesTranslator` on those two, so the Messages-translator rows
+#: are unreachable there.  ``minimax_token`` stays in — its native flag is
+#: profile-driven and defaults off, so Messages-inbound translates by default.
+#: Twenty-one adapters.
+_TRANSLATED_MESSAGES_ADAPTERS: tuple[str, ...] = (
+    "anthropic",
+    "azure",
+    "bedrock",
+    "byteplus",
+    "custom_openai",
+    "fireworks",
+    "google_aistudio",
+    "kimi",
+    "mimo",
+    "minimax",
+    "minimax_token",
+    "novita",
+    "ollama",
+    "ollama_cloud",
+    "openai",
+    "openai_subscription",
+    "openrouter",
+    "opencode_go",
+    "vertex",
+    "zai_coding_cc",
+    "zai_regular",
+)
+
+#: The Anthropic adapter family for the P5 / P26 rows.  ``AnthropicAdapter``
+#: defines ``translate_to_upstream``, ``_translate_assistant_msg`` and
+#: ``_translate_tools``; four delegators reach the base class body on the
+#: translated (non-native) branch — ``super().translate_to_upstream`` at
+#: ``custom_anthropic.py:97``, ``minimax_token.py:135``, ``zai_anthropic.py:91``,
+#: and the explicit ``AnthropicAdapter.translate_to_upstream(self, …)`` at
+#: ``opencode.py:882`` for ``opencode_go``'s Messages-routed models.
+#: KBR-258 measured four; ``opencode_go`` is the derived fifth (KBR-139).
+_ANTHROPIC_FAMILY: tuple[str, ...] = (
+    "anthropic",
+    "custom_anthropic",
+    "minimax_token",
+    "zai_coding",
+    "opencode_go",
+)
 
 _ALWAYS = Trigger.ALWAYS
 
@@ -511,6 +616,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ENVELOPE_MODEL,),
         conditional=False,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M2",
@@ -523,6 +629,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.NOT_PROJECTABLE,),
         conditional=False,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
         not_projectable_reason=(
             "A whole-body protocol translation changes the wire format, not a field. The "
             "projection exists precisely so the two formats become comparable, so naming a path "
@@ -545,6 +652,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M4",
@@ -558,6 +666,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M5",
@@ -572,6 +681,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.CONVERSATION_TURNS,),
         conditional=True,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M6",
@@ -590,6 +700,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.CONVERSATION_TURNS,),
         conditional=True,
         design_ref="§3.2.1 · §4.3 C3",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M7",
@@ -608,6 +719,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.CONVERSATION_TURNS,),
         conditional=True,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M8",
@@ -622,6 +734,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
         design_ref="§3.2.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M9",
@@ -630,11 +743,84 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.NOT_PROJECTABLE,),
         conditional=True,
         design_ref="§3.2.1",
+        scope=_NATIVE_MESSAGES_ADAPTERS,
         not_projectable_reason=(
             "A whole-body conversion from native Messages to Chat Completions, followed by a "
             "re-run of model normalisation. Like M2 it changes the format rather than a field, "
             "and the projection is what makes the before and after comparable at all."
         ),
+    ),
+    MutationRow(
+        id="M9a",
+        # KBR-271: the M9 fallback's top-level twin of M16's fourth path
+        # (KBR-263 / G38). `_convert_native_to_cc_format` builds its result
+        # dict from named keys and never copies `body["cache_control"]`, so
+        # Anthropic's automatic-caching form -- projected to
+        # `envelope.extra[cache_control]` (§3.3.1) -- is dropped by omission
+        # on the retried wire. Pinned at the wire by the KBR-200 CB-3 suite's
+        # `top_level` site (`tests/bridge/test_native_passthrough_cache_breaks.py`).
+        #
+        # Two overlap facts, stated so no future reader re-derives them from
+        # `oracle.py`. (1) Claim matching ignores sites, so whenever
+        # `NON_NATIVE_UPSTREAM_WIRE` is met M16 -- same trigger, superset
+        # paths -- claims this address; these rows are the register's record
+        # of the M9 site's drops, not extra oracle coverage. (2) The rows are
+        # anticipatory in P28's sense: the fallback is reachable only on the
+        # native route (all four call sites gate on
+        # `cc_request.get("_native_messages_request")`, set only on the
+        # `use_native_messages` branch), so this ROUTE-kind trigger is false
+        # on the only path that reaches the site today; no corpus entry
+        # exercises the fallback, and any hypothetical fallback run fails
+        # §4.3 C2 before assertion 1. The trigger is M16-family symmetry, not
+        # a reachability claim -- the alternative (`NATIVE_TOOL_USE_FORMAT_ERROR`,
+        # M9's own RESPONSE-kind trigger) would force `conditional=True`
+        # (`test_rows_sharing_a_trigger_agree_on_whether_it_is_conditional`)
+        # and owe a §3.3.2 assertion-2 complement no corpus entry can author.
+        site=(f"{_SERVER}:_convert_native_to_cc_format",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Keyed literal -- no wildcard, so the `_SHAPES` test excludes it by
+        # construction (P26's reason). The path stays narrow so it cannot
+        # swallow a sibling row's `envelope.extra[<other>]` delta.
+        paths=(c.extra_path("cache_control"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G43",
+        scope=_NATIVE_MESSAGES_ADAPTERS,
+    ),
+    MutationRow(
+        id="M9b",
+        # KBR-271: the M9 fallback's block-level twin of M16's three carrier
+        # paths. The rebuild flattens every block it touches -- assistant
+        # text joined to a string, `tool_use` rebuilt as a `tool_calls`
+        # entry, `tool_result.content` flattened to a string *before* any
+        # carriage (the Messages translator preserves the nested half; this
+        # converter defeats it), `tools` rebuilt from
+        # `name`/`description`/`input_schema` only -- so a breakpoint on a
+        # tool declaration or on any content part is dropped on the retried
+        # wire. Pinned at the wire by the CB-3 suite's `tool`, `image`,
+        # `user_text`, `assistant_text`, `tool_use`, `tool_result` and
+        # `tool_result_nested` sites. See M9a for the two overlap facts
+        # (site-blind matching against M16; anticipatory, native-route-only
+        # today) and for the trigger choice.
+        #
+        # Deliberately outside these paths: the `system` carrier survives by
+        # carriage on `zai_anthropic`/`custom_anthropic` (no drop, no row),
+        # and a nested `tool_result` *block* residualises before register
+        # matching (M16's "outside this row's paths by design" reason). Both,
+        # plus the `minimax_token` system drop these rows' trigger cannot
+        # reach (the adapter is native), are recorded on §9.2 G43.
+        site=(f"{_SERVER}:_convert_native_to_cc_format",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        # Both patterns are already listed in `_SHAPES` for M16/P28 -- one
+        # per carrier Anthropic permits a breakpoint on. The paths name the
+        # field, never the block: a coarser anchor would also claim a deleted
+        # part or tool description (two of §3.3.1's five falsification cases).
+        paths=(
+            c.tool_path(c.WILDCARD, "cache_control"),
+            c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
+        ),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G43",
+        scope=_NATIVE_MESSAGES_ADAPTERS,
     ),
     MutationRow(
         id="M10",
@@ -645,6 +831,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ENVELOPE_MODEL,),
         conditional=False,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M11",
@@ -653,6 +840,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ENVELOPE_STREAM,),
         conditional=True,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M12",
@@ -666,9 +854,16 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # translators substitute one text part into a reply that was empty, so a
         # wildcard would also claim a delta at `reply.parts[5]` whenever this
         # trigger is declared met.
+        #
+        # KBR-99: the streamed translated /v1/messages route no longer DELIVERS
+        # the substitution — its empty ladder exhausts into the D4 502 for both
+        # empty shapes (SYSTEM_DESIGN §5.3 S11) — but the row stays live: the
+        # translators still synthesise the fallback and every non-streaming
+        # reply and other inbound protocol still writes it.
         paths=(c.reply_part_path(0),),
         conditional=True,
         design_ref="§3.2.1 · §3.3.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M14",
@@ -690,6 +885,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ROUTE_SCHEME, c.ROUTE_HOST, c.ROUTE_PATH, c.ROUTE_QUERY),
         conditional=False,
         design_ref="§3.2.1 · §3.3.5",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M15",
@@ -702,6 +898,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.NOT_PROJECTABLE,),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
         not_projectable_reason=(
             "OpenAI's `CreateResponse` declares a string `input` and the single-item array form to be "
             "one request, so the two project to one `Conversation` -- a single user turn carrying the "
@@ -745,6 +942,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         ),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1 · §3.3.1a",
+        scope=_TRANSLATED_MESSAGES_ADAPTERS,
     ),
     MutationRow(
         id="M17",
@@ -756,6 +954,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
         design_ref="§3.2.1 · §3.3.1a · §4.3 C3",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M18",
@@ -776,6 +975,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
         conditional=True,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M19",
@@ -790,6 +990,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "tool_use_id"),),
         conditional=True,
         design_ref="§3.2.1",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M20",
@@ -805,6 +1006,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.SYSTEM_ROLE_PATH,),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M21",
@@ -818,6 +1020,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.tool_path(c.WILDCARD, "behavior"),),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M22",
@@ -832,6 +1035,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "signature"),),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M23",
@@ -843,6 +1047,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "scheduling"),),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M24",
@@ -853,6 +1058,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "video_metadata"),),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M25",
@@ -864,6 +1070,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
     ),
     MutationRow(
         id="M26",
@@ -892,6 +1099,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("metadata"),),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1b · §9.2 G31",
+        scope=_TRANSLATED_MESSAGES_ADAPTERS,
     ),
 )
 
@@ -907,6 +1115,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.NOT_PROJECTABLE,),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a",
+        scope=(ALL_PROVIDERS,),
         not_projectable_reason=(
             "The keys P1 strips are kitty's own and no reader maps them, so the effect is a "
             "residual that fails the run before register matching ever happens — P1 can never "
@@ -924,6 +1133,10 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("thinking"),),
         conditional=True,
         design_ref="§3.2.2",
+        # Scope (KBR-139): the site is the shared _ZaiBase hook, so both zai CC
+        # adapters reach it. The Anthropic-family zai_coding is a different
+        # adapter with its own translate_to_upstream.
+        scope=("zai_regular", "zai_coding_cc"),
     ),
     MutationRow(
         id="P2b",
@@ -934,6 +1147,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("thinking"),),
         conditional=True,
         design_ref="§3.2.2",
+        scope=("zai_regular", "zai_coding_cc"),
     ),
     MutationRow(
         id="P3",
@@ -942,6 +1156,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("reasoning"),),
         conditional=True,
         design_ref="§3.2.2",
+        scope=("openrouter",),
     ),
     MutationRow(
         id="P4",
@@ -951,6 +1166,9 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("reasoning_effort"),),
         conditional=True,
         design_ref="§3.2.2",
+        # Scope (KBR-139): openai_subscription inherits OpenAIAdapter.translate_to_upstream
+        # but its custom transport never calls it (§6.2.3) — so this row is openai only.
+        scope=("openai",),
     ),
     MutationRow(
         id="P5a",
@@ -959,6 +1177,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.sampling_path("max_tokens"),),
         conditional=True,
         design_ref="§3.2.2",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P5b",
@@ -969,6 +1188,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.CONVERSATION_SYSTEM,),
         conditional=True,
         design_ref="§3.2.2",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P5c",
@@ -982,6 +1202,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.sampling_path("max_tokens"), c.extra_path("thinking")),
         conditional=True,
         design_ref="§3.2.2",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P5d",
@@ -990,6 +1211,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("thinking"), c.extra_path("effort")),
         conditional=True,
         design_ref="§3.2.2",
+        scope=_ANTHROPIC_FAMILY,
         # KBR-44 (2026-09-14): the `envelope.extra[output_config]` address,
         # deferred here since KBR-224, landed on the row below (P5f) under its
         # own trigger, because the translator emits `_output_config`
@@ -1013,6 +1235,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("output_config"),),
         conditional=True,
         design_ref="§3.2.2",
+        scope=_ANTHROPIC_FAMILY,
         # First corpus entry carrying `output_config`: KBR-44's
         # `effort_configured` capture (T-C1). Until a corpus entry carries the
         # field, no oracle run can see the withhold — the pairing rule
@@ -1029,6 +1252,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
         design_ref="§3.2.2",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P6",
@@ -1040,6 +1264,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ENVELOPE_MODEL,),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1b",
+        scope=("azure",),
     ),
     MutationRow(
         id="P20",
@@ -1053,6 +1278,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ENVELOPE_MODEL, c.ROUTE_PATH, c.ROUTE_QUERY),
         conditional=False,
         design_ref="§3.2.2 · §3.3.5",
+        scope=("azure",),
     ),
     MutationRow(
         id="P21",
@@ -1063,6 +1289,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ROUTE_HOST, c.ROUTE_PATH),
         conditional=False,
         design_ref="§3.2.2 · §3.3.5",
+        scope=("vertex",),
     ),
     MutationRow(
         id="P7",
@@ -1071,6 +1298,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.sampling_path("max_tokens"),),
         conditional=True,
         design_ref="§3.2.2",
+        scope=("fireworks",),
     ),
     MutationRow(
         id="P8",
@@ -1079,6 +1307,11 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
         conditional=True,
         design_ref="§3.2.2",
+        # Scope (KBR-139): the base-class site reads as all 23 adapters, but
+        # exactly four call it (kimi.py:95, custom_openai.py:105, zai.py:79 for
+        # both zai CC subclasses) — the module docstring's own over-scoping
+        # example, pinned by test_register.py::TestTheScopeColumn.
+        scope=("kimi", "custom_openai", "zai_regular", "zai_coding_cc"),
     ),
     MutationRow(
         id="P9a",
@@ -1091,6 +1324,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.header_path("user-agent"),),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
+        scope=("kimi", "byteplus", "mimo"),
     ),
     MutationRow(
         id="P9b",
@@ -1101,6 +1335,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.header_path("authorization"), c.header_path("api-key")),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
+        scope=("mimo",),
     ),
     MutationRow(
         id="P9c",
@@ -1119,6 +1354,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.header_path("user-agent"), c.header_path("version"), c.header_path("accept")),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P9d",
@@ -1141,6 +1377,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.header_path("chatgpt-account-id"),),
         conditional=True,
         design_ref="§3.2.2 · §4.3 C1",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P9e",
@@ -1166,6 +1403,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         ),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
+        scope=("anthropic", "custom_anthropic", "minimax_token", "opencode_go"),
     ),
     MutationRow(
         id="P9f",
@@ -1180,6 +1418,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.header_path("anthropic-version"),),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
+        scope=("zai_coding",),
     ),
     MutationRow(
         id="P9g",
@@ -1198,6 +1437,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.header_path("authorization"), c.header_path("api-key")),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
+        scope=("azure",),
     ),
     MutationRow(
         id="P9h",
@@ -1210,6 +1450,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.header_path("authorization"),),
         conditional=False,
         design_ref="§3.2.2 · §4.3 C1",
+        scope=("ollama",),
     ),
     MutationRow(
         id="P10",
@@ -1218,6 +1459,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("reasoning_split"),),
         conditional=False,
         design_ref="§3.2.2",
+        scope=("minimax",),
     ),
     MutationRow(
         id="P11",
@@ -1226,6 +1468,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.NOT_PROJECTABLE,),
         conditional=False,
         design_ref="§3.2.2 · §3.3.4",
+        scope=("bedrock",),
         not_projectable_reason=(
             "A whole-body translation into Bedrock Converse — a third wire format M2 does not "
             "name. Same reason as M2: the projection is what makes the formats comparable, so "
@@ -1239,6 +1482,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.NOT_PROJECTABLE,),
         conditional=False,
         design_ref="§3.2.2 · §3.3.4",
+        scope=("ollama_cloud",),
         not_projectable_reason=(
             "A whole-body translation into Ollama's /api/chat — a fourth wire format. Same reason as M2 and P11."
         ),
@@ -1253,6 +1497,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.CONVERSATION_SAMPLING,),
         conditional=False,
         design_ref="§3.2.2 · §3.2.3 · §3.3.1",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P14",
@@ -1264,6 +1509,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.CONVERSATION_SAMPLING,),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1b",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P23",
@@ -1299,6 +1545,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=tuple(c.extra_path(key) for key in _CODEX_DROPPED_CONTROL_FIELDS),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1a · §3.3.1b",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P22",
@@ -1322,6 +1569,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("reasoning"),),
         conditional=True,
         design_ref="§3.2.2",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P25",
@@ -1353,6 +1601,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("include"), c.extra_path("reasoning")),
         conditional=True,
         design_ref="§3.2.2",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P15",
@@ -1364,6 +1613,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.tool_path(c.WILDCARD, "strict"),),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1a",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P16",
@@ -1372,6 +1622,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.NOT_PROJECTABLE,),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1a",
+        scope=("openai_subscription",),
         not_projectable_reason=(
             "The input_text/output_text tag is redundant with the turn's role, which the "
             "projection already carries. §3.3.1a names P16 as the example: modelling the tag "
@@ -1391,6 +1642,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ENVELOPE_STREAM, c.ENVELOPE_STORE),
         conditional=False,
         design_ref="§3.2.2",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P18",
@@ -1409,17 +1661,24 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.ENVELOPE_MODEL, c.ENVELOPE_STREAM),
         conditional=False,
         design_ref="§3.2.2 · §3.2.3 · §3.3.1b",
+        scope=("bedrock",),
     ),
     MutationRow(
         id="P19",
         site=(
-            "kitty/providers/ollama_cloud.py:OllamaCloudAdapter.make_request",
-            "kitty/providers/ollama_cloud.py:OllamaCloudAdapter.stream_request",
+            # KBR-90 (T-H5) extracted the body's stream overwrite from the
+            # two transport methods into this pure builder. Both
+            # transports now call `_ollama_body` (parametrised on a
+            # `streaming` flag), so the overwrite's load-bearing site is
+            # here — `make_request` and `stream_request` post the returned
+            # body verbatim and add no further mutations.
+            "kitty/providers/ollama_cloud.py:OllamaCloudAdapter._ollama_body",
         ),
         trigger=_ALWAYS,
         paths=(c.ENVELOPE_STREAM,),
         conditional=False,
         design_ref="§3.2.2 · §3.2.3",
+        scope=("ollama_cloud",),
     ),
     # KBR-258 — the Anthropic adapter family drops a Chat Completions request's
     # cache breakpoints at five sites on the translated route, measured identical
@@ -1430,6 +1689,12 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
     # `super().translate_to_upstream`; `zai_anthropic.ZaiAnthropicAdapter` is no
     # exception (`zai_anthropic.py:85-91`). The drops KBR-199 measured happen on
     # the translated (non-native) branch only.
+    #
+    # Scope (KBR-139) names five adapters, not the four KBR-258 measured:
+    # `opencode_go` is the derived fifth — its Messages-routed models call
+    # `AnthropicAdapter.translate_to_upstream(self, …)` explicitly
+    # (`opencode.py:882`), so the same sites run there. Measured ≠ exhaustive;
+    # the delegation read, not a wire capture, is what adds the fifth.
     #
     # `conditional=False` is forced by three independent guards: KBR-186 makes
     # `NON_NATIVE_UPSTREAM_WIRE` (ArrangingBy.ROUTE) non-corpus-variable; M16's
@@ -1461,6 +1726,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("cache_control"),),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P27",
@@ -1479,6 +1745,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.system_path(c.WILDCARD, "cache_control"),),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P28",
@@ -1514,6 +1781,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P29",
@@ -1537,6 +1805,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P30",
@@ -1552,6 +1821,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.tool_path(c.WILDCARD, "cache_control"),),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · §9.2 G37",
+        scope=_ANTHROPIC_FAMILY,
     ),
     MutationRow(
         id="P24",
@@ -1584,6 +1854,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=tuple(c.extra_path(key) for key in _CC_DROPPED_CONTROL_FIELDS),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1a · §3.3.1b · §9.2 G26",
+        scope=("openai_subscription",),
     ),
     MutationRow(
         id="P31",
@@ -1603,6 +1874,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("tool_choice"), c.extra_path("parallel_tool_calls")),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1b · §9.2 G32",
+        scope=("ollama_cloud",),
     ),
     MutationRow(
         id="P32",
@@ -1619,6 +1891,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("parallel_tool_calls"),),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1b · §9.2 G32",
+        scope=("bedrock",),
     ),
     MutationRow(
         id="P33",
@@ -1644,6 +1917,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("tool_choice"),),
         conditional=True,
         design_ref="§3.2.2 · §3.3.1b · §9.2 G33",
+        scope=("bedrock",),
     ),
     MutationRow(
         id="P34",
@@ -1666,6 +1940,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("parallel_tool_calls"),),
         conditional=True,
         design_ref="§3.2.2 · §3.3.1b · §9.2 G34",
+        scope=_TRANSLATED_MESSAGES_ADAPTERS,
     ),
     MutationRow(
         id="P35",
@@ -1694,6 +1969,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("tool_choice"),),
         conditional=True,
         design_ref="§3.2.2 · §3.3.1b · §9.2 G35",
+        scope=_TRANSLATED_MESSAGES_ADAPTERS,
     ),
     # KBR-137 — OpenCode Go's four `/v1/responses` models are now servable.
     # The whole-protocol translate, the eight CC-only drops, the
@@ -1720,6 +1996,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.NOT_PROJECTABLE,),
         conditional=False,
         design_ref="§3.2.2 · §3.3.4 · KBR-137",
+        scope=("opencode_go",),
         not_projectable_reason=(
             "KBR-137 adds a fifth wire format — OpenAI Responses — that M2 does "
             "not name. Like P11/P12, the projection is what makes the formats "
@@ -1755,6 +2032,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         )),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
+        scope=("opencode_go",),
     ),
     MutationRow(
         id="P38",
@@ -1768,6 +2046,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("max_tokens"), c.extra_path("max_completion_tokens")),
         conditional=False,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
+        scope=("opencode_go",),
     ),
     MutationRow(
         id="P42",
@@ -1780,6 +2059,7 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("reasoning"),),
         conditional=True,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
+        scope=("opencode_go",),
     ),
 )
 
@@ -2181,3 +2461,185 @@ def unresolved_sites(rows: tuple[MutationRow, ...], symbols: frozenset[str]) -> 
         for site in row.site
         if site not in symbols
     )
+
+
+# --------------------------------------------------------------------------
+# The scope guard (KBR-139)
+# --------------------------------------------------------------------------
+
+
+class RegisterSourceError(AssertionError):
+    """Raised when ``providers/registry.py`` cannot be read as a registry.
+
+    Every failure mode here is a *silent* one if it returns an empty result
+    instead: a renamed ``_registry``, a dict rebuilt by a function call, or a
+    non-literal key would all leave :func:`scope_problems` passing over an
+    empty key set — and an empty key set rejects *nothing*, which is exactly
+    the no-op §6.2 forbids.  Mirrors :class:`RegisterMarkdownError`.
+    """
+
+
+def provider_registry(src_root: Path) -> dict[str, str]:
+    """Return the provider registry as ``key -> adapter class name``, read by AST.
+
+    The scope data claims knowledge of :data:`providers.registry._registry`'s
+    keys, and a specification that imported its subject could only ever agree
+    with it (the module docstring's rule, §3.3.1's independent-oracle rule) —
+    so the dict is read as **text** through :mod:`ast`, exactly as
+    :func:`defined_symbols` reads the rest of ``src/kitty``.
+
+    Args:
+        src_root: The ``src`` directory, whose children are the import roots.
+
+    Returns:
+        The registry mapping, e.g. ``{"anthropic": "AnthropicAdapter", …}``.
+
+    Raises:
+        RegisterSourceError: When ``kitty/providers/registry.py`` carries no
+            module-level ``_registry`` dict literal, when a key or class name
+            cannot be read as a literal, or when the dict is empty — never an
+            empty result, which would make the scope guard vacuous.
+    """
+    path = src_root / "kitty" / "providers" / "registry.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    for node in tree.body:
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_registry"
+            and isinstance(node.value, ast.Dict)
+        ):
+            registry: dict[str, str] = {}
+            for key_node, class_node in zip(node.value.keys, node.value.values, strict=True):
+                if key_node is None:
+                    raise RegisterSourceError(
+                        "registry.py's _registry contains a **-unpacking entry "
+                        "— every key must be a string literal so the AST reader "
+                        "can give it to scope_problems"
+                    )
+                try:
+                    key = ast.literal_eval(key_node)
+                except ValueError as exc:
+                    raise RegisterSourceError(
+                        f"registry.py's _registry key {ast.dump(key_node)!r} is not "
+                        f"a string literal ({exc.__class__.__name__})"
+                    ) from exc
+                if not isinstance(key, str):
+                    raise RegisterSourceError(
+                        f"registry key {key_node!r} is not a string literal"
+                    )
+                if not isinstance(class_node, ast.Name):
+                    raise RegisterSourceError(
+                        f"registry value for {key!r} is not a bare class name"
+                    )
+                registry[key] = class_node.id
+            if not registry:
+                raise RegisterSourceError("registry.py's _registry dict literal is empty")
+            return registry
+
+    raise RegisterSourceError(
+        "kitty/providers/registry.py no longer carries a module-level "
+        "_registry dict literal — the scope guard cannot read it"
+    )
+
+
+def scope_problems(
+    rows: tuple[MutationRow, ...],
+    registry: dict[str, str],
+    symbols: frozenset[str],
+) -> tuple[str, ...]:
+    """Report every way the rows' ``scope`` values are malformed.
+
+    Pure, and separate from the loop that applies it, so a deliberately bad row
+    can be handed to it — plan §1.4 requires the falsification case to run in
+    the suite.  Mirrors :func:`row_shape_problems` and :func:`unresolved_sites`:
+    return problems, never raise, so a test can hand this function a damaged
+    register on purpose.
+
+    Three checks per row, in order:
+
+    1. **Shape** — the scope names at least one entry, and the
+       :data:`ALL_PROVIDERS` sentinel is never mixed with keys (a mixed tuple
+       is two claims in one cell; whichever the reader honours, the other is a
+       lie).
+    2. **Key validity** — every non-sentinel entry is a real key of the
+       AST-read registry.  This is the deliverable's guard: a scope entry
+       naming a provider that does not exist is data nothing could ever
+       contradict on a run.
+    3. **Site ↔ scope** — every registry key whose adapter class is defined in
+       a file one of the row's sites names must appear in the scope.  This is
+       the cheap direction of the P8/P5a mismatch: a row whose site names
+       ``mimo.py`` cannot silently claim a scope without ``mimo``.  The check
+       is file-level; the class-aware tightening (a site naming one class of a
+       multi-class file, e.g. ``zai.py``, forcing only that class's key) is
+       recorded in the step file as a future change, declined while no live row
+       exercises the divergence.
+
+    Args:
+        rows: The register rows to check, normally :data:`REGISTER` or a
+            deliberately damaged subset.
+        registry: The output of :func:`provider_registry` — ``key -> class
+            name``.
+        symbols: The output of :func:`defined_symbols`, used to locate which
+            file defines each registry class.
+
+    Returns:
+        One message per problem, in row order.  Empty when every scope is well
+        formed.
+    """
+    # Map each registry class name to the providers file that defines it, so a
+    # site path like `kitty/providers/mimo.py:…` resolves to the keys that must
+    # be in scope.  A class entry is `path:ClassName` with no dot; methods and
+    # nested names carry dots and are skipped.
+    file_of_key: dict[str, str] = {}
+    # `sorted` so the mapping is deterministic even if two provider files
+    # ever define the same class name — frozenset iteration order is
+    # hash-seeded, and the guard's verdict must not vary with it.
+    sorted_symbols = sorted(symbols)
+    for key, class_name in registry.items():
+        for symbol in sorted_symbols:
+            path, separator, qualified = symbol.partition(":")
+            if separator and qualified == class_name and path.startswith("kitty/providers/"):
+                file_of_key[key] = path
+                break
+
+    problems: list[str] = []
+    for row in rows:
+        # Shape: non-empty, sentinel never mixed with keys.
+        if not row.scope:
+            problems.append(f"{row.id}: names no scope (KBR-139)")
+            continue
+        if ALL_PROVIDERS in row.scope and len(row.scope) > 1:
+            problems.append(
+                f"{row.id}: mixes the {ALL_PROVIDERS!r} sentinel with keys "
+                f"{[k for k in row.scope if k != ALL_PROVIDERS]!r} — the sentinel "
+                "is a single-element tuple or nothing"
+            )
+
+        # Key validity: every non-sentinel entry names a real registry key.
+        for key in row.scope:
+            if key != ALL_PROVIDERS and key not in registry:
+                problems.append(
+                    f"{row.id}: scope names {key!r}, which is no key of "
+                    "providers.registry._registry"
+                )
+
+        # Site ↔ scope: keys whose class file a site names must be in scope.
+        # The sentinel claims every adapter by construction, so a row carrying
+        # it is exempt from the file-level subset by design — the subset would
+        # be the whole key set.
+        if ALL_PROVIDERS in row.scope:
+            continue
+        site_files = {site.partition(":")[0] for site in row.site}
+        required = {
+            key for key, path in file_of_key.items() if path in site_files
+        }
+        missing = sorted(required - set(row.scope))
+        if missing:
+            problems.append(
+                f"{row.id}: site names {sorted(site_files & set(file_of_key.values()))!r}, "
+                f"which define {missing!r}, but scope omits them"
+            )
+
+    return tuple(problems)

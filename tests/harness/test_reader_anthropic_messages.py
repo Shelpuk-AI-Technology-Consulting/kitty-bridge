@@ -1857,3 +1857,52 @@ class TestNameRequired:
         tool_use = projected.conversation.turns[1].parts[0]
         assert isinstance(tool_use, c.ToolUse)
         assert tool_use.name == "get_stock_price"
+
+
+class TestDeclarationNameRequired:
+    """A ``tools[*]`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a tool nobody can name cannot be paired with its result or
+    addressed by a register row. KBR-279 landed the rule for the Ollama
+    readers, KBR-281 for the Anthropic invocation site; KBR-295 extends it
+    to the declaration side (§7.4.2 rule 7 row 2, the seven invocation
+    readers and the six declaration branches). The declaration branch's
+    pre-existing raise covered absent / non-string; ``""`` was the silent
+    gap KBR-295 closes.
+    """
+
+    @staticmethod
+    def _body_with_tool(name: Any) -> dict[str, Any]:
+        """Return an Anthropic body whose one ``tools[*]`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published schema calls required and no published example shows.
+        """
+        tool: dict[str, Any] = {"input_schema": {"type": "object"}}
+        if name is not None:
+            tool["name"] = name
+        return _minimal(tools=[tool])
+
+    def test_missing_tool_name_raises(self) -> None:
+        """A ``tools[*]`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            _read(self._body_with_tool(None))
+
+    def test_empty_tool_name_raises(self) -> None:
+        """A ``tools[*]`` with an empty ``name`` raises (KBR-295)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            _read(self._body_with_tool(""))
+
+    def test_non_string_tool_name_raises(self) -> None:
+        """A ``tools[*]`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            _read(self._body_with_tool(42))
+
+    def test_named_tool_control_is_clean(self) -> None:
+        """Control — the published tool projects cleanly."""
+        projected = _read(self._body_with_tool("get_weather"))
+
+        assert projected.conversation.tools[0].name == "get_weather"
+        assert projected.residual == {}

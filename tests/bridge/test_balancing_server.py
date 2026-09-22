@@ -671,13 +671,17 @@ class TestBalancingAllCustomTransport:
 
         from kitty.profiles.schema import Profile
 
-        # Build SSE response that mimics Codex backend output
+        # Build the CC-SSE stream real BedrockAdapter.stream_request writes
+        # via _translate_stream_event/_make_sse_chunk (KBR-293 corrected this
+        # stub from a Responses-SSE shape, which pinned what the branch
+        # accepted, not what Bedrock emits).
         sse_events = [
-            b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n',
-            (
-                b'data: {"type":"response.output_item.done",'
-                b'"item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}\n\n'
-            ),
+            b'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"test-model",'
+            b'"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"test-model",'
+            b'"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"test-model",'
+            b'"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
             b"data: [DONE]\n\n",
         ]
 
@@ -738,13 +742,19 @@ class TestBalancingAllCustomTransport:
 
         from kitty.profiles.schema import Profile
 
-        # Build SSE response that mimics Codex backend output
+        # Build the CC-SSE stream Bedrock's real ``stream_request`` writes
+        # (KBR-293 corrected the sibling stubs to this shape: the
+        # Responses-SSE stub pinned what the branch accepted, not what real
+        # Bedrock emits — and KBR-297's judge-first gate parses it to an
+        # empty completion and ladders it, so the stale stub could only
+        # pass on the fabricated fallback text).
         sse_events = [
-            b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n',
-            (
-                b'data: {"type":"response.output_item.done",'
-                b'"item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}\n\n'
-            ),
+            b'data: {"id":"resp_test","object":"chat.completion.chunk","created":0,"model":"model-0",'
+            b'"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n',
+            b'data: {"id":"resp_test","object":"chat.completion.chunk","created":0,"model":"model-0",'
+            b'"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+            b'data: {"id":"resp_test","object":"chat.completion.chunk","created":0,"model":"model-0",'
+            b'"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
             b"data: [DONE]\n\n",
         ]
 
@@ -856,14 +866,11 @@ class TestBalancingAllCustomTransport:
         NoStreamProvider = self.NoStreamProvider
         stream_provider = BedrockAdapter()
 
-        async def _fake_stream(req, write):
-            await write(b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n')
-            await write(
-                b'data: {"type":"response.output_text.delta","delta":"hello","response":{"id":"resp_test"}}\n\n'
-            )
-            await write(b"data: [DONE]\n\n")
-
-        stream_provider.stream_request = AsyncMock(side_effect=_fake_stream)
+        # KBR-297: the stub must write what Bedrock's real ``stream_request``
+        # writes — CC-SSE (the KBR-293 corrected-stub convention; the old
+        # Responses-SSE stub parsed to an empty completion, which the
+        # judge-first gate ladders instead of delivering).
+        stream_provider.stream_request = AsyncMock(side_effect=self._fake_hello_cc_stream)
 
         backends = [
             (
@@ -1054,26 +1061,16 @@ class TestBalancingAllCustomTransport:
     # cap test proves the per-request hop cap surfaces the route's
     # cross_class_exhaustion terminal event instead of looping.
 
-    async def _fake_hello_stream(self, req, write):
-        """Emit a Responses-API SSE carrying the text ``hello`` — the content oracle.
-
-        The Responses and Gemini custom-transport branches pipe provider
-        bytes through their own wire translators, which read Responses-SSE
-        — the shape this stub emits. The Chat Completions branch instead
-        parse-and-synthesises (``parse_stream_to_cc_response`` dispatch,
-        KBR-287) and needs :meth:`_fake_hello_cc_stream`.
-        """
-        await write(b'data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}\n\n')
-        await write(b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n')
-        await write(b"data: [DONE]\n\n")
-
     async def _fake_hello_cc_stream(self, req, write):
         """Emit a CC-SSE stream carrying the text ``hello`` — the content oracle.
 
         Shaped as what ``BedrockAdapter.stream_request`` actually writes via
         ``_translate_stream_event``/``_make_sse_chunk``: Chat Completions
-        SSE chunks, which ``BedrockAdapter.parse_stream_to_cc_response``
-        (KBR-287 review round 1) parses into the response the branch's
+        SSE chunks on every route (KBR-293 corrected the sibling stubs to
+        this shape — the Responses-SSE stub the two sibling tests used
+        pre-KBR-293 pinned what the branch accepted, not what real Bedrock
+        emits). ``BedrockAdapter.parse_stream_to_cc_response`` (KBR-287
+        review round 1) parses it into the response the sibling branches'
         judge-first hold judges.
         """
         chunk = {
@@ -1140,7 +1137,7 @@ class TestBalancingAllCustomTransport:
     @pytest.mark.asyncio
     async def test_responses_stream_cross_class_dispatch(self):
         """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/responses)."""
-        backends, server, stream_provider = self._sibling_pool(self._fake_hello_stream)
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_cc_stream)
 
         # Pin the weighted draw: the plain backend is drawn first and the
         # non-2xx failover selects the custom-transport one (see KBR-249's
@@ -1184,7 +1181,7 @@ class TestBalancingAllCustomTransport:
     @pytest.mark.asyncio
     async def test_gemini_stream_cross_class_dispatch(self):
         """A plain-POST failover onto a custom-transport backend re-dispatches (KBR-254, /v1/gemini)."""
-        backends, server, stream_provider = self._sibling_pool(self._fake_hello_stream)
+        backends, server, stream_provider = self._sibling_pool(self._fake_hello_cc_stream)
         draw = iter(chain([0], repeat(1)))
 
         def _deterministic_draw(self=server, *, require_streaming: bool = False):

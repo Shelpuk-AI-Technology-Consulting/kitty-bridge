@@ -501,8 +501,13 @@ class TestErrorEventBeforeContent:
         assert status == 200
         assert body == _CONTENT, "the client must receive the retry's bytes, and nothing of the error"
 
-    async def test_balancing_retries_without_quarantine_or_success_credit(self):
-        """Selection among healthy backends is random, so the script follows arrival order, not URL."""
+    async def test_balancing_retries_quarantine_the_erroring_backend(self):
+        """Selection among healthy backends is random, so the script follows arrival order, not URL.
+
+        KBR-99 (S13): the parity fix with the CC-wire path means the erroring
+        backend now carries the stream-error cooldown; the retry picks the
+        other backend, and only that backend counts as a success.
+        """
         replies = iter([_MESSAGE_START + _ERROR_EVENT, _CONTENT])
 
         def _next_reply(url, **kwargs):
@@ -520,9 +525,24 @@ class TestErrorEventBeforeContent:
         assert posts == 2
         assert (status, body) == (200, _CONTENT)
         assert server._session_stats()["attempts"] == 2, "each retry must draw a backend again"
-        assert all(h["healthy"] for h in server._backend_health), "an errored reply is retried, not quarantined"
-        # The errored attempt is no success; the retry that answered is: exactly one reset.
-        assert sorted(h["transport_error_count"] for h in server._backend_health) == [0, 1]
+        # Parity: exactly the backend that errored carries the cooldown; the
+        # other stays healthy. Selection is random so we count, not index.
+        quarantined = [h for h in server._backend_health if not h["healthy"]]
+        healthy = [h for h in server._backend_health if h["healthy"]]
+        assert len(quarantined) == 1, (
+            "the erroring backend must carry the stream cooldown"
+        )
+        assert len(healthy) == 1, "the success backend stays healthy"
+        # The errored attempt is no success; the retry that answered is: the
+        # healthy backend's reset on success, the quarantined backend's reset
+        # by the stream-error charge — a short cooldown without an explicit
+        # failure_kind, which `_mark_backend_unhealthy`'s backward-compat rule
+        # treats as a "stream" error (increments stream_error_count, zeroes
+        # transport_error_count). Both end at zero.
+        assert [h["transport_error_count"] for h in server._backend_health] == [0, 0]
+        # The stream branch's own counter: exactly the charge incremented it,
+        # and the success reset the healthy backend's to zero.
+        assert sorted(h["stream_error_count"] for h in server._backend_health) == [0, 1]
 
     async def test_exhaustion_delivers_the_provider_payload(self):
         budget = (server_module._MAX_RETRIES + 1) + len(server_module._EMPTY_FINAL_DELAYS)
@@ -554,9 +574,20 @@ class TestErrorEventBeforeContent:
         assert "Kitty Bridge" in error["error"]["message"], "Q9: kitty's fallback wording names the product"
         assert "error" in error["error"]["message"], "the wording reports an error, not an empty reply"
 
-    async def test_balancing_exhaustion_never_quarantines(self):
-        budget = (server_module._MAX_RETRIES + 1) * 2 + len(server_module._EMPTY_FINAL_DELAYS)
-        assert budget == 10, "the literal pins the ladder; the derivation above follows the constants"
+    async def test_balancing_exhaustion_quarantines_persistent_errorers(self):
+        """KBR-99 (S13): the parity cooldown ends the ladder after the pool is erroring.
+
+        The pre-fix pin asserted the empty ladder's no-quarantine health
+        model: a balancing pool walked its full 10-attempt budget even with
+        every backend erroring pre-content. The parity fix charges the
+        stream-error cooldown on each erroring backend, and ``_any_healthy_backend()``
+        going False ends the ladder — the attempt count drops from 10 to
+        one selection per backend (the pool's size), then the D4
+        ``upstream_error`` 502 is delivered. This is the desired consequence
+        of parity: the health model now protects a fully-erroring pool
+        from the worst-case hammering the KBR-241 D2 amendment left in.
+        """
+        # The pre-fix budget: (server_module._MAX_RETRIES + 1) * 2 + len(_EMPTY_FINAL_DELAYS) == 10.
         server = _balancing_server()
         for health in server._backend_health:
             health["transport_error_count"] = 1
@@ -566,11 +597,25 @@ class TestErrorEventBeforeContent:
                 m.post(_upstream(i), body=error_reply, headers=_SSE_HEADERS, repeat=True)
             status, body = await _stream(server)
             posts = _posts(m)
-        assert posts == budget == 10, f"expected the whole {budget}-attempt ladder, saw {posts}"
+        # The pool is two backends; with the cooldown charged per attempt, both
+        # are quarantined after two draws and the ladder ends: attempt 2's
+        # `_any_healthy_backend()` is False and the final-delay index for
+        # attempt 2 falls outside `_EMPTY_FINAL_DELAYS`, so `retry` goes False.
+        # The pre-fix budget literal is kept above so the change is auditable.
+        assert posts == 2, (
+            f"one draw per backend, then the cooldown empties the pool; saw {posts}"
+        )
         assert status == 502
         assert json.loads(body)["error"]["reason"] == "upstream_error"
-        assert all(h["healthy"] for h in server._backend_health), "the empty ladder's health model, not quarantine"
-        assert [h["transport_error_count"] for h in server._backend_health] == [1, 1]
+        assert all(not h["healthy"] for h in server._backend_health), (
+            "every backend the ladder drew and found erroring carries the cooldown"
+        )
+        # Each stream-error charge resets transport_error_count: the charge passes a
+        # short cooldown without a failure_kind, and `_mark_backend_unhealthy`'s
+        # backward-compat rule treats that as a "stream" error (increments
+        # stream_error_count, zeroes transport_error_count). The pre-test preset of 1
+        # is cleared on every backend by the charge.
+        assert [h["transport_error_count"] for h in server._backend_health] == [0, 0]
 
     async def test_truncation_before_an_error_still_fails_at_once(self):
         """D3 keeps precedence: a stop reason that preceded the error governs the held end."""

@@ -929,14 +929,27 @@ def decode_arguments(raw: Any, path: str, residual: dict[str, Any]) -> Mapping[s
     **Only an absent or blank value is silently empty.**  An absent ``arguments``
     honestly means *no arguments*, which is why it does not residualise the way
     an absent tool ``name`` does even though the schema requires both — except
-    where the tool-call readers do not follow that contrast.  The four strict
-    readers (Chat Completions, Gemini, Anthropic, Ollama) raise on absent /
-    empty / non-string tool names — Gemini and Ollama via the shared
-    ``_require_tool_call_name`` helper, Chat Completions and Anthropic inline
-    at the call site (the settled §7.4.2 rule 7 row 2 posture, KBR-281);
-    Bedrock Converse request, Responses request, and Gemini declarations still
-    residualise a missing-name leaf on the field's own path, with the part
-    projected.  The test generalises to every required field: *can the
+    where the tool-call readers do not follow that contrast.  The tool ``name``
+    raises on absent / empty / non-string at **every** strict tool-name site:
+    the seven invocation readers (Chat Completions, Gemini, Anthropic, Ollama,
+    Bedrock Converse request, Responses request, Responses reply) and the six
+    declaration branches (Gemini ``FunctionDeclaration``, Responses
+    ``FunctionTool``, Converse ``toolSpec``, Chat Completions
+    ``function.name``, Anthropic ``tools[].name``, Ollama
+    ``tools[].function.name``) — plus the Responses ``custom`` / built-in /
+    ``mcp`` declaration sub-branches, which raise on the empty shape only
+    (absent / null / non-string keep the kind-derived label posture there,
+    since built-in declarations carry no ``name`` field at all) — §7.4.2
+    rule 7 row 2, settled KBR-281 + KBR-292 + KBR-295 + KBR-299.  Gemini,
+    Ollama, Bedrock Converse, and both Responses directions route through
+    the per-module ``_require_tool_call_name``
+    helper; Chat Completions and Anthropic raise inline at the call site.
+    Converse's
+    declaration branch keeps the residualise+omit posture for the
+    ``inputSchema`` field (a tool with a bad schema is not produced), but
+    raises on a bad ``name`` — the asymmetry is pinned by
+    ``TestDeclarationNameRequired::test_input_schema_failure_still_omits_the_declaration``
+    on the Converse reader (KBR-295 AC-5).  The test generalises to every required field: *can the
     projection represent the absence losslessly?*  ``{}`` is a true statement
     about a call — seen and classified, the same ground on which
     :data:`STOP_REASONS` gives ``other`` its escape instead of the residual.

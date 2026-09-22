@@ -571,8 +571,13 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
     for index, tool in enumerate(value):
         if not isinstance(tool, dict):
             raise c.UnreadableBodyError(f"tools[{index}] must be an object, got {type(tool).__name__}")
-        if not isinstance(tool.get("name"), str):
-            raise c.UnreadableBodyError(f"tools[{index}] must carry a name")
+        # KBR-281's strict-name raise covered absent / non-string; KBR-295
+        # closes the ``""`` gap (``contract.decode_arguments``): a tool
+        # nobody can name cannot be paired with its result or addressed by
+        # a register row.
+        name = tool.get("name")
+        if not isinstance(name, str) or not name:
+            raise c.UnreadableBodyError(f"tools[{index}].name must be a non-empty string name")
 
         # A wrongly-typed leaf residualises rather than coercing or raising.
         # `_freeze_mapping` calls `dict()` on whatever it is handed, which turns

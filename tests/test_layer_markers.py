@@ -138,6 +138,13 @@ class TestDefaultLayerForPath:
             # yet and is visible to T-K9 rather than joining the Fast gate
             # uninvited.
             ("tests/acceptance/test_acceptance.py", "acceptance"),
+            # T-I5: the agent-smoke layer is a path default like any other.
+            # §6.4.2 launches a real pinned Claude Code binary there; the
+            # category slot was already reserved in LAYER_MARKERS and
+            # RESOURCE_DEPENDENT_LAYERS, and this row keeps the binary's
+            # tests out of the Fast gate until T-K10 positively selects
+            # the category.
+            ("tests/agent_smoke/test_claude_startup.py", "agent_smoke"),
             # The negative case: the prefix must not over-match a sibling
             # directory whose name merely shares characters with it.
             ("tests/acceptance_old/test_x.py", "l1"),

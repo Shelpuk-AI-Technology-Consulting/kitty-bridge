@@ -56,3 +56,29 @@ side-by-side mutation testing is the divergence guard.
 translator extension the widening would regress the translated stream cells from "honest
 retry terminal" to "silent empty turn / non-string on the wire", so the translator work is
 not a separate ticket.
+
+## Implementation notes (2026-09-18 → 2026-09-20, PR #234, merged 30a91a0)
+
+- Delivered in five substantive commits: `9b8ebd9` (predicates + translator + scope +
+  docs), `5c3809f` (reviewer doc nits), `2ab3c82` (aggregator fixture seeds for the new
+  group — caught by CI on all six legs, the per-group fixtures needed a seeded
+  `content_classifiers` mutant), `534c81d` (the auto-reviewer's critical: sibling
+  translators `ResponsesTranslator` / `GeminiTranslator` carry the same consumer-side
+  gap — list `content` on `/v1/responses` non-stream was a guaranteed 500 via
+  `_strip_thinking_tags`; both extended with per-translator `_extract_text_parts` +
+  refusal-as-text + legacy-`function_call` onto each translator's tool path), `933eedc`
+  (handler comment names all three translators; Responses legacy-`function_call`
+  non-string `arguments` serialises via `json.dumps` instead of `str()`'s Python repr).
+  `0b6486a` merged main (KBR-287's custom-transport hold + KBR-281 landed mid-flight;
+  three doc files resolved by hand — §5.4 keeps both records, KBR-287's "until KBR-285
+  lands" sentence retired).
+- The design review (2 rounds) and code review each ran as subagents; the auto-reviewer
+  ran five rounds on the PR — round-5 returned an empty findings array. The one
+  declined-with-rationale item: image parts in list-typed content are dropped on the
+  translated routes (no image-delta equivalent on any client-facing output wire; raw-CC
+  delivers verbatim). Disposition: thread reply + candidate scope on KBR-252.
+- The mutmut baseline row did **not** land: three scoped runs stalled in the clean-test
+  phase with the KBR-266 hang signature (asyncio asleep in `ep_poll`, open sockets, no
+  pytest-timeout). The registry row, pragma removal, guard generalisation, §6.1 row and
+  `also_copy += openapi` all landed; only the measured score is pending. Candidate scope
+  on KBR-91 (T-H3), which already owns the thresholds this row feeds.

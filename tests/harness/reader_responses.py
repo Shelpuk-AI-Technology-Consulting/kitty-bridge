@@ -273,6 +273,45 @@ def _mcp_tool_name(server_label: str) -> str:
     return f"mcp:{server_label}"
 
 
+def _require_tool_call_name(name: Any, path: str) -> str:
+    """Validate and return a tool-call's ``name``; raise on absent / empty / wrong type.
+
+    The strict name-required rule shared by the request reader's
+    :meth:`ResponsesProjection._read_function_call`, the reply projection's
+    ``function_call`` branch, and — since KBR-295 — the ``FunctionTool``
+    declaration branch: one spelling of the strict rule for both directions
+    and the declaration path, per §7.4.1's within-module anti-drift rule,
+    mirroring Ollama's :func:`_require_tool_call_name`
+    (``reader_ollama.py:1007``) so the readers' strict-name helpers grep
+    together. The module also carries a **second**, deliberately narrower
+    inline spelling in :meth:`ResponsesProjection._read_tool`'s
+    non-``function`` fallback (KBR-299): an empty-only raise that fires
+    before the kind dispatch. The strict and narrow spellings share the
+    same error-message shape (``f"{path} must be a non-empty string name"``).
+    ``""`` for a name is not a lossless projection
+    (``contract.decode_arguments``): it claims a tool *named* empty-string,
+    and a call nobody can name cannot be paired with its result or
+    addressed by a register row (KBR-281 settled four invocation readers;
+    KBR-292 extended it to the remaining invocations; KBR-295 closed the
+    ``FunctionTool`` declaration branch; KBR-299 closed the ``custom`` /
+    built-in / ``mcp`` sub-branches with the narrower inline spelling).
+
+    Args:
+        name: The raw ``name`` value.
+        path: The name's path from the body root, used as the error-message
+            prefix.
+
+    Returns:
+        The validated, non-empty name.
+
+    Raises:
+        UnreadableBodyError: When ``name`` is absent, empty, or not a string.
+    """
+    if not isinstance(name, str) or not name:
+        raise c.UnreadableBodyError(f"{path} must be a non-empty string name")
+    return name
+
+
 class ResponsesProjection:
     """Reads an OpenAI Responses request into the wire-independent form.
 
@@ -1028,23 +1067,20 @@ class ResponsesProjection:
 
         Returns:
             The projected tool call.
+
+        Raises:
+            UnreadableBodyError: When ``name`` is absent, empty, or not a
+                string (KBR-292; §7.4.2 rule 7 row 2, the strict posture).
         """
-        # A wrongly-typed id or name is residualised rather than coerced: `str(7)`
-        # and `str(None)` invent a value the agent never sent, and `verify_total`
+        # A wrongly-typed id is residualised rather than coerced: `str(7)`
+        # invents a value the agent never sent, and `verify_total`
         # cannot see a nested coercion because `consumed` is top-level only.
         call_id = item.get("call_id")
         if call_id is not None and not isinstance(call_id, str):
             residual[c.residual_key(path, "call_id")] = call_id
             call_id = None
 
-        # `name` is required by `FunctionToolCall` and, unlike the id, there is
-        # no format that omits it — a call nobody can name cannot be paired with
-        # its result or addressed by a register row. So `null` and absent are
-        # residualised too, not just a wrong type.
-        name = item.get("name")
-        if not isinstance(name, str):
-            residual[c.residual_key(path, "name")] = name
-            name = ""
+        name = _require_tool_call_name(item.get("name"), c.residual_key(path, "name"))
 
         return c.ToolUse(
             name=name,
@@ -1209,6 +1245,16 @@ class ResponsesProjection:
 
         Returns:
             The projected declaration.
+
+        Raises:
+            UnreadableBodyError: When a ``function`` declaration's ``name``
+                is absent, empty, or not a string — via
+                :func:`_require_tool_call_name` (§7.4.2 rule 7 row 2,
+                KBR-295). When a ``custom`` / built-in / ``mcp``
+                declaration's ``name`` is the empty string — the inline
+                empty-only check (KBR-299), narrower than the helper
+                because absent / null / non-string keep the kind-derived
+                label posture on these schema-optional sub-branches.
         """
         kind = entry.get("type")
 
@@ -1228,16 +1274,13 @@ class ResponsesProjection:
                 residual[c.residual_key(path, "parameters")] = parameters
                 parameters = None
 
-            # Same rule as `_read_function_call`, and for a stronger reason:
-            # `FunctionTool.required` includes `name`, and §3.3.1a addresses
-            # tools by name with no index to fall back on. Two unnamed
+            # `FunctionTool.required` includes `name`, and two unnamed
             # declarations would both sit at `conversation.tools[]` — which
             # `path_matches` accepts as the legacy wildcard spelling, so a
             # register row would match them by accident rather than by name.
-            name = entry.get("name")
-            if not isinstance(name, str):
-                residual[c.residual_key(path, "name")] = name
-                name = ""
+            # The strict raise (§7.4.2 rule 7 row 2) settled for the
+            # invocations covers declarations too (KBR-295).
+            name = _require_tool_call_name(entry.get("name"), c.residual_key(path, "name"))
 
             strict = entry.get("strict")
             return c.ToolDecl(
@@ -1256,6 +1299,14 @@ class ResponsesProjection:
         # servers named by bare `type` would both occupy `conversation.tools[mcp]`,
         # a collision §3.3.1a's by-name addressing cannot recover from.
         name = entry.get("name")
+        # `""` is never a legal wire value, and a declaration nobody can name
+        # cannot be paired with its result or addressed by a register row
+        # (`contract.decode_arguments`). Absent / null / non-string keep the
+        # kind-derived labels — an absent label is wire-derived identity
+        # (`str(kind)` here, `mcp:<server_label>` below), a different loss
+        # profile than a value that names nothing (§7.4.2 rule 7 row 2, KBR-299).
+        if isinstance(name, str) and not name:
+            raise c.UnreadableBodyError(f"{c.residual_key(path, 'name')} must be a non-empty string name")
         if kind == "mcp":
             label = entry.get("server_label")
             name = _mcp_tool_name(label) if isinstance(label, str) else "mcp"
@@ -1550,12 +1601,14 @@ class ResponsesReplyProjection:
         if kind == "message":
             return cls._read_message_item(item, prefix, residual)
         if kind == "function_call":
-            if not isinstance(item.get("name"), str):
-                raise c.UnreadableBodyError(f"{prefix}.name must be a string")
+            # §7.4.2 rule 7 row 2 — the strict posture (KBR-292): absent,
+            # empty, and non-string names all raise, matching the request
+            # direction and the other strict readers.
+            name = _require_tool_call_name(item.get("name"), f"{prefix}.name")
             _residualise(item, set(cls._FUNCTION_CALL_KEYS), prefix, residual)
             return (
                 c.ToolUse(
-                    name=item["name"],
+                    name=name,
                     arguments=c.decode_arguments(
                         item.get("arguments"), f"{prefix}.arguments", residual
                     ),

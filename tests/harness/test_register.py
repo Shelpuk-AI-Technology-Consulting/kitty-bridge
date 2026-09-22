@@ -128,10 +128,10 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 73 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 79 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """25 bridge-level rows less the withdrawn M13, plus 48 provider-level.
+        """27 bridge-level rows less the withdrawn M13, plus 52 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
@@ -144,11 +144,13 @@ class TestTheRowsThemselves:
         parallel-false omission), P35 (G35 omitted legal tool_choice). The +4
         over the pre-KBR-137 count is P36/P37/P38/P42, the OpenCode Go
         Responses-route mutations (whole-body translate, eight CC-only drops,
-        the max_tokens rename, the reasoning injection). All literals are the
+        the max_tokens rename, the reasoning injection). The +2 over the
+        pre-KBR-271 count is M9a/M9b, the two cache-breakpoint drops the M9
+        fallback converter performs (KBR-271). All literals are the
         no-reflow damage test — a future change that drops a row or adds one
         without updating the guard fails loudly.
         """
-        assert len(r.REGISTER) == 77
+        assert len(r.REGISTER) == 79
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -178,6 +180,7 @@ class TestTheRowsThemselves:
             assert row.site, f"{row.id} names no site"
             assert row.paths, f"{row.id} names no path"
             assert row.design_ref.startswith("§"), f"{row.id} does not point back at the design"
+            assert row.scope, f"{row.id} names no scope (KBR-139)"
 
     def test_every_site_is_addressed_as_a_file_and_a_qualified_name(self) -> None:
         """A bare method name resolves in twelve provider modules at once.
@@ -706,3 +709,136 @@ class TestTheTriggerArrangingBy:
         assert "responses" in doc.lower(), (
             "the docstring must name the inbound wire shape that decides the trigger"
         )
+
+
+def _row(row_id: str) -> r.MutationRow:
+    """Return the live row with ``row_id``, or fail the test loudly."""
+    for row in r.REGISTER:
+        if row.id == row_id:
+            return row
+    raise AssertionError(f"no live row with id {row_id!r}")
+
+
+class TestTheScopeColumn:
+    """The scope data is the reviewed record of where each row is reachable (KBR-139).
+
+    Five load-bearing derived facts are pinned here with the reason alongside
+    each, so a future row edit that silently drifts a scope value fails loudly
+    rather than surfacing only as an oracle breach on a T-D9 run.
+    """
+
+    def test_the_sentinel_matches_any_provider(self) -> None:
+        """``(ALL_PROVIDERS,)`` is the "every provider" value the deliverable names."""
+        sentinel_row = _row("M1")  # any sentinel row; M1 is the example.
+        assert r.row_is_in_scope(sentinel_row, "anthropic")
+        assert r.row_is_in_scope(sentinel_row, "openai_subscription")
+        # The sentinel interpretation is "sentinel IN scope", not "key IS sentinel".
+        assert r.row_is_in_scope(sentinel_row, r.ALL_PROVIDERS)
+
+    def test_an_explicit_scope_matches_only_its_members(self) -> None:
+        """A non-sentinel tuple is a set membership test, not a substring match."""
+        explicit_row = _row("P9b")  # ("mimo",)
+        assert r.row_is_in_scope(explicit_row, "mimo")
+        assert not r.row_is_in_scope(explicit_row, "kimi")
+        assert not r.row_is_in_scope(explicit_row, "anthropic")
+        assert not r.row_is_in_scope(explicit_row, r.ALL_PROVIDERS)
+
+    def test_p8_scope_is_exactly_its_four_callers(self) -> None:
+        """P8's base-class site is reached by exactly four adapters (ticket's own example).
+
+        ``ProviderAdapter._inject_empty_reasoning_content`` is called from
+        ``kimi.py:95``, ``custom_openai.py:105``, and ``zai.py:79``
+        (the ``_ZaiBase`` whose two subclasses are ``ZaiRegularAdapter`` and
+        ``ZaiCodingAdapter``). Over-scoping would oblige T-D8 to demand nineteen
+        complement cases that cannot exist.
+        """
+        assert _row("P8").scope == ("kimi", "custom_openai", "zai_regular", "zai_coding_cc")
+
+    def test_p5a_scope_is_the_five_adapter_delegation_family(self) -> None:
+        """``AnthropicAdapter.translate_to_upstream`` is reached via four delegators.
+
+        ``super()`` delegation at ``custom_anthropic.py:97``,
+        ``minimax_token.py:135``, ``zai_anthropic.py:91``, and the explicit
+        ``AnthropicAdapter.translate_to_upstream(self, …)`` at
+        ``opencode.py:882`` for ``opencode_go``'s Messages-routed models add up
+        to five adapters the base site reaches.
+        """
+        assert _row("P5a").scope == r._ANTHROPIC_FAMILY
+        assert r._ANTHROPIC_FAMILY == (
+            "anthropic",
+            "custom_anthropic",
+            "minimax_token",
+            "zai_coding",
+            "opencode_go",
+        )
+
+    def test_m16_excludes_the_hardcoded_native_adapters(self) -> None:
+        """MessagesTranslator is skipped on the two hardcoded-native adapters.
+
+        The /v1/messages handler (``server.py:5048``) skips
+        :class:`MessagesTranslator` when ``self._active_provider.use_native_messages``
+        is true. ``custom_anthropic`` and ``zai_coding`` hardcode it true;
+        ``minimax_token`` is profile-driven and defaults off, so it stays in.
+        Twenty-one adapters. The constant is pinned against a literal in
+        addition to the row's agreement with it (the M9a posture): the
+        site↔scope subset check cannot see this row — its site is a bridge
+        file, not a providers file — so a swap inside the 21-key tuple would
+        otherwise flip row and test together and still pass.
+        """
+        assert set(r._TRANSLATED_MESSAGES_ADAPTERS) == {
+            "anthropic",
+            "azure",
+            "bedrock",
+            "byteplus",
+            "custom_openai",
+            "fireworks",
+            "google_aistudio",
+            "kimi",
+            "mimo",
+            "minimax",
+            "minimax_token",
+            "novita",
+            "ollama",
+            "ollama_cloud",
+            "openai",
+            "openai_subscription",
+            "openrouter",
+            "opencode_go",
+            "vertex",
+            "zai_coding_cc",
+            "zai_regular",
+        }
+        m16_scope = set(_row("M16").scope)
+        assert r.ALL_PROVIDERS not in m16_scope
+        assert "custom_anthropic" not in m16_scope
+        assert "zai_coding" not in m16_scope
+        assert "minimax_token" in m16_scope
+        assert len(m16_scope) == 21
+
+    def test_m9a_is_reachable_only_on_the_native_adapters(self) -> None:
+        """``_convert_native_to_cc_format`` runs only behind the native flag.
+
+        Three adapters — ``custom_anthropic``, ``minimax_token``, ``zai_coding``
+        — have ``use_native_messages`` true. ``anthropic`` is *not* one:
+        ``AnthropicAdapter`` inherits the base property, which returns False.
+        The constant is pinned against a literal *in addition* to the row's
+        agreement with it, so a future edit that changes
+        ``_NATIVE_MESSAGES_ADAPTERS`` cannot flip the row and this test
+        together and still pass (the M16 test's posture).
+        """
+        assert set(r._NATIVE_MESSAGES_ADAPTERS) == {
+            "custom_anthropic",
+            "minimax_token",
+            "zai_coding",
+        }
+        assert _row("M9a").scope == r._NATIVE_MESSAGES_ADAPTERS
+        assert "anthropic" not in r._NATIVE_MESSAGES_ADAPTERS
+
+    def test_p4_excludes_the_custom_transport_subscription(self) -> None:
+        """``openai_subscription``'s custom transport never reaches translate_to_upstream.
+
+        §6.2.3 records that on ``openai_subscription`` the request path
+        never executes ``translate_to_upstream``; ``P4`` is therefore
+        ``openai`` only, not the inherited ``openai_subscription``.
+        """
+        assert _row("P4").scope == ("openai",)

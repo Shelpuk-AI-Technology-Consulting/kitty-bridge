@@ -1167,18 +1167,218 @@ class TestFunctionCall:
 
         assert projected.residual == {"input[0].arguments": {"a": 1}}
 
-    def test_a_wrongly_typed_call_id_or_name_residualises_rather_than_being_coerced(self) -> None:
-        """`str(7)` and `str(None)` invent a value the agent never sent.
+    def test_a_wrongly_typed_call_id_residualises_rather_than_being_coerced(self) -> None:
+        """`str(7)` invents a value the agent never sent.
 
         `verify_total` cannot see a nested coercion, because `consumed` covers
-        top-level keys only — so a silent `"None"` would be a projection the
-        oracle trusts and nobody can falsify.
+        top-level keys only — so a silent `"7"` would be a projection the
+        oracle trusts and nobody can falsify. (The wrongly-typed *name* half
+        this test once carried moved to `TestNameRequired` — KBR-292 settled
+        that posture on raise, §7.4.2 rule 7 row 2.)
         """
         projected = r.ResponsesProjection().read_request(
-            captured({"input": [{"type": "function_call", "call_id": 7, "name": None, "arguments": "{}"}]})
+            captured({"input": [{"type": "function_call", "call_id": 7, "name": "ping", "arguments": "{}"}]})
         )
 
-        assert set(projected.residual) == {"input[0].call_id", "input[0].name"}
+        assert set(projected.residual) == {"input[0].call_id"}
+
+
+class TestNameRequired:
+    """A ``function_call`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers, KBR-281 for Chat Completions / Gemini / Anthropic;
+    KBR-292 extends it here (§7.4.2 rule 7 row 2, seven strict readers).
+    The ``FunctionTool`` declaration branch raises too via the same helper
+    since KBR-295 closed the deliberate sibling.
+    """
+
+    @staticmethod
+    def _body_with_function_call(name: Any) -> dict[str, Any]:
+        """Return a Responses body whose one ``function_call`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published schema calls required and no published example shows.
+        """
+        call: dict[str, Any] = {
+            "type": "function_call",
+            "call_id": "call_1",
+            "arguments": '{"city": "Toronto"}',
+        }
+        if name is not None:
+            call["name"] = name
+        return {"input": [call]}
+
+    def test_missing_function_call_name_raises(self) -> None:
+        """A ``function_call`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"input\[0\].name"):
+            project(self._body_with_function_call(None))
+
+    def test_empty_function_call_name_raises(self) -> None:
+        """A ``function_call`` with an empty ``name`` raises (KBR-292)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"input\[0\].name"):
+            project(self._body_with_function_call(""))
+
+    def test_non_string_function_call_name_raises(self) -> None:
+        """A ``function_call`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"input\[0\].name"):
+            project(self._body_with_function_call(42))
+
+    def test_named_function_call_control_is_clean(self) -> None:
+        """Control — a named ``function_call`` projects cleanly."""
+        projected = project(self._body_with_function_call("get_weather"))
+
+        tool_use = projected.conversation.turns[0].parts[0]
+        assert isinstance(tool_use, c.ToolUse)
+        assert tool_use.name == "get_weather"
+        assert tool_use.arguments == {"city": "Toronto"}
+        assert tool_use.id == "call_1"
+
+
+class TestDeclarationNameRequired:
+    """A ``FunctionTool`` whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a tool nobody can name cannot be paired with its result or
+    addressed by a register row. KBR-279 landed the rule for the Ollama
+    readers, KBR-281 for Chat Completions / Gemini / Anthropic invocations,
+    KBR-292 for the remaining invocation readers; KBR-295 extends it to the
+    declaration side (§7.4.2 rule 7 row 2, the seven invocation readers and
+    the six declaration branches). The
+    residualise-and-still-project posture that KBR-281 left deliberately open
+    on the declaration branches is now settled on the strict-raise rule.
+    """
+
+    @staticmethod
+    def _body_with_function_tool(name: Any) -> dict[str, Any]:
+        """Return a Responses body whose one ``FunctionTool`` carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published examples never show and the schema calls required.
+        """
+        tool: dict[str, Any] = {"type": "function", "parameters": {}}
+        if name is not None:
+            tool["name"] = name
+        return {"input": "hi", "tools": [tool]}
+
+    def test_missing_function_tool_name_raises(self) -> None:
+        """A ``FunctionTool`` with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_function_tool(None))
+
+    def test_empty_function_tool_name_raises(self) -> None:
+        """A ``FunctionTool`` with an empty ``name`` raises (KBR-295)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_function_tool(""))
+
+    def test_non_string_function_tool_name_raises(self) -> None:
+        """A ``FunctionTool`` with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_function_tool(42))
+
+    def test_named_function_tool_control_is_clean(self) -> None:
+        """Control — a named ``FunctionTool`` projects cleanly."""
+        projected = project(self._body_with_function_tool("get_weather"))
+
+        assert projected.conversation.tools == (c.ToolDecl(name="get_weather", schema={}),)
+
+
+class TestCustomDeclarationNameRequired:
+    """A ``custom`` / built-in / ``mcp`` declaration whose ``name`` is ``""`` raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a tool nobody can name cannot be paired with its result or
+    addressed by a register row. KBR-295 settled the ``FunctionTool`` branch
+    on the strict raise; KBR-299 closes the same reader's remaining three
+    sub-branches with a deliberately narrower posture: only the empty shape
+    raises. Absent / null / non-string ``name`` keeps the kind-derived label
+    (``str(kind)``) or the ``server_label``-derived label (``mcp:<label>``) —
+    an absent label is wire-derived identity (built-in declarations carry no
+    ``name`` field at all), a different loss profile than a value that names
+    nothing (§7.4.2 rule 7 row 2).
+    """
+
+    @staticmethod
+    def _body_with_declaration(entry: dict[str, Any], name: Any) -> dict[str, Any]:
+        """Return a Responses body whose one non-``function`` tool carries ``name``.
+
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the published
+        shape for built-in declarations, which carry no ``name`` field.
+        """
+        tool = dict(entry)
+        if name is not None:
+            tool["name"] = name
+        return {"input": "hi", "tools": [tool]}
+
+    # -- controls: the kind- and server_label-derived postures stay --
+
+    def test_absent_custom_tool_name_is_labelled_by_kind(self) -> None:
+        """A ``custom`` tool with no ``name`` projects the kind label (KBR-299)."""
+        projected = project(self._body_with_declaration({"type": "custom"}, None))
+
+        assert projected.conversation.tools == (c.ToolDecl(name="custom", schema={"type": "custom"}),)
+
+    def test_non_string_custom_tool_name_is_labelled_by_kind(self) -> None:
+        """A ``custom`` tool with a non-string ``name`` projects the kind label."""
+        projected = project(self._body_with_declaration({"type": "custom"}, 42))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="custom", schema={"type": "custom", "name": 42}),
+        )
+
+    def test_absent_builtin_tool_name_is_labelled_by_kind(self) -> None:
+        """A built-in tool has no ``name`` field; the kind is the label."""
+        projected = project(self._body_with_declaration({"type": "web_search_preview"}, None))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="web_search_preview", schema={"type": "web_search_preview"}),
+        )
+
+    def test_non_string_builtin_tool_name_is_labelled_by_kind(self) -> None:
+        """A built-in tool with a non-string ``name`` projects the kind label."""
+        projected = project(self._body_with_declaration({"type": "web_search_preview"}, 42))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="web_search_preview", schema={"type": "web_search_preview", "name": 42}),
+        )
+
+    def test_absent_mcp_tool_name_is_named_by_server_label(self) -> None:
+        """An ``mcp`` tool is named by its server, not its (absent) ``name``."""
+        projected = project(self._body_with_declaration({"type": "mcp", "server_label": "docs"}, None))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="mcp:docs", schema={"type": "mcp", "server_label": "docs"}),
+        )
+
+    def test_non_string_mcp_tool_name_is_named_by_server_label(self) -> None:
+        """An ``mcp`` tool with a non-string ``name`` is still named by its server."""
+        projected = project(self._body_with_declaration({"type": "mcp", "server_label": "docs"}, 42))
+
+        assert projected.conversation.tools == (
+            c.ToolDecl(name="mcp:docs", schema={"type": "mcp", "server_label": "docs", "name": 42}),
+        )
+
+    # -- the empty shape raises --
+
+    def test_empty_custom_tool_name_raises(self) -> None:
+        """A ``custom`` tool with an empty ``name`` raises (KBR-299)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_declaration({"type": "custom"}, ""))
+
+    def test_empty_builtin_tool_name_raises(self) -> None:
+        """A built-in tool with an empty ``name`` raises (KBR-299)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_declaration({"type": "web_search_preview"}, ""))
+
+    def test_empty_mcp_tool_name_raises(self) -> None:
+        """An ``mcp`` tool with an empty ``name`` raises (KBR-299)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.name"):
+            project(self._body_with_declaration({"type": "mcp", "server_label": "docs"}, ""))
 
 
 class TestFunctionCallOutput:
@@ -1691,25 +1891,6 @@ class TestToolDeclarations:
         )
 
         assert set(projected.residual) == {"tools[0].description", "tools[0].parameters"}
-
-    def test_a_function_tool_without_a_name_residualises(self) -> None:
-        """The same rule as a `function_call`, for a stronger reason.
-
-        `FunctionTool.required` includes `name`, and §3.3.1a addresses tools by
-        name with no index to fall back on. Two unnamed declarations would both
-        sit at `conversation.tools[]` — and `path_matches` accepts `[]` as the
-        **legacy wildcard spelling**, so a register row anchored at
-        `conversation.tools[*].strict` would match them by accident rather than
-        by name. That is the collision the MCP naming rule exists to prevent,
-        reached by a different route.
-        """
-        projected = r.ResponsesProjection().read_request(
-            captured({"input": "hi", "tools": [{"type": "function", "parameters": {}}]})
-        )
-
-        assert set(projected.residual) == {"tools[0].name"}
-        with pytest.raises(c.ResidualFieldsError):
-            c.verify_total(projected)
 
     def test_a_custom_tool_is_named_by_its_own_name(self) -> None:
         """`CustomToolParam` makes `name` required; using `type` would discard it."""

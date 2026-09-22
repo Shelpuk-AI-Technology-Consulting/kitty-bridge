@@ -159,6 +159,19 @@ def symbols() -> frozenset[str]:
 
 
 @pytest.fixture(scope="module")
+def registry() -> dict[str, str]:
+    """Return the AST-read provider registry (key → adapter class name).
+
+    Module-scoped because the parse is a one-shot I/O and several assertions
+    below need it; per-test it was redundant work.
+
+    Returns:
+        The output of :func:`~harness.register.provider_registry`.
+    """
+    return r.provider_registry(_SRC)
+
+
+@pytest.fixture(scope="module")
 def markdown() -> str:
     """Return the design document's text.
 
@@ -287,14 +300,14 @@ class TestTheParserReadsTheDesignDocument:
 
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 25
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 27
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 52
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 46
+        assert len(parsed.unconditional_ids) == 48
         # KBR-184: the four new unconditional ids (M26, P24, P31, P32) must
         # appear in the published sentence alongside the long-standing
         # M14/P20/P21 spot-checks.
@@ -485,7 +498,7 @@ class TestTheDataAndTheDesignNameTheSameRows:
         case for a mutation that always fires.
         """
         defective = markdown.replace(
-            "M1, M2, M10, M14, M15, M16, P1,", "M1, M2, M10, M15, M16, P1,", 1
+            "M1, M2, M9a, M9b, M10, M14, M15, M16, P1,", "M1, M2, M9a, M9b, M10, M15, M16, P1,", 1
         )
 
         problems = r.register_disagreements(r.REGISTER, defective)
@@ -495,7 +508,7 @@ class TestTheDataAndTheDesignNameTheSameRows:
     def test_an_unconditional_list_naming_a_row_that_does_not_exist_is_caught(self, markdown: str) -> None:
         """A stale entry left behind when a row is renamed or withdrawn."""
         defective = markdown.replace(
-            "M1, M2, M10, M14, M15, M16, P1,", "M1, M2, M10, M14, M15, M16, M99, P1,", 1
+            "M1, M2, M9a, M9b, M10, M14, M15, M16, P1,", "M1, M2, M9a, M9b, M10, M14, M15, M16, M99, P1,", 1
         )
 
         problems = r.register_disagreements(r.REGISTER, defective)
@@ -903,3 +916,175 @@ class TestP25ClaimsTheFalsyAllowlistedDrop:
         cell = published_row_cell(markdown, "P25", "Mutation")
 
         assert set(re.findall(r"`(\w+)`", cell)) == set()
+
+
+class TestEveryScopeNamesRealProviders:
+    """A scope entry naming a provider that does not exist is data nothing could contradict.
+
+    KBR-139: the scope column claims knowledge of
+    :data:`providers.registry._registry`, read by AST and never by import
+    (§3.3.1's independent-oracle rule), plus the site↔scope sibling check that
+    keeps a row's scope from silently drifting away from the files its sites
+    name.
+    """
+
+    def test_every_row_scope_is_well_formed(self, registry: dict, symbols: frozenset) -> None:
+        """The invariant: the shipped register's scopes all check out."""
+        assert r.scope_problems(r.REGISTER, registry, symbols) == ()
+
+    def test_the_registry_read_finds_the_known_providers(self, registry: dict) -> None:
+        """The self-check §6.2 requires — a parser regression cannot pass silently.
+
+        The count is pinned (a 24th adapter is a deliberate edit to this test,
+        exactly like the register's 79-row pin) and three members are named,
+        including the file-class-split case the site↔scope check depends on
+        (``zai_coding`` -> ``ZaiAnthropicAdapter``, defined in ``zai_anthropic.py``).
+        """
+        assert len(registry) == 23
+        assert registry["anthropic"] == "AnthropicAdapter"
+        assert registry["openai_subscription"] == "OpenAISubscriptionAdapter"
+        assert registry["zai_coding"] == "ZaiAnthropicAdapter"
+
+    def test_a_scope_key_that_is_no_provider_is_named(self, registry: dict, symbols: frozenset) -> None:
+        """The deliverable's falsification case: a bogus key fails, naming the row."""
+        bad = dataclasses.replace(r.REGISTER[0], scope=("not_a_provider",))
+        problems = r.scope_problems((bad,), registry, symbols)
+
+        assert problems, "a scope naming a non-registry key must be reported"
+        assert bad.id in problems[0]
+        assert "not_a_provider" in problems[0]
+
+    def test_the_sentinel_cannot_be_mixed_with_keys(self, registry: dict, symbols: frozenset) -> None:
+        """A mixed tuple is two claims in one cell; whichever is honoured, the other lies."""
+        bad = dataclasses.replace(r.REGISTER[0], scope=(r.ALL_PROVIDERS, "anthropic"))
+        problems = r.scope_problems((bad,), registry, symbols)
+
+        assert problems, "a mixed sentinel tuple must be reported"
+        assert bad.id in problems[0]
+
+    def test_an_empty_scope_is_reported_not_raised(self, registry: dict, symbols: frozenset) -> None:
+        """An empty tuple stays constructable — the row_shape_problems pure-design reason."""
+        bad = dataclasses.replace(r.REGISTER[0], scope=())
+        problems = r.scope_problems((bad,), registry, symbols)
+
+        assert problems, "an empty scope must be reported"
+        assert bad.id in problems[0]
+
+    def test_a_site_whose_file_the_scope_omits_is_named(self, registry: dict, symbols: frozenset) -> None:
+        """The site-to-scope sibling check: P9b's site names mimo.py, so mimo must be in scope.
+
+        P9b is the cheapest live row to damage: its site is one file, its scope
+        one key. Dropping the key must turn the guard red — otherwise the check
+        is decoration.
+        """
+        mimo_row = next(row for row in r.REGISTER if row.id == "P9b")
+        bad = dataclasses.replace(mimo_row, scope=("kimi",))
+        problems = r.scope_problems((bad,), registry, symbols)
+
+        assert problems, "a scope omitting the site's own adapter must be reported"
+        assert "mimo" in problems[0]
+
+    def test_the_registry_reader_is_live_on_a_synthetic_source(self, tmp_path: Path) -> None:
+        """The parser reads a hand-written mini-registry into key-class pairs.
+
+        The live read above could agree with the guard by accident of both being
+        wrong in the same direction; this positive control proves the reader
+        itself parses a known input.
+        """
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "_registry: dict[str, type[ProviderAdapter]] = {\n"
+            '    "alpha": AlphaAdapter,\n'
+            '    "beta": BetaAdapter,\n'
+            "}\n",
+            encoding="utf-8",
+        )
+
+        assert r.provider_registry(tmp_path) == {"alpha": "AlphaAdapter", "beta": "BetaAdapter"}
+
+    def test_a_registry_the_reader_cannot_parse_raises(self, tmp_path: Path) -> None:
+        """An unreadable registry raises RegisterSourceError — never a silent empty dict.
+
+        An empty result would make :func:`scope_problems` reject nothing, which
+        is exactly the no-op §6.2 forbids.
+        """
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "_registry = _build_registry()\n", encoding="utf-8"
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)
+
+    def test_an_empty_registry_literal_raises(self, tmp_path: Path) -> None:
+        """The third named refusal: a present-but-empty dict is no registry either.
+
+        An empty key set would make every scope entry invalid in principle but
+        validate nothing in practice — the same vacuous no-op, one step later.
+        """
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "_registry: dict[str, type[ProviderAdapter]] = {}\n", encoding="utf-8"
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)
+
+    def test_a_star_unpacking_entry_raises(self, tmp_path: Path) -> None:
+        """The ``**``-unpacking refusal: a ``None`` key slot is no literal key.
+
+        A registry assembled by merging another dict would let keys reach
+        :func:`scope_problems` that the AST reader never saw — exactly the
+        silent-widening shape the reader exists to refuse.
+        """
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "_OTHER = {}\n"
+            "_registry: dict[str, type[ProviderAdapter]] = {**_OTHER, 'x': FooAdapter}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)
+
+    def test_a_non_literal_key_raises(self, tmp_path: Path) -> None:
+        """A bare name as a key is not a string literal — the ``literal_eval`` refusal."""
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "KEY = 'x'\n"
+            "_registry: dict[str, type[ProviderAdapter]] = {KEY: FooAdapter}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)
+
+    def test_a_non_string_literal_key_raises(self, tmp_path: Path) -> None:
+        """A literal key that is not a string (``{1: …}``) is refused, not coerced.
+
+        The registry's keys are provider type strings; a numeric key would
+        resolve to nothing in :func:`row_is_in_scope` and pass silently.
+        """
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "_registry: dict[str, type[ProviderAdapter]] = {1: FooAdapter}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)
+
+    def test_a_non_class_value_raises(self, tmp_path: Path) -> None:
+        """A call expression as a value is no bare class name — the site↔scope
+        subset check needs the class's *name* to find its defining file."""
+        (tmp_path / "kitty" / "providers").mkdir(parents=True)
+        (tmp_path / "kitty" / "providers" / "registry.py").write_text(
+            "def make_adapter():\n"
+            "    return None\n"
+            "\n"
+            "_registry: dict[str, type[ProviderAdapter]] = {'x': make_adapter()}\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(r.RegisterSourceError):
+            r.provider_registry(tmp_path)

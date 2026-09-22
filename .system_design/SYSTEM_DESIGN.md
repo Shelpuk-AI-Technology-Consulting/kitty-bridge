@@ -74,6 +74,7 @@ Numbered as in the KBR-220 requirements and PR. D4 there, which folded the Windo
 | D6 | `stop_signals` lives in `kitty.bridge`, not a top-level leaf | Both callers (`kitty.cli.main`, `kitty.bridge_runner`) may already import `kitty.bridge`. A top-level leaf would need its own import-linter contract and an entry in every "every sibling" list. |
 | D7 | A missing keys file means auth off; a named-but-missing one refuses to start with a clear error | Before the fix a fresh install could not start a background bridge at all (`parse_keys_file`'s `FileNotFoundError`). Auth off matches the foreground bridge, `kitty claude` and the README; the default file still enables auth when it exists, so installs relying on it keep exactly the behaviour they had. Rejected: requiring a keys file — background would be the only mode demanding a hand-created secrets file. *Product owner, 2026-09-14 (KBR-230).* |
 | D8 | On Windows the background bridge child is started detached: `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` | `start_new_session=True` is POSIX-only, and CPython's Windows `Popen` accepts it and ignores it, so a "background" bridge kept the launcher's console: Ctrl+C there, or closing the window, ended a bridge the user was told runs in the background (KBR-231). Observed on the Windows leg first, per the ticket's first acceptance criterion; the probe lives beside its guard in `tests/bridge/test_bridge_management.py::TestTheWindowsConsoleDetachment`. `DETACHED_PROCESS` gives the child no console at all, so no console event of any console can reach it — the Windows analogue of the `setsid()` `start_new_session` runs on POSIX. `CREATE_NEW_PROCESS_GROUP` additionally disables Ctrl+C group-wide — scoped claim, since `CTRL_BREAK` is always delivered, but a detached child has no console to receive any of it on. `CREATE_NO_WINDOW` (the ticket's alternative) was rejected: it detaches the child from the launcher's console but gives it a hidden console of its own -- a `conhost.exe` per bridge for a daemon that needs no console at all -- and beside `DETACHED_PROCESS` the vendor docs state it is ignored anyway. The flags are integer literals in `manage.py` because `subprocess` imports those names from `_winapi` on Windows only, and the decision (`background_spawn_kwargs`) returns key-disjoint dicts because POSIX `Popen` raises `ValueError` on a nonzero `creationflags`. Scope: `start_bridge` only — service units run `bridge_runner` directly under a manager that already detaches them. |
+| D9 | The child gives up its parent's pipes at ready: `bridge_runner` calls `io_encoding.relinquish_output_streams()` once `start_async` has returned, pointing pipe-shaped fds 1/2 at `os.devnull`; the pre-ready no-TLS warning swallows a `BrokenPipeError` and does the same on catch | A `kitty bridge start` that gives up (its 5-second window, KBR-176) exits and closes the child's pipe; every later child write then raised `BrokenPipeError` (KBR-219). The warning print is the documented kill site — it fires *before* the state file, so devnull-at-ready alone cannot save it; the except-branch dup2 is safe precisely because a `BrokenPipeError` proves the reader is gone, and an interpreter-exit flush would otherwise raise the same error a second time (Python's own note-on-SIGPIPE pattern). **Write-site audit:** the warning is the only unprotected pre-ready stderr writer on the success path — every other pre-ready stderr print in `bridge_runner.main` precedes `sys.exit(1)` (a BrokenPipeError there changes a clean exit line into a traceback; the child was dying anyway), and every post-ready writer routes through `logging` or `warnings`, both of which wrap their writes in `except OSError: pass` (CPython issue 5971) — which is why the devnull assertion is an fd-state oracle (`/proc/<pid>/fd/N`), not a behavioural one. **Pipes only:** systemd `--user` hands the child a journal `AF_UNIX` socket, launchd a file or `/dev/null`, NSSM a file or null, supervisord a temp file — none are FIFOs, so the guard never touches them. Residual: runit/s6-style daemontools-family supervisors erect a FIFO between the service and the logger (`runsv(8)`); under those the guard would replace the log pipe with devnull and lose the log stream. Accepted — kitty ships unit installers only for systemd `--user`, NSSM and launchd. **Why not a log file:** KBR-176's rejection stands — a new on-disk file that may hold sensitive text was declined there, and the product owner confirmed devnull-silence over a retained destination (2026-09-21, KBR-96). |
 
 ### 1.5 Known limits (recorded, not fixed here)
 
@@ -302,6 +303,7 @@ prints `kitty exited with code N - press Enter to close` and waits for a line or
 | T12 | The inner command is `sys.executable -m kitty.cli.tmux_inner` | Runs the same installation as the outer kitty whatever the server's `PATH` holds, and never the kitty *terminal*'s binary of the same name. A separate entry module keeps environment loading and the pane hold out of `main`, and lets the environment be replaced before modules that read it at import time (`Path.home()` in `kitty.launchers.claude`) are imported. |
 | T13 | Spawn and wait for tmux, rather than `exec` | Kitty can then delete a leftover environment file and print the reattach hint. |
 | T14 | Non-TTY and Windows pass through | An attached tmux session needs a terminal, and Windows has no native tmux; before this feature both launched fine without the wrap. The pass-through checks run before the inside-tmux check, so a non-TTY run inside tmux keeps `--tmux` exactly as before this feature. |
+| T15 | `run_captured` decodes captured child output with `encoding="utf-8", errors="replace"`, never bare `text=True` | `text=True` decodes the parent side of the pipes with the system ANSI codepage (cp1252 on `windows-latest`); `PYTHONIOENCODING` does not change it, and one child byte the codepage cannot represent raises `UnicodeDecodeError` into every caller (zooba/eryksun, cpython#105312; observed on the Windows leg as KBR-265's scope expansion). Forcing UTF-8 with a non-strict handler makes the read-back locale-independent and crash-free. **Known cost, deliberate:** on a POSIX repo whose absolute path contains a non-UTF-8 byte, the decoded `git rev-parse --git-common-dir` carries U+FFFD and the resulting tmux session name is mangled; reattach still works because the mangling is deterministic, whereas pre-fix the same input crashed the launch outright. The other callers (`tmux -V` parsed by `parse_tmux_version`, the `MARKER` / `ENV_FILE_VARIABLE` equality checks on `show-environment`) all degrade gracefully from a crash to a benign skip or an existing error message — ASCII-only on the happy path, regex-no-match / equality-fail on the hostile path. `errors="replace"` matches the prevailing byte-drain pattern across `bridge/server.py`, `preamble_hold.py`, `tool_audit.py` and the providers (the lone `backslashreplace` decode is KBR-154's `manage.py:667` diagnostic drain); the triage note chose it explicitly. The child-side alternative (`PYTHONIOENCODING=utf-8:replace` in the spawned environment) was rejected: `run_captured` runs commands we do not own, and the kwarg shape is one place per call with no environment plumbing. The companion test-side read-back (the console-break launcher's `Popen`, KBR-265) carries the same kwargs, held by an L1 structural test asserting both keyword literals in the spawning method's source — the KBR-275 guard pattern; it is deliberately refactor-sensitive (extracting the `Popen` into a helper trips it), which is the guard doing its job. **Obsolescence horizon:** Python 3.15 (PEP 686, UTF-8 mode by default) makes bare `text=True` decode UTF-8, so the `encoding="utf-8"` half becomes the platform default — but `errors="replace"` stays load-bearing, because the default error handler remains `strict` and an invalid byte would still raise. |
 
 ### 3.4 Verification
 
@@ -471,6 +473,10 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
 | S7 | `_stream_responses` opens the lifecycle lazily, on the first non-finish write of each attempt | `translate_stream_start` and `translate_stream_chunk` draw from the same `_seq` counter, so translating the lifecycle after the first chunk had been translated would put `sequence_number` 3 and 4 on the wire ahead of the chunk's 0, 1, 2 — the translation therefore runs speculatively at attempt start, before any chunk, and the two strings are written on the first real event and invalidated at every `translator.reset()` inside the loop (KBR-242; gap G41). Writing eagerly, before the first chunk is translated, was rejected: an all-finish first chunk is how an empty response presents, and publishing the lifecycle before the empty verdict is known would put a half-open lifecycle on the wire exactly where the failover ladder is about to retire the attempt. A purely-empty attempt publishes nothing, so KBR-247's `events_emitted` model survives; the exhausted-ladder fallback stays an empty 200 (KBR-235's territory); the error paths never open the lifecycle. Tests: `tests/bridge/test_responses_stream_lifecycle.py`, and the KBR-240 walk's opening + exact-`sequence_number` assertions |
 | S8 | Cross-class re-dispatch (`_stream_messages` KBR-249; `_stream_responses`, `_stream_gemini`, `_stream_chat_completions` KBR-254): when a plain-POST branch's failover selects a `use_custom_transport` provider, the function re-enters the custom-transport branch with the failover-selected provider as its own initial selection | The plain-POST branch cannot drive a `use_custom_transport` provider via `session.post(...)`; the bridge must speak the protocol that matches the selected backend's class. Without re-dispatch the failover silently delivers an empty `200` (the bug KBR-235 exposed). The custom-transport branch's symmetric `custom → plain` fall-through — `src/kitty/bridge/server.py:4185-4204` (the cross-mode select with the three pops) then `4265-4270` (the `continue` entering the plain block) — is unchanged in behaviour. The re-dispatch bound is `(2 * n_backends) + 1` per request so a pathological cooldown-expiry ping-pong surfaces an honest error instead of looping; the cap-hit error carries the route's D4 discriminator set to `"cross_class_exhaustion"` — `code` (plus the parent `reason: "cross_class_exhaustion"` marker) on Responses, `reason` on Gemini, `type` on Chat Completions — so a client that branches on its route's discriminator can tell the cap-hit apart from `empty_response` and `upstream_error` (D4, KBR-241 / KBR-247 / KBR-250). Chat Completions does **not** carry `reason` — its route's D4 discriminator is `type` alone (see §5.4). The three sibling handlers prepare their SSE response eagerly (`sr.prepare()` before the dispatch loop), so unlike `/v1/messages` — which defers prepare and answers a cap-hit with a bare JSON `502` — a sibling cap-hit surfaces as the route's in-stream terminal event followed by the handler's existing post-loop. |
 | S9 | Cross-class re-dispatch reuses the failover-selected provider, never re-selects | Re-selecting would consume a new draw from the deterministic test stub and break the pinned two-draw invariant; semantically, the failover already chose — the branch re-enters with that choice intact. |
+| S10 | Gemini's in-stream-error exhaustion arm writes its terminal diagnostic (KBR-99) | The arm ran log + `break`: the stream ended `status="incomplete"` with no event, and a Gemini CLI session saw the stream just stop — the one silent arm, since Responses writes its `upstream_error` SSE event (KBR-247) and Chat Completions ships its clean marker. The fix is the route's own convention, one `data: {"error": {"code": 502, ...}}` event before the break — no new shape invented. A `finalize_interrupted_stream` analogue was rejected: Gemini's `streamGenerateContent` SSE has no typed completion event, so there is nothing to synthesize; the single error event is the whole closing vocabulary the route has. |
+| S11 | Translated `/v1/messages` exhaustion unifies on D4 (KBR-99) | KBR-235 left the route's exhaustion split: a contentless reply *with* a finish chunk exhausted into M12 fallback text while a no-finish stream got the D4 `502 empty_response` — the same upstream failure producing a normal-looking assistant turn or an error depending on an accident of the upstream's chunking. Q14(a)'s rationale already says a `200` carrying substituted text is the one thing the route must never produce, so both arms now exhaust into D4. The translator's fallback synthesis is untouched: M12 stays live on non-streaming replies and the other inbound protocols, where the substitution is a decided product behaviour rather than a stream-recovery outcome; only the streaming write path stops delivering it. The alternative — one more retry for the finish-chunk case — was rejected: the ladder already ran to exhaustion by the time the branch is reached. |
+| S12 | Streaming D3 lands on the translated route (KBR-99) | A truncation (`max_tokens` / context window) before content is a failure no retry can improve — D3's native-route rationale verbatim — yet the translated route retried it and fallback-ized it. The stop reason is available in the buffered finish events, so the check adds no plumbing: when the empty verdict holds with nothing emitted and the finish events carry a truncation stop reason, the handler returns the `400` `invalid_request_error` with `reason: "<stop_reason>_before_content"` and the ladder ends on that attempt (a `400` also stops the agent re-sending, where a `5xx` invites exactly that). D4 stays the exhaustion for every other stop reason; the post-emission arm is untouched — a truncation seen after bytes reached the client is Q14(a)'s ending, not D3's. |
+| S13 | The Messages-wire pre-content error ladder charges the stream-error cooldown (KBR-99) | KBR-241's amendment kept two differences deliberately; the health-model half meant a persistently-erroring backend kept drawing ~1/n of the attempts on a balancing pool while its CC-wire sibling cooled under `_get_stream_error_cooldown`. The parity fix reuses that cooldown unchanged on the hold's error ladder; the recognition rule (name line or `data.type`) and the exhaustion payload (the provider's error re-embedded, `reason: "upstream_error"`) from the D2 amendment are untouched. A separate Messages-wire cooldown table was rejected: two ladders for one failure class is precisely the drift the parity exists to close. |
 
 ### 5.4 Known limits
 
@@ -668,6 +674,280 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   asserts content and finish_reason reach the client, and the same
   single-predicate rule holds — the parser feeds `_cc_chunk_carries_content`
   through the synthesis like every other adapter.
+- **KBR-293 closed the sibling legs — the `use_custom_transport` segments of
+  `_stream_responses` and `_stream_gemini`** (grep anchors:
+  `KBR-293: collect, don't write` in both handlers). The falsification the
+  ticket required came out worse than the skeleton class alone: on
+  `/v1/responses` the segments piped provider bytes through `_tracked_write`
+  unconditionally, so an empty completion from any of the three
+  custom-transport adapters delivered a skeleton with the ladder unable to
+  fire (13/14 pre-fix bridge-level tests red), and on `/v1/gemini` the wire
+  was wrong for **every** adapter — Bedrock/Ollama Cloud emit CC-SSE on all
+  routes, and the subscription (no `_original_body` on the Gemini route)
+  emits Responses-SSE — so even content-bearing completions never arrived as
+  Gemini events (14/14 red). Both segments now run the KBR-287 judge-first
+  shape — collect (`_collect`, not `_tracked_write`; the `_bytes_written`
+  guard drops as vacuous), parse (`parse_stream_to_cc_response` dispatch /
+  `_parse_sse_to_response` fallback), synthesise the CC chunk list (the
+  KBR-287 payload shape ported physically — the KBR-277/KBR-285
+  mirror-as-divergence-guard convention; no shared helper was extracted),
+  judge through the same `_cc_chunk_carries_content` call site — plus the
+  one step KBR-287 did not need: **the synthesis is translated through the
+  route's own translator** (`ResponsesTranslator.translate_stream_chunk` /
+  `GeminiTranslator.translate_stream_chunk`) before any write, because on
+  these routes the route's wire is Responses/Gemini events, not CC chunks.
+  The KBR-287 four review-settled decisions carry over verbatim: judge-first
+  not hold-walk; the ladder ends in the route's `empty_response` D4
+  discriminator (`code` on Responses via `responses_format_error` +
+  `synthesize_completed_events(status="incomplete")`, `reason` on Gemini via
+  the 502 error event — not `cross_class_exhaustion`, per §5.3 S8);
+  class-agnostic empty-arm select (custom → refresh keys + continue, keep
+  `_original_body` on Responses; plain → pop keys + the fall-through
+  `break`); attempt bound `n_backends + len(_EMPTY_FINAL_DELAYS)` with the
+  final-delay prologue. Usage is log-on-release (`_log_usage` outside the
+  disconnect guard); neither content arm marks the backend healthy (KBR-287
+  parity). Three facts make reusing the handler-level translator
+  state-leak-safe, and a future refactor must preserve all three: empty
+  attempts never translate (the judge is pre-emission), the plain→custom
+  crossing sites reset the translator before re-entry (KBR-254), and the
+  content arm ends the request — the lifecycle opening is written
+  unconditionally there, not lazily, because the verdict is already known.
+  **§11 Q14(a) on these two branches is now satisfied by construction, not
+  by a guard:** pre-fix the `_bytes_written` flag stopped a post-write
+  failure from failing over (a second backend's bytes would splice into the
+  first's); post-fix no collected byte reaches the socket before the
+  verdict, so a failing attempt's partial bytes are discarded and the
+  failover proceeds — the KBR-247-era tests
+  (`tests/bridge/test_post_emission_no_failover.py`,
+  `TestCustomTransportFailureAfterBytes`) pin the stronger guarantee (the
+  failed attempt's bytes never ship; the next backend's content is the only
+  content), and the Q14(a) rule itself is unchanged everywhere bytes still
+  stream incrementally (the plain-POST paths).
+  **Fidelity callout the PO signed off via PR review:** `/v1/responses` ×
+  subscription was a native Responses-SSE passthrough pre-fix (reasoning
+  summaries included); post-fix it runs parse → synthesise → translate, and
+  `_parse_sse_to_response` drops reasoning. A **reasoning-only** completion
+  from the subscription on this route flips from *delivered* (pre-fix) to
+  *ladder → `empty_response` terminal* (post-fix) — deliberate, pinned by
+  `test_a_reasoning_only_custom_transport_completion_takes_the_ladder[openai_subscription]`;
+  the wire-aware passthrough alternative was rejected (two write paths, a
+  per-pair wire heuristic, and no empty-ladder guard for that cell).
+  Regaining fidelity later means lifting reasoning into the parse
+  projection — a parse-step widening, not a branch fork. **Recorded
+  asymmetries, deliberate:** the custom segments' transport-error terminal
+  (the `except` arm) still ships its error event without a lifecycle close,
+  unlike the plain path's catch-alls which fall through to the post-loop
+  synthesize — pre-existing, not this ticket's defect class; and
+  `/v1/messages`' custom segment — closed by KBR-297 below; the smaller-class
+  sibling defect. KBR-254's sibling-test stubs were corrected to what real
+  adapters emit (`_fake_hello_cc_stream`; the Responses-SSE stub pinned what
+  the branch accepted, not what Bedrock writes). Tests:
+  `tests/bridge/test_responses_custom_transport_empty_hold.py`,
+  `tests/bridge/test_gemini_custom_transport_empty_hold.py` (the KBR-287
+  harness shape; content oracles parsed from route-protocol events, never
+  raw substrings — the KBR-249 vacuous-oracle trap).
+- **KBR-297 closed the last streaming leg — the `use_custom_transport` segment
+  of `_stream_messages` / `/v1/messages`.** Ticket correction recorded here: the
+  pre-fix wire did **not** deliver a silent empty turn. It delivered
+  **fabricated fallback text** — `MessagesTranslator.translate_response`'s
+  defensive fallback (`src/kitty/bridge/messages/translator.py:766-771`,
+  "never emit thinking-only or empty assistant output") appended a `text`
+  block carrying `_EMPTY_ASSISTANT_FALLBACK_TEXT` — *"Upstream model
+  returned an empty response. Please retry. If the context is full, use
+  /clear to reset the conversation."* — plus a `(provider, model, after N
+  attempts)` suffix on a balancing pool, and `_log_usage` billed the
+  fabricated turn. The bridge put words in the model's mouth, the
+  empty-response ladder could not fire, and a balancing pool kept routing to
+  the broken upstream. The fix ports KBR-287/293's judge-first shape: after
+  `parse_stream_to_cc_response` (Bedrock / Ollama Cloud) or
+  `_parse_sse_to_response` (subscription), the branch runs a single
+  up-front verdict through `BridgeServer._is_empty_cc_response` (the
+  KBR-285 lockstep whole-response twin of `_cc_chunk_carries_content`).
+  Content-bearing → translate + emit, unchanged. Content-free → held; ladder
+  per the KBR-287/293 shape (class-agnostic `_select_backend()` —
+  custom → refresh `_resolved_key` / `_provider_config` + `continue`; plain
+  → pop the three custom keys + `break` into the dispatch-loop fall-through;
+  pool-less `elif` → `_BACKOFF_BASE` exponential backoff); exhaustion →
+  **the route's own D4 terminal**, the bare JSON `_make_error_response` with
+  `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"` and HTTP 502
+  — this route defers `sr.prepare()`, so the D4 is a JSON response, not
+  the SSE siblings' in-stream error event, per §5.3 S8. Attempt bound
+  `n_backends + len(_EMPTY_FINAL_DELAYS)` with the final-delay prologue;
+  exception-path gates stay at `n_backends - 1`; exception-path log
+  denominators follow `n_backends` (mirroring the KBR-293 twin). Usage is
+  log-on-release (`_log_usage` after emit); empty attempts never reach
+  `_log_usage` and never reach `translate_response`, so the fallback text
+  is never fabricated and no usage is billed for a judged-empty completion.
+  Reasoning-only completions take the ladder — neither parser surfaces
+  reasoning, the accepted trade-off KBR-287/293 pin. **One-step
+  reasoning-widening asymmetry:** on this route the judge reads the parsed
+  message directly and `translate_response` already maps
+  `message.reasoning_content` → a `thinking` block, so a future
+  parse-widening **alone** would regain reasoning fidelity here — unlike
+  the siblings, whose chunk-synthesis also projects only `content` /
+  `tool_calls` and would need its own widening. **Whitespace-drift
+  consequence:** `_is_empty_cc_response`'s CC arm keeps its documented
+  `.strip()` on string `content` (the pre-existing drift this paragraph
+  also records above for KBR-277), while the sibling routes' judge uses
+  `!= ""`. On this route the custom segment now takes the `.strip()` side:
+  a whitespace-only completion ladders to the 502 D4 terminal here, while
+  the same shape is delivered on `/v1/chat/completions` and the KBR-293
+  siblings — and within this same route, the plain-POST streaming hold
+  would deliver it too. Aligning the two predicates is not this ticket's
+  scope. **Deliberate omission:** the empty arm's sleeps (pool-less backoff
+  and final-delay prologue) do not call `_raise_if_client_gone()` although
+  the helper exists in this handler — the KBR-287/293 empty arms omit it
+  too, and a dead client plus a broken upstream burns the ~60 s ladder.
+  Recorded so the omission can be revisited as a cross-cutting pass over
+  all four custom segments. The non-streaming `/v1/messages` × custom-transport
+  residual this paragraph used to record as out of scope is closed by KBR-298
+  below. Tests: `tests/bridge/test_messages_custom_transport_empty_hold.py`
+  (the KBR-287/293 harness shape; content oracles parsed from Messages-API
+  events, never raw substrings; `_EMPTY_ASSISTANT_FALLBACK_TEXT` absence
+  asserted explicitly as the fabricated-text defect).
+- **KBR-298 closed the non-streaming `/v1/messages` × custom-transport cell —
+  the residual KBR-297 recorded here as out of scope.** Ticket correction
+  recorded, same shape as KBR-297's: the pre-fix wire did not deliver a
+  silent turn either. `_request_with_retry`'s built-in empty ladder
+  (single-backend: `len(_EMPTY_RETRY_DELAYS) + len(_EMPTY_FINAL_DELAYS) + 1`
+  attempts; balancing: `n_backends`, empties never marking a backend
+  unhealthy) already retried a judged-empty completion, and its exhaustion
+  arm returned the empty response by design (grep anchor: "translator will
+  add fallback text") — which the handler, with no emptiness gate, handed to
+  `translate_response`'s defensive fallback. The client received a
+  **fabricated** `_EMPTY_ASSISTANT_FALLBACK_TEXT` reply as a `200`,
+  `_log_usage` billed it, and `_mark_backend_healthy` kept the broken
+  upstream in rotation. The fix: in `_handle_messages`' translated arm — the
+  `else:` branch of the `cc_response.get("type") == "message"` check, so a
+  native Messages reply (and its D3 truncation 400) is structurally
+  unreachable — the parsed `cc_response` is judged through
+  `BridgeServer._is_empty_cc_response` (the KBR-285 lockstep whole-response
+  judge, KBR-297's streaming twin) **before** `translate_response`. KBR-298
+  gated on `self._active_provider.use_custom_transport`; KBR-300 widened the
+  predicate to `not self._active_provider.use_native_messages and
+  self._is_empty_cc_response(cc_response)` so the same gate covers the
+  raw-CC cell too (see the KBR-300 paragraph below). Content-bearing →
+  translate + respond, unchanged. Judged-empty → the route's D4 terminal as a
+  non-streaming JSON error: `web.json_response` with
+  `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"`, HTTP `502` —
+  **no** `_log_usage`, **no** `_mark_backend_healthy` on a judged-empty
+  completion. Three decisions the design review settled:
+  - *Judge after the ladder, not per attempt.* The non-streaming route's
+    retry structure already walks the empty ladder inside
+    `_request_with_retry`; the ticket says to mirror that walk and invent no
+    second ladder. The judge sits after the walk returns, where it can only
+    see a content-bearing reply or the exhausted empty one — unlike the
+    streaming twin's per-attempt pre-emit judge, because the non-streaming
+    branch is atomic per attempt by construction
+    (`_make_upstream_request` → `provider.make_request` returns one complete
+    response or raises).
+  - *Status 502, decided against the route's non-streaming error contract.*
+    The route's non-streaming statuses are 400 (malformed input, D3
+    truncation), the preserved upstream status (`UpstreamError`), 500
+    (unknown exceptions) — none covers "the upstream answered, with nothing
+    usable, on every attempt", the canonical 502 case. Route-internal
+    consistency agrees: this route's streaming D4 (the plain
+    `empty_no_finish` arm and KBR-297's custom segment alike) is bare-JSON
+    502 with the same `reason: "empty_response"` discriminator, so one
+    client branch, `(502, reason=empty_response)`, covers the route in both
+    stream modes. Claude Code's Messages client retries any 5xx, so 502 vs
+    500 changes no retry behaviour — the choice is semantic.
+  - *Custom-transport gate only.* The ticket scopes the cell. The raw-CC ×
+    non-streaming cell has the same post-ladder shape — the ticket
+    attributed it to KBR-277, but KBR-277 widened only the
+    `reasoning_content` predicate and left the exhaustion terminal
+    untouched. The raw-CC cell was filed as **KBR-300** and is now closed
+    there: KBR-300 widens the elif's predicate to
+    `not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response)`,
+    so the same gate covers both the KBR-298 cell and the raw-CC cell —
+    one location, one comment, no parallel structures to maintain.
+  The reasoning-only accepted trade-off carries over (none of the three
+  custom parsers' non-streaming paths surface reasoning:
+  `BedrockAdapter.translate_from_upstream` reads only `text`/`toolUse`
+  blocks; `OllamaCloudAdapter` reads only `message.content` /
+  `message.tool_calls`; the subscription's `_parse_sse_to_response` reads
+  only text deltas and function-call items). The empty arm logs a
+  route-scoped `logger.warning` mirroring KBR-297's;
+  `_request_with_retry_single`'s own "returning fallback" line is left
+  unchanged — its wording is now historical (the raw-CC sibling routes
+  KBR-298 leaves open were closed by KBR-300 below; the comment above the
+  KBR-298 code site records the widening). Tests:
+  `tests/bridge/test_messages_custom_transport_non_streaming_empty_hold.py`
+  (the KBR-287/293/297 harness shape; scripted raw upstream shapes fed
+  through the adapters' real non-streaming parsers; content oracles parsed
+  from the JSON response body, never raw substrings; the recording seam
+  captures `_log_usage` / `_mark_backend_healthy` so the empty-arm
+  guarantees are asserted, not assumed).
+- **KBR-300 closed the four non-streaming silent-skeleton cells the
+  KBR-298 closure left open.** KBR-248/276/287/293/297 closed the streaming
+  emission paths; KBR-298 closed the non-streaming `/v1/messages` ×
+  custom-transport cell; this ticket closes the three sibling cells
+  (`_handle_responses`, `_handle_gemini`, `_handle_chat_completions`,
+  both transport classes) and the raw-CC cell on `/v1/messages` itself
+  (the KBR-298 elif gated on `use_custom_transport` and left
+  `use_custom_transport = False` reaching `translate_response`'s
+  fabricated fallback). Each handler's judge sits after the ladder
+  (`_request_with_retry`'s existing walk, unchanged), in the
+  translated/verbatim arm, before `translate_response` (and before
+  `_log_usage` / `_mark_backend_healthy`). Single predicate per handler:
+  `not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response)`
+  — the messages elif widens in place (no parallel gate); the three
+  siblings add one gate each. **Four per-route D4 body shapes, each
+  mirroring its route's streaming D4 family** (route-internal consistency
+  across stream modes, one client branch per route): `/v1/messages` keeps
+  KBR-298's bare-JSON `502` + `_NATIVE_EMPTY_REPLY_MESSAGE` +
+  `reason: "empty_response"` (`type: "error"`, `error.type: "api_error"`);
+  `/v1/responses` adds `reason: "empty_response"` over the streaming
+  `code: "empty_response"` discriminator (`error.code` / `error.reason`,
+  no top-level `type` — **ticket correction:** the ticket spelled the body
+  wrapped in `type: "error"`, but that wrapper is the Anthropic Messages
+  error convention (KBR-298's shape), not the Responses route's: all eight
+  other non-streaming error envelopes on `/v1/responses` return
+  `{"error": {...}}` only, and OpenAI's documented Responses error shape
+  puts the error class inside `error`; the wrapper was dropped in PR
+  review round 1 so the route's D4 follows its own protocol's convention
+  like the Gemini and Chat Completions cells do); the discriminator
+  `code: "empty_response"` appears in both stream modes on this route,
+  with `reason` a non-streaming-only marker — its JSON depth differs by
+  wire (top level in the streaming SSE event data, nested under `error`
+  in the non-streaming body), which is each wire's native envelope
+  convention, not a divergence.
+  `/v1/gemini` byte-mirrors the streaming SSE error
+  payload (`code: 502` integer, no top-level `type`); `/v1/chat/completions`
+  byte-mirrors KBR-287's streaming D4 (`error.type: "empty_response"`,
+  verbatim CC carries `type`, not `reason`). All four `502`; all four
+  return *before* `_log_usage` and `_mark_backend_healthy`. The
+  `use_native_messages is false` conjunct excludes native (`use_native_messages
+  = True`) providers on every route — same structural carve-out KBR-298
+  made for the native-Messages arm of `/v1/messages`. Concretely on
+  `/v1/messages`: a native Anthropic provider whose `_native_messages_request`
+  was cleared by the KBR-237 tool-use-format fallback (`server.py:4596`)
+  answers in CC form; an empty reply there falls through the widened elif
+  into `translate_response`'s fabricated fallback (today's behaviour,
+  deliberately preserved). Widening to cover native providers is a
+  one-conjunct drop per handler; **proposed follow-up, not yet filed — PO
+  to decide** on scope and priority. Reasoning-only trade-off carries over
+  unchanged: custom-transport non-streaming parsers drop reasoning
+  (`BedrockAdapter.translate_from_upstream` reads only `text`/`toolUse`;
+  `OllamaCloudAdapter` reads only `message.content`/`message.tool_calls`;
+  `OpenAISubscriptionAdapter._parse_sse_to_response` reads only text
+  deltas and function-call items) → ladder-taking; raw-CC cells carry
+  `reasoning_content` non-empty in the wire shape → the KBR-277
+  predicate counts it as content → released on the first attempt. Tests:
+  `tests/bridge/test_messages_raw_cc_non_streaming_empty_hold.py` (the
+  raw-CC cell on `/v1/messages`); `tests/bridge/test_responses_non_streaming_empty_hold.py`,
+  `tests/bridge/test_gemini_non_streaming_empty_hold.py`,
+  `tests/bridge/test_chat_completions_non_streaming_empty_hold.py` (each
+  route × both transport classes, the KBR-287/293/297 harness shape; plain
+  cells use `aioresponses` on the OpenAI default endpoint, custom cells
+  monkeypatch `make_request` and feed canned raw shapes through the
+  adapters' real non-streaming parsers). The pre-existing
+  `test_non_streaming_exhausts_retries_emits_fallback` /
+  `test_all_backends_empty_emits_fallback` /
+  `test_non_streaming_final_retries_fallback` tests in
+  `tests/bridge/test_empty_response_retry.py` pinned the raw-CC fallback
+  behaviour KBR-300 retires; they were rewritten in-PR to pin the D4
+  expectation, mirroring the streaming-side KBR-99 (S11) precedent.
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
@@ -727,6 +1007,28 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   - `/v1/chat/completions`: `data: {"error":{"message":"...","type":
     "cross_class_exhaustion"}}\n\n` followed by `data: [DONE]\n\n`, then
     `write_eof`.
+- **The one remaining post-emission ending asymmetry is deliberate (KBR-99
+  records it as pinned residue) — and it is scoped to drops that land before
+  any finish chunk is read.** On the translated `/v1/messages` branch a
+  post-emission **transport drop** at the AFTER_TEXT or MID_TOOL_ARGUMENTS
+  cells closes `end_turn` + `message_stop` rather than the Q14 error event —
+  KBR-183's decision D2, kept so the branch's truncated answer reads as a
+  completed turn to Claude Code (verified 10/10 per cell, 2026-09-21). On
+  the BEFORE_TERMINAL cell the residue does **not** hold: the finish chunk's
+  streaming path auto-resets the translator the moment it is read
+  (`messages/translator.py:1037`), so when the drop surfaces afterwards
+  `finalize_interrupted_stream()` finds no live message and returns `[]`,
+  and the transport branch falls to its error-event fallback with the block
+  left open (truncated); on the clean-EOF race the buffered close-out
+  flushes first (complete sentence). That cell is T-G7's genuinely two-way
+  shape set `{complete_sentence, truncated}`, verified 15/15 truncated under
+  the exception path — the grammar floor already composes on it, and KBR-99's
+  grid pins the shape set rather than one internal path. Every other
+  post-emission failure on every route ends in the route's error event
+  (native Messages via KBR-183; Responses via KBR-247; Gemini via S10; Chat
+  Completions via its `upstream_error` marker). `TEST_SUITE.md` §6.3.1 owns
+  the assertion; a change here is an owner decision that must move the pin,
+  the §6.3.1 residue paragraph, and §11's D2 amendment together.
 ## 6. Backend health, cooldowns, and the arrival recovery hold
 
 ### 6.1 The state machine as it stands
@@ -1255,11 +1557,16 @@ row + the KBR-154 scope addition). This section is the To Be state of
   `platformdirs.user_config_dir("kitty")/credentials.json` (or an explicit path), guarded
   by a `filelock` (5 s timeout, F38), written atomically (`mkstemp` + `os.replace`) with
   POSIX `0600`/`0700`. F37: a file that is not valid **JSON** is backed up
-  (`*.corrupt.<ts>.<pid>`) and the store restarts empty behind a CRITICAL log. **The F37
-  guarantee is narrower than "file corruption":** a valid-JSON-non-dict file is silently
-  treated as `{}` (no backup, no log) and an invalid-UTF-8 file raises `UnicodeDecodeError`
-  out of `read_text`, which no handler catches. Both are pre-existing KBR-154 residuals,
-  recorded here rather than silently absorbed into this ticket's contract.
+  (`*.corrupt.<ts>.<pid>`); on the success branch the store restarts empty behind a
+  CRITICAL log, on the failure branch (read-only mount, etc.) it raises
+  `CredentialError` instead of silently writing `{}` over the damaged original —
+  same silent-loss argument as the file-level guards, applied to F37. KBR-291 extends
+  the same guarantee to the other two file-level damage shapes: an invalid-UTF-8 file
+  and a valid-JSON-non-dict file are backed up the same way; `get` raises
+  `CredentialError` at the boundary, while `set`/`delete` proceed from `{}` — the
+  write path forgives because the recovery command the error names reaches a `set`
+  call, and raising there would crash the very command the message points at. The
+  CRITICAL log + backup fire on both paths, so nothing is silent.
 - **`keyring_backend.py`** — `KeyringBackend`: delegates to the `keyring` package with
   service name `"kitty"`. `get` swallows every exception to `None`; `set` wraps failures in
   `CredentialError` (F39 — headless Linux without D-Bus raises `NoKeyringError`); `delete`
@@ -1268,22 +1575,31 @@ row + the KBR-154 scope addition). This section is the To Be state of
   `CredentialStore(backends=[FileBackend(...)])`. It is the exported OS-native option; the
   §6.2.4 contract pins what it would get from `keyring` the day it is wired.
 
-### 11.2 The corruption contract (KBR-87)
+### 11.2 The corruption contract (KBR-87, KBR-291)
 
-`FileBackend.get` distinguishes **absent** from **corrupt**:
+`FileBackend.get` distinguishes **absent** from **corrupt** at two layers:
 
-- ref not in the store → `None` ("no credential");
-- ref present but the stored value is not decodable → `CredentialError` naming the ref,
-  chained (`raise ... from`) from the cause. Undecodable means one of the four measured
-  shapes: not valid base64 (`binascii.Error`), a non-ASCII string (`ValueError` — raised
-  by `b64decode`'s ASCII-encode step, independent of the `validate=` flag), decoded bytes
-  not valid UTF-8 (`UnicodeDecodeError`), or a non-string stored value (`TypeError` — the
-  file is user-editable JSON). An explicit JSON `null` value is the **absent** spelling,
-  not corruption: `set()` never writes it and `data.get(ref)` returns `None` for it, so
-  it takes the absent branch by construction — pinned by test. `binascii.Error` and
-  `UnicodeDecodeError` both subclass
-  `ValueError`, so the handler is `except (ValueError, TypeError)` — exactly as narrow as
-  naming the subtypes, and complete over every measured shape.
+- **Per-ref** (KBR-87): ref not in the store → `None` ("no credential"); ref present
+  but the stored value is not decodable → `CredentialError` naming the ref, chained
+  (`raise ... from`) from the cause. Undecodable means one of the four measured
+  shapes: not valid base64 (`binascii.Error`), a non-ASCII string (`ValueError` —
+  raised by `b64decode`'s ASCII-encode step, independent of the `validate=` flag),
+  decoded bytes not valid UTF-8 (`UnicodeDecodeError`), or a non-string stored value
+  (`TypeError` — the file is user-editable JSON). An explicit JSON `null` value is
+  the **absent** spelling, not corruption: `set()` never writes it and
+  `data.get(ref)` returns `None` for it, so it takes the absent branch by
+  construction — pinned by test. `binascii.Error` and `UnicodeDecodeError` both
+  subclass `ValueError`, so the handler is `except (ValueError, TypeError)` — exactly
+  as narrow as naming the subtypes, and complete over every measured shape.
+- **File-level** (KBR-291): the file's bytes are not valid UTF-8, or its JSON parses
+  to a non-dict (top-level list, string, number, bool, null) — both raise
+  `CredentialError` naming the file at the backend boundary. Shape (b) chains from
+  the `UnicodeDecodeError`; shape (a) does not chain (the JSON parsed cleanly, so
+  there is no underlying exception). F37 (invalid JSON) has a two-branch contract:
+  the success branch (backup rename succeeded) is unchanged — `get` returns `None`,
+  the file is reset to `{}` behind a CRITICAL log; the failure branch raises
+  `CredentialError` honestly rather than writing `{}` over the still-damaged
+  original.
 
 **Where the signal lands — per call site.** The raise is only half the contract; a signal
 nobody receives is a traceback on every startup path:
@@ -1328,6 +1644,46 @@ test: `"ab@=="` strips to the length-valid `"ab=="` and silently decodes to the
 single byte `b"i"` under `validate=False` — corruption read back as a plausible
 single-character credential — while `validate=True` rejects it outright.
 
+**Why the write path forgives file-level damage (KBR-291).** `set`/`delete` swallow the
+file-level `CredentialError` (`_read_raw_for_write` treats a damaged file as empty) while
+`get` propagates it. The recovery command the error message names (`kitty setup`) reaches
+a `set` call — if `set` raised, the wizard would crash on the very write the user is
+performing, re-creating the diagnostic failure this contract exists to eliminate. The
+CRITICAL log and backup still fire from `_read_raw` before the write path forgives, so
+nothing is silent. `CredentialStore.delete` is already best-effort
+(`contextlib.suppress(Exception)`).
+
+**Why `_read_raw_for_write` re-raises when `self._path` still exists.** When `os.replace`
+fails (e.g., a read-only bind mount on the credentials directory), the damaged file
+remains at `self._path` and the CRITICAL log claims the original was preserved at a
+backup that does not exist. The next `set` swallowing the exception would overwrite the
+damaged original with no backup anywhere — silent credential loss accompanied by a
+confident false promise. `_read_raw_for_write` checks `self._path.exists()` after the
+raise: present (backup failed) → propagate, the recovery command reports the failure;
+absent (backup succeeded) → return `{}`, the write proceeds. Neither the shape (a) arm
+nor the shape (b) arm writes `{}` after the backup — shape (a) because doing so would
+erase the `self._path.exists()` signal the guard reads, and shape (b) because the bytes
+cannot be decoded and recreating `{}` adds nothing. Both rely on that single file-system
+check to distinguish "backup succeeded" from "backup failed".
+
+**Why the F37 path also raises on backup failure.** F37's success branch (invalid JSON
+with a successful backup) is unchanged: `get` returns `None`, the file is reset to
+`{}`, no raise. The failure branch (invalid JSON with a failed backup) now raises
+`CredentialError` rather than writing `{}` over the still-damaged original — the same
+silent-loss argument as the file-level guards, applied to the pre-existing F37 path.
+The `_back_up_damaged_file` helper returns the rename's success; F37 only writes
+`{}` and returns when the rename succeeded. Acceptance criterion 3's "F37 unchanged"
+holds for the success branch; this paragraph records the explicit failure-branch
+contract change.
+
+**Why wizard `cred_store.set` sites wrap `CredentialError`.** The seven wizard set
+sites (`setup_cmd.py`, `profile_cmd.py`, `auth_cmd.py`, `egress_cmd.py`) wrap
+`cred_store.set(...)` in `try/except CredentialError: print_error(...); exit`. Without
+the wrappers, a backup-failed raise would propagate as a Python traceback at the
+recovery command — the KBR-154 diagnostic family on the very path the error names.
+The wrappers produce the same clean `Error: …` + exit the receiver map produces for
+every `get` site.
+
 ### 11.3 The keyring dependency contract
 
 §6.2.4's rule for a dependency whose behaviour varies by platform **by design** ("where no
@@ -1366,8 +1722,307 @@ unavailable guard.
   invalid base64, non-ASCII string, invalid UTF-8, non-string), absent-vs-corrupt, and
   per-ref isolation; the F37 backup tests in
   `tests/credentials/test_stage7_credentials.py` are unchanged and stay green.
+- `tests/test_credential_store.py::TestFileLevelCorruption` (KBR-291) — the file-level
+  arms: invalid-UTF-8 bytes (shape b, constructed values, chained from
+  `UnicodeDecodeError`) and valid-JSON-non-dict payloads (shape a, parametrised over
+  list/string/number/bool/null, no chaining), backup content + CRITICAL log pinning
+  path and backup path, `set`/`delete` after damage (the write-path forgiveness),
+  the write-path propagation when the backup rename fails (read-only-mount case,
+  `os.replace` monkeypatched to raise, `set` must not overwrite the damaged
+  original), the F37 backup-failure raise (the round-3 contract change — F37 no
+  longer silently resets when the rename failed), the success-branch message naming
+  the real backup path, and the F37 unchanged regression pin.
 - `tests/test_egress_store.py` — the corrupt stored gateway password raises the documented
   `ValueError` (chained, naming `kitty egress`), the twin of the existing
   missing-credential test.
 - `tests/test_doctor_cmd.py` / the profile-wizard reuse scan — corruption reported, flow
   stays reachable.
+
+## 12. Request ingress trust boundary
+
+Each bridge-protocol POST route runs a per-protocol normalizer at the trust boundary,
+**before** any translator or upstream call. The normalizer enforces the contract the
+downstream path can rely on: "every shape the translator iterates or subscripts is the
+shape the schema says." Anything else is rejected with the dialect's 400 envelope
+([KBR-82](https://shelpuk.atlassian.net/browse/KBR-82), §6.2.1 — *the bridge must never
+500 on a malformed body*). The schemathesis conformance run is the discoverer; the
+L2 pins in `tests/test_route_preflight.py` and sibling files are the deterministic
+regression gate.
+
+### 12.1 The four normalizers and their scopes
+
+| Normalizer | Protocol | Required-shape checks (→ 400) | Tolerated-as-absent (omitted from the body) |
+|---|---|---|---|
+| `_normalize_messages_request` (server.py) | `/v1/messages` (Anthropic Messages) | body, `model`, `messages`, `messages[*]`, `tools`, `tools[*]`, `tools[*].name` (non-empty string) | — (required by the Anthropic contract; missing `model`/`messages` 400s) |
+| `_normalize_chat_completions_request` (server.py) | `/v1/chat/completions` (OpenAI Chat Completions) | body, `messages`, `messages[*]` | `tools` (deliberately not validated: CC tools are passed through to the upstream without iteration; measured 200 on non-array tool bodies; CC tools nest `name` under `function`, so a flat `tool["name"]` check would 400 every legitimate CC body — there is no measured CC tools 500 to prevent) |
+| `normalize_responses_request` (`responses/translator.py`, [KBR-144](https://shelpuk.atlassian.net/browse/KBR-144)) | `/v1/responses` (OpenAI Responses) | body, `input` as string-or-list, list elements as objects, plus the five `/v1/responses` shapes closed with KBR-159 | — |
+| `_normalize_gemini_request` (server.py) | `/v1beta/...:{generate,streamGenerate}Content` | body, `contents` (list of objects) — extended with [KBR-288](https://shelpuk.atlassian.net/browse/KBR-288) to also reject required-shape defects in `contents[*].parts`, `parts[*]`, `parts[*].functionCall`/`functionResponse` member defects, `tools[*]`, `tools[*].functionDeclarations` and its members | `systemInstruction` (KBR-82), `generationConfig` (KBR-82), `toolConfig` subtree (KBR-82); `tools` itself when non-list (KBR-288 — schema permits absence) |
+
+### 12.2 Dialect 400 envelopes
+
+Each normalizer raises a dialect-specific `Invalid*Request(ValueError)`. The handler
+catches it and returns the route's published envelope (already documented in
+`openapi/kitty-bridge.yaml`):
+
+- **Anthropic Messages**: `{"type": "error", "error": {"type": "...", "message": "..."}}`.
+- **OpenAI Chat Completions**: `{"error": {"code": "invalid_request", "message": "..."}}`.
+- **OpenAI Responses**: `{"error": {"code": "invalid_input", "message": "..."}}` (the
+  `reason: "invalid_input"` discriminator introduced with KBR-144).
+- **Gemini**: `{"error": {"code": <int 400>, "message": "...", "status": "INVALID_ARGUMENT"}}`.
+
+The OpenAPI document declares each of these as the published 400; no undocumented
+statuses. The schemathesis schema-conformance check pins this contract — a guard that
+catches a new 400 the schema does not declare as well as a 500 the schema forbids.
+
+### 12.3 Disposition policy — 400 for required, tolerate-as-absent for optional
+
+The normalizers deliberately split the disposition of malformed user input, not by
+crash class but by **whether the field is required by the schema**.
+
+- **Required shapes** (the request cannot proceed without them, or a non-empty
+  iteration over the value is the contract the downstream path expects): **400**. A
+  missing or wrong-typed `contents`, a `contents[i]` that is not a `Content` object,
+  a `parts[j]` that is not a `Part` object, a `tools[*].name` that is missing —
+  these are client mistakes. The OpenAPI document calls the client out for the wrong
+  shape; the bridge's job is to surface that cleanly, not to silently reshape.
+- **Optional shapes** (`systemInstruction`, `generationConfig`, `toolConfig` on the
+  Gemini side; `tools` itself on Gemini): **tolerated as absent**. The schema
+  documents them as optional with a default; an optional field whose shape is
+  wrong is the same as the field being omitted. Reshaping silently keeps permissive
+  Gemini clients reachable (some send partial tools arrays; some omit `systemInstruction`
+  entirely) and keeps the KBR-82 conformance run from spiking on every minor shape
+  drift.
+
+**The split, not blanket tolerance.** A blanket "tolerate everything" rule would 500
+no client but would also fail the schemathesis schema-conformance check the moment a
+fuzzer sends an iterate-able-required shape (the documented `contents[*].parts[*]`
+is required when `contents` is non-empty — a tolerated-as-absent `parts` would
+silently drop a real conversation turn, breaking I1 message-fidelity rather than
+breaking I2 indistinguishability).
+
+**Why not blanket 400 either.** The schemathesis fuzzer surfaces the same class of
+shape defect on optional envelopes (`generationConfig: true`, `toolConfig: 5`) as on
+required ones; blanket 400 would 400 a real client whose implementation drifted a
+single optional field. The KBR-82 product-owner decision — split, not blanket —
+locks the policy in for every widening this ticket or its siblings propose.
+
+### 12.4 Gemini ingress — KBR-288 widening
+
+[KBR-288](https://shelpuk.atlassian.net/browse/KBR-288) closes the Gemini request
+path. Two things happened between the ticket's filing and this work: the
+skip-never-raise commits on `main` (post-KBR-82 follow-ups) made the translator
+silently skip most container-shape defects the ticket's probe list names, and
+empirical probing at HEAD (`.scratch/probe_kbr288.py` at requirements time) found
+the crash classes that survived those guards. The ticket therefore delivers two
+things:
+
+1. **Genuine crash closure** — shapes that still 500 at HEAD:
+
+| Shape | Crash at HEAD |
+|---|---|
+| `contents[i].role` present and non-hashable (list / dict) | `TypeError: unhashable type` (`_ROLE_MAP.get(role, role)`) |
+| `contents[i].parts[*].text` present and non-string | `TypeError: sequence item 0: expected str instance` (all three text branches: user, assistant, assistant-thought) |
+| `tools[i].functionDeclarations` present and `null` | `TypeError: 'NoneType' object is not iterable` (`tool.get("functionDeclarations", [])` — the default does not fire when the key is present-null) |
+| `tools[i].functionDeclarations` present and `true` | `TypeError: 'bool' object is not iterable` (same site) |
+| `systemInstruction.parts[*].text` present and non-string | `TypeError: sequence item 0` (`_extract_text` filters non-dict parts but joins unguarded text) |
+
+2. **Disposition tightening** — the Wave-2 silent-skip shapes become boundary
+   400s, per §12.3's required-shape policy (a silent drop inside a required
+   chain is an I1 message-fidelity hit, not a clean outcome):
+
+| Shape | Old disposition | New disposition | Rationale |
+|---|---|---|---|
+| `contents[i].role` present-and-non-string | crash (see above) | 400 INVALID_ARGUMENT | required Content member, documented `type: string` (PO decision 2026-09-21) |
+| `contents[i].parts` not a list | tolerated-skip | 400 INVALID_ARGUMENT | required; translator iterates it |
+| `contents[i].parts[*]` not a dict | tolerated-skip | 400 INVALID_ARGUMENT | required; per-part member access |
+| `contents[i].parts[*].text` non-string | crash (see above) | 400 INVALID_ARGUMENT | required Part member, documented `type: string` |
+| `parts[*].functionCall` non-dict / without string `name` | tolerated-skip | 400 INVALID_ARGUMENT | required-when-present member; `fc["name"]` read |
+| `parts[*].functionResponse` (mirror of functionCall) | tolerated-skip | 400 INVALID_ARGUMENT | mirror |
+| `tools[i]` not a dict | tolerated-skip | 400 INVALID_ARGUMENT | required Tool member |
+| `tools[i].functionDeclarations` present-null or non-list-non-dict | tolerated-skip (string/dict iterate empty) / crash (null, bool) | 400 INVALID_ARGUMENT | required list member; present-null defeats the `.get(..., [])` default |
+| `tools[i].functionDeclarations[*]` not a dict / without string `name` | tolerated-skip | 400 INVALID_ARGUMENT | required FunctionDeclaration member; `fd["name"]` read |
+
+The optional envelopes keep their tolerated disposition, with one
+crash-proofing fix inside the translator: `_extract_text` gains an
+`isinstance(p.get("text"), str)` filter so a non-string text inside a
+tolerated `systemInstruction` envelope does not crash the join — a tolerated
+envelope gets no boundary check, so the translator carries the leaf guard.
+
+**Key absence vs wrong type.** Every "400" row above fires on a *present*
+value whose documented type is violated. A *missing* key stays tolerated
+throughout — `{"contents": [{"role": "user"}]}` (no `parts`) proceeds with an
+empty parts list, exactly as KBR-82 left it: there is no crash class on
+absence (`content.get("parts", [])` handles it), and requiring the key would
+400 bodies the pre-KBR-288 contract accepted. The §12.3 fidelity argument
+("a tolerated-as-absent `parts` would silently drop a real conversation
+turn") is about a *present-but-wrong-typed* `parts` being silently treated
+as absent — not about the key's absence.
+
+Helpers (`_validate_gemini_content`, `_validate_gemini_part`,
+`_validate_gemini_tools`) keep the call sites readable. Each helper is
+covered by route-level L2 pins in `tests/test_route_preflight.py`
+(per-shape `assert status == 400` plus the dialect-envelope check).
+
+**Ordering dependency (verified):** validation runs first in `_handle_gemini`
+— normalizer, then translate, truncate, compaction, size check — so no 400 can
+be preempted by a later failure, and `translate_request` has exactly one call
+site (immediately after the normalizer), which is what makes the
+boundary-invariant claim structural rather than aspirational. The 400 shapes
+are all ones a schema-conforming Gemini CLI cannot send; the conformance
+fuzzer's distribution is the only producer.
+
+### 12.5 Verification
+
+- `tests/test_route_preflight.py` (L2) — per-protocol pins; the Gemini rows carry
+  every To Be-table row of §12.4 with a positive control on `:generateContent`,
+  plus one tightening shape and one crash-class shape on `:streamGenerateContent`
+  (the shared-handler proof), asserting HTTP `status == 400`, `error.code` is
+  an integer (any int — a regression writing `code: 500` over HTTP 400 would
+  still pin), `error.status == "INVALID_ARGUMENT"`, and no traceback leak.
+- `tests/test_openapi_conformance.py` (L2) — the schemathesis conformance run; the
+  discoverer. The 400 envelope is schema-documented so widening the normalizer does
+  not introduce an undocumented status.
+- `tests/test_openapi_schema.py` (L2) — pins the `INVALID_ARGUMENT` enum value.
+- `src/kitty/bridge/gemini/translator.py::translate_request` then raises no
+  exception on any user-supplied input: container shapes arrive
+  boundary-validated; the leaf-value reads (role, text, functionCall/functionResponse/
+  functionDeclaration names, tool names) carry local isinstance guards — the
+  structural-review criterion the ticket names. (`carry_gemini_tool_choice` already
+  satisfies this for the `toolConfig` subtree.)
+
+### 12.6 Out of scope
+
+- The response direction (`translate_response`, `translate_stream_chunk`) processes
+  upstream CC bodies, not user input, and is not fuzzer-reachable.
+- The Responses, Chat Completions, and Messages ingress normalizers — already
+  hardened by KBR-82, KBR-144, KBR-159, KBR-169. KBR-288 covers Gemini only.
+- The deeper nightly fuzz job ([KBR-116](https://shelpuk.atlassian.net/browse/KBR-116),
+  T-K7) — the discoverer for ongoing shape drift; this ticket closes the KBR-82
+  conformance-suite-discoverable crash set on the Gemini path.
+
+---
+
+## 13. Bedrock adapter — list-form CC content → Converse blocks
+
+Traces to [KBR-223](https://shelpuk.atlassian.net/browse/KBR-223). Read alongside §8
+(Converse reasoningContent emission), which owns the adapter's view of one content-block
+spelling, and `TEST_SUITE.md` §3.2.1 (M3/M4 register rows), whose truncation prose records
+the list-form gap this section closes. This section owns the adapter's view of *list-form*
+content — tool results and user turns — and the truncation sites that count their bytes.
+
+### 13.1 The rule
+
+`kitty.providers.bedrock.BedrockAdapter` translates list-form CC content part-by-part into
+Converse blocks via a shared module-level mapper. The four part kinds that matter, and
+their outputs:
+
+| CC part | Converse block | Notes |
+|---|---|---|
+| `{"type":"text","text":T}` | `{"text": T}` | text only |
+| `{"type":"image_url","image_url":{"url":"data:image/<fmt>;base64,<b64>"}}` | `{"image":{"format":<fmt>,"source":{"bytes":<decoded>}}}` | fmt ∈ {png,jpeg,gif,webp}; http(s) URLs dropped |
+| `{"type":"image","source":{"type":"base64","media_type":"image/<fmt>","data":<b64>"}}` | same image block | Anthropic-native shape arrives via the Messages→CC translator's tool_result passthrough (`tr.get("content","")`) |
+| `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":<b64>"}}` | `{"document":{"format":"pdf","name":<title or "document">,"source":{"bytes":<decoded>}}}` | DocumentBlock requires `name` and `source` per the installed service model |
+
+Anything else — non-data-URL images, `file` sources, unknown types, undecodable payloads —
+is **dropped**, the established posture for unmappable shapes (KBR-222,
+`build_user_content_message`'s `file` source drop). If every part drops, the result falls
+back to `[{"text": ""}]` — the empty list is validator-clean (measured), but a non-empty
+block list is the shape the service is documented to take, and the fallback costs one line.
+
+Two call sites:
+
+* `_translate_tool_result_msg` — list-form `content` becomes `toolResult.content`. The
+  pre-fix behaviour was a verbatim copy that left CC `{"type": …}` keys in place; botocore's
+  parameter validator rejected the body and `client.converse` failed the turn locally.
+* The user branch of `translate_to_upstream` — list-form user content becomes a list of
+  Converse blocks in part order. This replaces KBR-222's provisional flatten (which joined
+  text parts and dropped images): one Converse `text` block per text part, in order. On
+  hop-1 routes `build_user_content_message` only assembles a parts list when a non-text part
+  is present, so the common Messages-ingress turn is unaffected; a CC-native agent sending a
+  text-only parts list sees a wire-visible change from a single joined block to one block
+  per part.
+
+### 13.2 The truncation shared extractor
+
+Three sites check tool-result payloads for the 50,000-char limit: `_truncate_oversized_tool_results`
+(CC + Anthropic-native arms), `_truncate_oversized_responses_outputs` (Responses arm), and
+`_compact_messages` step 1 (CC arm, compaction-engaged only). All three now share one
+module-level size extractor in `server.py`:
+
+```python
+def _tool_result_content_size(content: str | list) -> int:
+    if isinstance(content, str):
+        return len(content)
+    try:
+        return len(json.dumps(content, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return -1  # F33-style: not measurable → leave alone
+```
+
+An over-limit list-form payload is replaced by the same `[Tool output truncated — original
+size: N chars]` notice string the string branch uses (the list collapses to the notice).
+String-arm behaviour is byte-identical to today, so the existing string-only Hypothesis
+oracles (`_expected_truncation_count`, `_apply_cc/native/responses_truncation`) keep
+passing unchanged — the change only *widens* what the sites consider.
+
+This closes the list-form gap recorded in `TEST_SUITE.md` §3.2.1 (M3, M4) as the KBR-169
+"ships untruncated" symptom — KBR-223 owns the gap per KBR-169's adjacent-scope comment.
+
+### 13.3 The contract oracle
+
+L1 asserts the adapter's emission against the live service model — the same oracle pattern
+§8 adopts for `reasoningContent`. The oracle lives on `_bedrock_body` (the pure builder
+extracted by KBR-89), so the validation is unit-pure (no hook envelope, no boto3 client):
+
+```python
+input_shape = (
+    botocore.session.Session()
+    .get_service_model("bedrock-runtime")
+    .operation_model("Converse")
+    .input_shape
+)
+model_id, body = adapter._bedrock_body(cc_request)
+botocore.validate.validate_parameters({"modelId": model_id, **body}, input_shape)
+```
+
+The oracle covers four branches:
+
+1. The KBR-264 reasoning branches (populated and `_thinking_enabled`-injected-empty),
+   re-driven through `_bedrock_body` with the same negative controls on the pre-fix
+   `{"reasoningContent": {"text": …}}` spelling.
+2. A tool result with list-form content — text + image + document variants — passes.
+3. The pre-fix verbatim copy of that list content — `[{"type":"text","text":…}]` etc. —
+   raises `botocore.exceptions.ParamValidationError`.
+4. A user turn with an image part passes; the verbatim CC parts list for that turn raises.
+
+### 13.4 Decisions, and why
+
+- **Map late in the adapter, not normalize at ingress.** KBR-169's adjacent-scope comment
+  offered "normalize the list-form shape once at the ingress boundary" as the alternative.
+  Rejected: ingress normalization to strings would destroy the image/document payloads
+  this section exists to carry (the same loss KBR-222 temporarily accepted on the user
+  branch), and it would change the CC wire shape every other adapter reads. The Bedrock
+  adapter is the only place the Converse block union is the target shape.
+- **Drop unmappable parts rather than fail the turn.** Matches KBR-222's established
+  posture (`build_user_content_message` drops `file` sources with a recorded reason). A
+  hard failure on an unmappable part would recreate this ticket's defect class one level
+  down. The all-parts-dropped fallback to `[{"text": ""}]` keeps the emitted list
+  non-empty, matching the documented shape — the client-side validator accepts `[]` and
+  `{"text":""}` (measured on the installed model), so the fallback is defence-in-depth
+  against a service-side rule the oracle can't see.
+- **Truncation collapses a list to the notice string rather than trimming within parts.**
+  The string branch's contract (one notice, size recorded) is preserved; trimming inside
+  part lists would need per-kind size budgets and would still change the shape. The size
+  measure is the serialized JSON length — what actually ships on the wire — not the
+  concatenated text length, so image/document payloads are counted too.
+- **Oracle on `_bedrock_body`, not `translate_to_upstream`.** KBR-89's scope addition names
+  the builder as the oracle's home: it is the pure function whose return value is the
+  shipped body kwargs, so the validation is unit-pure and tight. Re-attaching `modelId`
+  is the only envelope the oracle needs.
+- **Shared size extractor in `server.py`, not `bridge/`.** The three call sites already
+  live in `server.py`; a shared helper belongs beside them. Putting it in `bridge/` would
+  invert the dependency direction (a translation-time helper in a transport module).
+- **No new register row, no new wire-shape class.** The fix widens what M3/M4 consider
+  (their triggers become content-shape-aware, not string-only); TEST_SUITE.md §3.2.1's M3/M4
+  prose is updated to the closed state but the rows themselves stay. The Bedrock adapter
+  continues to declare `WireShape.OTHER`; the emitted shape family is unchanged.

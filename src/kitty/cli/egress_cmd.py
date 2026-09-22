@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 
-from kitty.credentials.store import CredentialStore
+from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.egress import EgressConfig, parse_proxy_url
 from kitty.egress_store import EgressRecord, EgressStore, resolve_egress
 from kitty.tui.display import (
@@ -203,7 +203,15 @@ def _configure_flow(store: EgressStore, cred_store: CredentialStore) -> None:
 
     previous = store.load()
     if auth_ref is not None and password is not None:
-        cred_store.set(auth_ref, password)
+        try:
+            cred_store.set(auth_ref, password)
+        except CredentialError as exc:
+            # Damage-and-no-backup: surface the error cleanly — this is
+            # the very command the corruption message tells the user to
+            # run, so a raw crash here would defeat the recovery path
+            # (KBR-291 round-3 review).
+            print_error(str(exc))
+            return
     store.save(EgressRecord(proxy_url=proxy_url, username=username, auth_ref=auth_ref))
 
     # Drop the superseded password so it does not linger in the store.

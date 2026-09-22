@@ -12,7 +12,7 @@ import pytest
 from kitty.auth.oauth_session import OAuthSession
 from kitty.cli.setup_cmd import run_setup_wizard
 from kitty.credentials.file_backend import FileBackend
-from kitty.credentials.store import CredentialStore
+from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import PROVIDER_LABELS, Profile
 from kitty.profiles.store import ProfileStore
 
@@ -324,3 +324,61 @@ class TestSetupWizardBackupStep:
         backup_calls = [c for c in mock_confirm.call_args_list if c.args and c.args[0] == BACKUP_PROMPT]
         assert len(backup_calls) == 1
         assert backup_calls[0].kwargs["default"] is False
+
+
+class TestCredentialErrorOnSet:
+    """KBR-291 round-4 pin: the wizard's `cred_store.set` wrappers.
+
+    A backup-failed `CredentialError` from `FileBackend._read_raw_for_write`
+    must surface as a clean `print_error` + SystemExit(1) at the wizard,
+    not a raw traceback. Without the wrapper the recovery command itself
+    dies — the KBR-154 diagnostic family this contract exists to prevent.
+    """
+
+    def test_new_key_branch_raises_systemexit_cleanly(self, store, cred_store, monkeypatch) -> None:
+        def _boom(ref: str, value: str) -> None:
+            raise CredentialError("simulated damage + failed backup")
+
+        monkeypatch.setattr(cred_store, "set", _boom)
+
+        with (
+            _mock_tty(),
+            patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
+            patch(f"{_MOD}._find_reusable_auth_ref", return_value=None),
+            patch(f"{_MOD}.prompt_secret", return_value="sk-key"),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-4o", "someprofile"]),
+            patch(f"{_MOD}.print_error") as mock_err,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            run_setup_wizard(store, cred_store)
+
+        assert excinfo.value.code == 1
+        mock_err.assert_called_once()
+        assert "simulated damage + failed backup" in str(mock_err.call_args)
+
+    def test_reuse_rejection_branch_also_wrapped(self, store, cred_store, monkeypatch) -> None:
+        """The reuse-declined branch has its own `cred_store.set` call
+        with its own wrapper — both branches of the wizard key flow
+        carry the contract."""
+        existing_ref = str(uuid.uuid4())
+
+        def _boom(ref: str, value: str) -> None:
+            raise CredentialError("simulated damage + failed backup")
+
+        monkeypatch.setattr(cred_store, "set", _boom)
+
+        with (
+            _mock_tty(),
+            patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["zai_regular"]),
+            patch(f"{_MOD}._find_reusable_auth_ref", return_value=existing_ref),
+            patch(f"{_MOD}.prompt_confirm", side_effect=[False]),  # decline reuse
+            patch(f"{_MOD}.prompt_secret", return_value="sk-key"),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-4o", "someprofile"]),
+            patch(f"{_MOD}.print_error") as mock_err,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            run_setup_wizard(store, cred_store)
+
+        assert excinfo.value.code == 1
+        mock_err.assert_called_once()
+        assert "simulated damage + failed backup" in str(mock_err.call_args)

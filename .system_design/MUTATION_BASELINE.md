@@ -16,6 +16,49 @@ This baseline is what [KBR-91](https://shelpuk.atlassian.net/browse/KBR-91)
 (T-H3, per-component thresholds + nightly reporting) builds its
 thresholds on. Until that ticket lands, no number here gates anything.
 
+## 2026-09-21 — KBR-290: the §8.2 socket/process-binding modules leave mutmut's selection
+
+[KBR-290](https://shelpuk.atlassian.net/browse/KBR-290) added one
+`--ignore <path>` row per module in
+`tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the fifteen
+§8.2 socket/process-binding modules) to `[tool.mutmut]
+pytest_add_cli_args_test_selection`, so the nightly mutation run never
+depends on loopback socket timing (the KBR-266 clean-test stall's root
+cause). The Fast job's `pytest -m "l1 or l2"` selection is unchanged — every
+module still runs on every push (and carries KBR-272's 120 s timeout mark on
+the gate once that PR lands). Three
+consequences for reading the numbers this file records:
+
+1. **Kills vanish.** Tests in the deselected modules stop associating with
+   mutants, so mutants they would have killed now show as `survived`. This
+   is the effect §6.1 already anticipates ("kills currently credited through
+   substantively-L3 tests vanish on re-measure") and is the desired honesty,
+   not a regression.
+2. **`no_tests` dilution.** Mutants covered *only* by the deselected tests
+   reclassify to `no_tests` (exit codes 5/33) and stay in the score
+   denominator (`tested = total − skipped − not_checked`). The groups most
+   affected are `compaction_and_pairing` — 532–596 L1 tests associated with
+   each method before the change, several contributed by
+   `tests/harness/test_bridge.py`, `test_vertical_slice.py`,
+   `test_containment.py` and `test_provider_aiohttp.py` — and `egress`,
+   which overlaps with `tests/test_egress_https_proxy.py`. KBR-91's
+   thresholding must treat the next per-group re-measure as the new
+   baseline, not as a regression against the rows above.
+3. **Cache invalidation on the first post-merge run.** Verified on the
+   mutmut 3.8.0 installed in this venv (pyproject declares `mutmut>=3.0,<4`;
+   the fingerprint + invalidation behaviour below holds across the pinned
+   range per the mutmut 3.x source): mutmut fingerprints
+   `pytest_add_cli_args_test_selection` (`test_selection` in
+   `config_fingerprint`); a change resets all cached verdicts and forces a
+   full stats recollection and per-mutant re-run
+   (`_apply_config_change_invalidation`). The "re-running resumes from here"
+   property of `mutmut run` does **not** apply across this change — budget
+   the first nightly as a full re-run.
+
+The deselection set is held against `pyproject.toml` by
+`tests/test_socket_binding_l1_mutation_exclusion.py` (l2); the same registry
+is the source of truth for KBR-272's timeout-mark guard.
+
 ## 2026-09-17 — KBR-73 (T-F4) note: egress-group tests strengthened, TOTAL not re-measured
 
 [KBR-73](https://shelpuk.atlassian.net/browse/KBR-73) added five property
@@ -65,9 +108,10 @@ registry, not in `pyproject.toml`.
 | model_context | 183 | 73 | 43 | 30 | 0 | 0 | 0 | 110 | 58.9% |
 | openai_subscription | 474 | 474 | 236 | 238 | 0 | 0 | 0 | 0 | 49.8% |
 | bedrock_transport | _pending_ | -- | -- | -- | -- | -- | -- | -- | _pending_ — added by KBR-89 (T-H2); not yet measured; KBR-91 (T-H3) re-measures and sets the threshold row |
+| ollama_transport | _pending_ | -- | -- | -- | -- | -- | -- | -- | _pending_ — added by KBR-90 (T-H5) as the P19 / `OllamaCloudAdapter._ollama_body` sibling of `bedrock_transport`; not yet measured; KBR-91 (T-H3) re-measures and sets the threshold row |
 | egress | 125 | 124 | 94 | 30 | 0 | 0 | 0 | 1 | 75.8% |
 | supporting | 773 | 686 | 445 | 241 | 0 | 0 | 0 | 87 | 64.9% |
-| **TOTAL** | **7288** | **5467** | **3781** | **1676** | **10** | **0** | **0** | **1821** | **61.4%** of tested (648 in `compaction_and_pairing` pending; `bedrock_transport` added by KBR-89, re-measured by KBR-91) |
+| **TOTAL** | **7288** | **5467** | **3781** | **1676** | **10** | **0** | **0** | **1821** | **61.4%** of tested (648 in `compaction_and_pairing` pending; `bedrock_transport` added by KBR-89 and `ollama_transport` by KBR-90, re-measured by KBR-91) |
 
 Column meanings, so the numbers recompute from the formula:
 

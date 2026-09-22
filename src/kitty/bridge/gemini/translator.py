@@ -222,6 +222,35 @@ class GeminiTranslator:
         if "topP" in gen_config:
             cc_request["top_p"] = gen_config["topP"]
 
+        # KBR-213: Gemini names the stop-sequence list ``stopSequences``; Chat
+        # Completions names it ``stop``. Without the rename the user's stop
+        # sequences die in the first hop and nothing downstream can restore
+        # them — the same shape KBR-178 settled for the Messages ingress.
+        # An empty list is omitted (it asks for no stop behaviour, and
+        # ``stop: []`` violates the published CC schema's ``StopConfiguration``
+        # ``minItems: 1``). Everything else is forwarded verbatim: a bare
+        # string, a list with non-string members, an over-limit list. The
+        # provider rejects the wrong shape; an explicit error beats an
+        # instruction silently thrown away. The empty-string scalar guard in
+        # CC-ingress ``_normalize_cc_stop`` does not run here — normalisation
+        # is single-site (KBR-178 R11, authority M15).
+        stop_sequences = gen_config.get("stopSequences")
+        if stop_sequences:
+            cc_request["stop"] = stop_sequences
+
+        # KBR-213 / KBR-178: Chat Completions declares no ``top_k`` at all, so
+        # a bare key would be a field no CC provider accepts. The value rides
+        # the internal key KBR-178 introduced; Anthropic-family adapters
+        # restore it and ``_INTERNAL_KEYS`` strips it everywhere else.
+        # Booleans are excluded because ``isinstance(True, int)`` is True;
+        # the harness reader excludes them from ``(int,)`` typing via
+        # ``_typed_leaf`` (the same bool/int subclass trap), so this guard
+        # mirrors the reader — a wire ``true`` should not project a value
+        # the projection itself rejects.
+        top_k = gen_config.get("topK")
+        if isinstance(top_k, int) and not isinstance(top_k, bool):
+            cc_request["_top_k"] = top_k
+
         # Tools mapping
         tools = self._translate_tools(gemini_request.get("tools", []))
         if tools:
@@ -235,16 +264,24 @@ class GeminiTranslator:
     def _translate_content(self, content: dict) -> dict | list[dict] | None:
         """Translate a single Gemini Content object to CC message(s).
 
-        Malformed shapes are skipped, never raised: a ``content`` that is not
-        a dict, ``parts`` entries that are not dicts, and
-        ``functionResponse`` / ``functionCall`` objects without a ``name``
-        all contribute nothing. Schemathesis fuzzing (KBR-82's conformance
-        run) reaches every branch here with arbitrary JSON, and a body that
-        violates the Gemini schema is a 400-shaped input, not a 500.
+        Container shapes (``content`` a dict, ``parts`` a list of dicts,
+        ``functionResponse`` / ``functionCall`` dicts with a string
+        ``name``) are validated at the ingress boundary since KBR-288 —
+        ``_normalize_gemini_request`` 400s the malformed ones before this
+        method runs. The ``isinstance`` guards below are defence in depth,
+        not the primary contract: they keep the skip-never-raise posture
+        for any caller that bypasses the boundary (tests, future routes)
+        and for the leaf values this method reads directly (``role``,
+        ``text``, ``functionCall`` / ``functionResponse`` names).
         """
         if not isinstance(content, dict):
             return None
         role = content.get("role", "user")
+        # Boundary guarantees a string here; defence-in-depth defaults to
+        # the documented ``"user"`` so a non-string role cannot trigger
+        # ``_ROLE_MAP``'s ``unhashable type`` crash on bypass callers.
+        if not isinstance(role, str):
+            role = "user"
         parts = content.get("parts", [])
         if not isinstance(parts, list):
             parts = []
@@ -286,9 +323,11 @@ class GeminiTranslator:
                             },
                         }
                     )
-                elif "text" in part and part.get("thought"):
+                elif isinstance(part.get("text"), str) and part.get("thought"):
+                    # Defence-in-depth: boundary 400s non-string text; on
+                    # bypass, drop the part rather than crash the join.
                     thought_parts.append(part["text"])
-                elif "text" in part:
+                elif isinstance(part.get("text"), str):
                     text_parts.append(part["text"])
 
             msg: dict = {"role": "assistant"}
@@ -303,7 +342,7 @@ class GeminiTranslator:
             return msg
 
         # Regular user message
-        texts = [p["text"] for p in parts if "text" in p]
+        texts = [p["text"] for p in parts if isinstance(p.get("text"), str)]
         if texts:
             return {"role": "user", "content": "\n".join(texts)}
         return None
@@ -311,11 +350,13 @@ class GeminiTranslator:
     def _translate_tools(self, gemini_tools: list[dict]) -> list[dict]:
         """Convert Gemini functionDeclarations to CC tools.
 
-        A ``tools`` value that is not a list, tools that are not dicts, and
-        declarations without a string ``name`` are skipped: a function tool
-        without a name is unusable on the CC wire, and dropping it beats
-        crashing the request (schemathesis reaches here with arbitrary JSON —
-        KBR-82's conformance run).
+        ``tools`` shape is validated at the ingress boundary since KBR-288
+        (``_normalize_gemini_request``): a list ``tools`` whose members are
+        dicts with list ``functionDeclarations`` of dicts with string
+        ``name``. The ``isinstance`` guards below are defence in depth for
+        callers that bypass the boundary, keeping the skip-never-raise
+        posture (a function tool without a name is unusable on the CC
+        wire; dropping it beats crashing the request).
         """
         cc_tools: list[dict] = []
         if not isinstance(gemini_tools, list):
@@ -358,8 +399,15 @@ class GeminiTranslator:
         parts = content.get("parts", [])
         if not isinstance(parts, list):
             return ""
+        # A tolerated envelope gets no boundary check, so this leaf read
+        # carries its own guard (KBR-288): a non-string ``text`` would
+        # otherwise crash the join with "sequence item 0". Per §12.3 the
+        # whole envelope is tolerated-as-absent, so the part contributes
+        # nothing rather than raising.
         return "\n".join(
-            p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p
+            p["text"]
+            for p in parts
+            if isinstance(p, dict) and isinstance(p.get("text"), str)
         )
 
     @staticmethod

@@ -1273,8 +1273,13 @@ def _read_tools(value: Any, residual: dict[str, Any]) -> tuple[c.ToolDecl, ...]:
             residual[path] = tool
             continue
 
-        if not isinstance(function.get("name"), str):
-            raise c.UnreadableBodyError(f"{path}.function must carry a name")
+        # KBR-281 extended the invocation site's strict-name raise to absent /
+        # non-string; KBR-295 closes the ``""`` gap here too
+        # (``contract.decode_arguments``): a tool nobody can name cannot be
+        # paired with its result or addressed by a register row.
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise c.UnreadableBodyError(f"{path}.function.name must be a non-empty string")
 
         schema = function.get("parameters")
         if schema is not None and not isinstance(schema, dict):

@@ -390,3 +390,60 @@ class TestFalsification:
         assert f"output[0].content[0].{text_field}" in projected.residual
         with pytest.raises(c.ResidualFieldsError, match=text_field):
             c.verify_total(projected)
+
+
+class TestNameRequired:
+    """A ``function_call`` output item whose ``name`` is missing, empty, or not a string raises.
+
+    ``contract.decode_arguments`` is explicit: ``""``
+    for a name is **not** lossless — a call nobody can name cannot be paired
+    with its result or addressed by a register row. KBR-279 landed the rule
+    for the Ollama readers, KBR-281 for Chat Completions / Gemini / Anthropic;
+    KBR-292 extends it here (§7.4.2 rule 7 row 2, seven strict readers).
+    """
+
+    @staticmethod
+    def _body_with_function_call(name: Any) -> dict[str, Any]:
+        """Return the published response whose one output item carries ``name``.
+
+        The item is the published ``function_call`` example verbatim;
+        ``name`` is spliced in verbatim, so ``None`` means the key is absent
+        rather than an explicit ``null`` — the absent form is the one the
+        published schema calls required and no published example shows.
+        """
+        item = dict(PUBLISHED_FUNCTION_CALL_ITEM)
+        if name is None:
+            del item["name"]
+        else:
+            item["name"] = name
+        body = json.loads(json.dumps(PUBLISHED_FULL_RESPONSE))
+        body["output"] = [item]
+        return body
+
+    def test_missing_function_call_name_raises(self) -> None:
+        """A ``function_call`` output item with no ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"output\[0\].name"):
+            rsp.ResponsesReplyProjection().read_reply(_reply(self._body_with_function_call(None)))
+
+    def test_empty_function_call_name_raises(self) -> None:
+        """A ``function_call`` output item with an empty ``name`` raises (KBR-292)."""
+        with pytest.raises(c.UnreadableBodyError, match=r"output\[0\].name"):
+            rsp.ResponsesReplyProjection().read_reply(_reply(self._body_with_function_call("")))
+
+    def test_non_string_function_call_name_raises(self) -> None:
+        """A ``function_call`` output item with a non-string ``name`` raises."""
+        with pytest.raises(c.UnreadableBodyError, match=r"output\[0\].name"):
+            rsp.ResponsesReplyProjection().read_reply(_reply(self._body_with_function_call(42)))
+
+    def test_named_function_call_control_is_clean(self) -> None:
+        """Control — the published named ``function_call`` projects cleanly."""
+        projected = rsp.ResponsesReplyProjection().read_reply(
+            _reply(self._body_with_function_call("get_weather"))
+        )
+
+        c.verify_total(projected)
+        part = projected.parts[0]
+        assert isinstance(part, c.ToolUse)
+        assert part.name == "get_weather"
+        assert part.arguments == {"location": "Paris"}
+        assert part.id == "call_234kdga09jf"

@@ -341,3 +341,37 @@ class TestAuthOpenaiBackupPrompt:
         backup_calls = [c for c in mock_confirm.call_args_list if c.args and c.args[0] == BACKUP_PROMPT]
         assert len(backup_calls) == 1
         assert backup_calls[0].kwargs["default"] is False
+
+
+class TestRunOauthForProviderCredentialErrorOnSet:
+    """KBR-291 round-4 pin: ``run_oauth_for_provider``'s ``cred_store.set``
+    wrapper surfaces ``CredentialError`` cleanly via ``SystemExit(1)``."""
+
+    def test_systemexit_on_credential_error(
+        self,
+        store: ProfileStore,
+        cred_store: CredentialStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from kitty.credentials.store import CredentialError
+
+        session = _make_oauth_session()
+
+        def _boom(ref: str, value: str) -> None:
+            raise CredentialError("simulated damage + failed backup")
+
+        monkeypatch.setattr(cred_store, "set", _boom)
+
+        with (
+            _mock_tty(),
+            patch(f"{_MOD}.run_oauth_flow", new=AsyncMock(return_value=session)),
+            patch(f"{_MOD}.print_error") as mock_err,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            from kitty.cli.auth_cmd import run_oauth_for_provider
+
+            asyncio.run(run_oauth_for_provider(store, cred_store, "openai_subscription"))
+
+        assert excinfo.value.code == 1
+        mock_err.assert_called_once()
+        assert "simulated damage + failed backup" in str(mock_err.call_args)
