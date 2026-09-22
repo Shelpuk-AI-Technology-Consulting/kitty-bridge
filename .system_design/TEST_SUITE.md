@@ -2663,6 +2663,32 @@ behaviour; it does not ratify it. When Q10 is answered, TR-3 and register rows M
 
 Two distinct things, currently conflated, with different costs and different cadences.
 
+**What T-I5 settled.** T-I5 (KBR-97, PR #251, merged 2026-09-21)
+delivered the hermetic posture that the agent-boundary tests now
+inherit verbatim. The canonical breakdown — four redirects, one cwd
+pin, one env-key filter — lives in T-I5's module docstring at
+`tests/agent_smoke/test_claude_startup.py`; **that is the source of
+record**, and any change to the hermeticity posture updates it there
+first. T-I5's step file (`.system_design/steps/t_i5_agent_startup_smoke.md`)
+is the implementation notes. This paragraph carries only the facts
+§6.4.2 reads off T-I5: the capture-count discovery (Claude Code in
+`-p` mode makes more than one POST per turn, a session-title call
+precedes the user reply — the reason captures are pinned by content
+via `_body_has_user_message`, not by count or index), the two
+falsification seams (`KITTY_AGENT_SMOKE_BINARY` env override, the
+factored `_resolve_default_binary()` default branch — both must
+produce `pytest.fail`, never `pytest.skip`), and the L4 rationale for
+the precedence run (below).
+
+**Why the precedence claim is L4, not L3.** A precedence order is a
+fact about *Claude Code*, not kitty code; the only observable surface
+is the real binary's destination choice, and only the real binary's
+destination choice is what `kitty.launchers.claude.ClaudeAdapter.prepare_launch`
+depends on. A lower-layer test would have to mock the very thing
+under suspicion. That is why the precedence run drives a real
+`claude -p` turn against three real `BridgeFixture`s and asserts on
+their `captures`, and not on a simulated `translate_request`.
+
 **Agent smoke — per PR, hermetic.** Two distinct cases, and only the second proves the claim.
 
 *Startup smoke.* A **pinned real Claude Code binary** runs one non-interactive turn against the
