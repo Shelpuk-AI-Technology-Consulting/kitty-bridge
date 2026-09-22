@@ -113,7 +113,7 @@ jobs:
       # the push bootstrap work: on a push event `inputs.group` is EMPTY (the
       # dispatch default does not apply to push), which is how the first
       # bootstrap run failed with "Unknown group ''".
-      - name: Resolve the group's mutmut patterns
+      - name: Resolve the group's patterns and the remaining untested mutants
         env:
           GROUP: ${{ inputs.group || 'compaction_and_pairing' }}
         run: |
@@ -127,7 +127,41 @@ jobs:
             exit 1
           fi
           echo "PATTERNS=$PATTERNS" >> "$GITHUB_ENV"
-          echo "Patterns: $PATTERNS"
+          # NOTE: Pass the remaining UNTESTED mutant names explicitly, not the
+          # group's patterns. mutmut's cache-skip fires only on a full run
+          # (`if not mutant_names and result is not None`): a pattern-scoped
+          # run re-tests every matched mutant from its fastest-first sort
+          # order, so a 4-hour leg burns itself on the fast cached mutants
+          # and never reaches the slow untested tail (leg 5: 214 minutes,
+          # zero new verdicts). Explicit names re-run exactly those mutants
+          # -- the documented force-rerun shape -- and the restored .meta
+          # carries the rest of the group's verdicts, so the aggregated
+          # score stays valid for the whole group. An empty list means the
+          # measurement is complete; the run step short-circuits.
+          REMAINING="$(python - << 'PYEOF' 2>/dev/null || true
+          import fnmatch, json, os, sys
+          sys.path.insert(0, 'tests')
+          from mutmut_scope import patterns_for
+          pats = patterns_for(os.environ['GROUP'])
+          remaining = []
+          for root, _dirs, files in os.walk('mutants/src'):
+              for fn in sorted(files):
+                  if not fn.endswith('.meta'):
+                      continue
+                  with open(os.path.join(root, fn)) as fh:
+                      meta = json.load(fh)
+                  for key, code in meta.get('exit_code_by_key', {}).items():
+                      if code is None and any(fnmatch.fnmatch(key, p) for p in pats):
+                          remaining.append(key)
+          print(' '.join(remaining))
+          PYEOF
+          )"
+          echo "REMAINING=$REMAINING" >> "$GITHUB_ENV"
+          if [ -z "$REMAINING" ]; then
+            echo "No untested mutants for '$GROUP' -- the measurement is complete."
+          else
+            echo "Remaining untested mutants: $(wc -w <<< "$REMAINING")"
+          fi
 
       # Soft deadline, not a GitHub timeout -- and why, from three lost
       # legs (KBR-272): a job-level timeout kill can eat the cancel grace
@@ -145,11 +179,15 @@ jobs:
       # non-zero code is a real mutmut failure and fails the step loudly.
       # The GitHub step timeout below (285) is a last-resort backstop for
       # GNU timeout itself misbehaving; it should never fire.
-      - name: Run mutmut for the group
+      - name: Run mutmut for the remaining mutants
         timeout-minutes: 285
         run: |
+          if [ -z "$REMAINING" ]; then
+            echo "Nothing to test -- the restored tree already covers the whole group."
+            exit 0
+          fi
           rc=0
-          timeout -s INT -k 60 240m mutmut run $PATTERNS || rc=$?
+          timeout -s INT -k 60 240m mutmut run $REMAINING || rc=$?
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 130 ]; then
             echo "Soft deadline reached at 240 minutes; the partial tree is on disk and the upload step preserves it. Re-dispatch to continue."
             exit 0
