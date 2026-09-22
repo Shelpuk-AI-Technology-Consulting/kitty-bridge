@@ -1888,7 +1888,15 @@ fuzzer's distribution is the only producer.
   boundary-validated; the leaf-value reads (role, text, functionCall/functionResponse/
   functionDeclaration names, tool names) carry local isinstance guards — the
   structural-review criterion the ticket names. (`carry_gemini_tool_choice` already
-  satisfies this for the `toolConfig` subtree.)
+  satisfies this for the `toolConfig` subtree.) The same shape now covers the
+  eleven published `generationConfig` sampling fields: KBR-213 carried five,
+  [KBR-301](https://shelpuk.atlassian.net/browse/KBR-301) carried the six
+  remaining (`candidateCount`→`n`, `presencePenalty`, `frequencyPenalty`,
+  `seed`, and the collision pair `responseLogprobs`→`logprobs` /
+  `logprobs`→`top_logprobs`), each guarded presence+type with the bool/int
+  subclass exclusion the harness reader's `_typed_leaf` uses
+  (`TEST_SUITE.md` §3.3.1b is the closed-set authority; gap row G44
+  registers the five named format-specific control fields that stay dropped).
 
 ### 12.6 Out of scope
 
