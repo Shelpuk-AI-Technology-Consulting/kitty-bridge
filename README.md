@@ -758,7 +758,13 @@ what the ladder serves. This error means every attempt kitty made came back empt
 simply resend; if it persists, the provider or model is misbehaving.
 
 The response is a `502` carrying `"reason": "empty_response"` for clients that expect JSON
-(`/v1/messages` non-stream and streamed). For streaming clients that expect SSE
+(`/v1/messages` non-stream and streamed; `/v1/responses` non-stream to Codex CLI;
+`/v1beta/...:generateContent` non-stream to Gemini CLI; `/v1/chat/completions`
+non-stream to Kilo, OpenCode, and any Chat Completions client) — each carrying the
+route's own discriminator fields alongside the universal `"reason": "empty_response"`
+marker (`code` on `/v1/responses`, `code: 502` mirroring the streaming integer on
+`/v1beta/...:generateContent`, `type: "empty_response"` on `/v1/chat/completions`).
+For streaming clients that expect SSE
 (`/v1/responses` to Codex CLI; `/v1beta/...:streamGenerateContent` to Gemini CLI;
 `/v1/chat/completions` to Kilo, OpenCode, and any Chat Completions client) the
 exhaustion is delivered inside the open stream as an SSE error event carrying the
