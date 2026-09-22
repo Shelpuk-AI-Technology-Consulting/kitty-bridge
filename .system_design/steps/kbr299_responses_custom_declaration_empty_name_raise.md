@@ -73,7 +73,10 @@ and `_require_tool_call_name`'s "one spelling" → "second, deliberately
 narrower spelling" note); then the `TEST_SUITE.md` §7.4.2 row 2
 "Because" cell addition (anchor-name citations, no line ranges, per
 the KBR-292 lesson). Pin-listed dispositions per AC-5: the three
-`TestToolDeclarations` controls at lines 1801-1833 stay green (no edit).
+`TestToolDeclarations` controls (`test_a_custom_tool_is_named_by_its_own_name`,
+`test_two_mcp_servers_get_distinct_names`,
+`test_a_builtin_tool_keeps_its_whole_declaration_as_the_schema`) stay
+green (no edit).
 Sibling scope (KBR-303, Medium, Epic A child) filed in the same pass per
 the design review's sibling-arms sweep — covers `_normalise_tool_choice`'s
 empty-name admissions and the adjacent `server_label=""` →
