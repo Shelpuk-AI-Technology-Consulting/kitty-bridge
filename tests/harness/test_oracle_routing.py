@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from harness import oracle
@@ -71,9 +72,11 @@ from harness.bridge import (
     InboundProtocol,
     inbound_path,
     minimal_inbound_body,
+    redirected,
 )
 from harness.contract import CapturedRequest, WireFormat
 from kitty.providers.azure import AzureOpenAIAdapter
+from kitty.providers.opencode import OpenCodeGoAdapter
 
 #: The marker the oracle should find verbatim in the upstream body. A short
 #: string survives every layer of JSON encoding without quoting artifacts.
@@ -116,6 +119,20 @@ _ROUTE_TRIGGERS: frozenset[r.Trigger] = frozenset(
         r.Trigger.NON_NATIVE_UPSTREAM_WIRE,
         r.Trigger.PROFILE_SETS_MODEL,
     }
+)
+
+#: The opencode_go model §3.3.5's seventh case (T-D3, KBR-53) drives. The
+#: profile model carries the provider prefix; ``minimax-m2.5`` is published
+#: on ``/v1/messages`` per the endpoint table below (verified 2026-09-11).
+#: KBR-127's ticket names this exact case.
+_PREFIXED_MESSAGES_MODEL = "opencode/minimax-m2.5"
+
+#: The published endpoint table, read as data. The seventh case's path leg
+#: looks the bare model up here — it never imports ``get_upstream_path``.
+_ENDPOINTS_TABLE: dict = json.loads(
+    (Path(__file__).resolve().parents[1] / "data" / "opencode_go_endpoints.json").read_text(
+        encoding="utf-8"
+    )
 )
 
 
@@ -257,6 +274,38 @@ class _AzureAiohttpTransport(AiohttpTransport):
         return AzureOpenAIAdapter(), {"base_url": self._recorder.base_url}
 
 
+@dataclass
+class _OpencodeGoAiohttpTransport(AiohttpTransport):
+    """The default recorder reached through ``OpenCodeGoAdapter``.
+
+    Same registration reason as the Azure binding: ``_ADAPTER_FOR_FORMAT``
+    is keyed by wire format and opencode_go's Messages-routed models speak
+    ``ANTHROPIC_MESSAGES``, already taken by ``custom_anthropic``. Unlike
+    Azure's, this binding's ``redirected()`` seam is load-bearing:
+    ``OpenCodeGoAdapter`` reads no ``provider_config`` key, so handing the
+    config ``{"base_url": ...}`` alone would leave ``build_base_url``
+    returning the real opencode.ai — the bridge would post where the
+    harness cannot see.
+    """
+
+    #: A class attribute, not a field, matching the parent's convention.
+    name = "opencode-go-aiohttp"
+
+    def bind(self) -> Binding:
+        """Return the opencode_go adapter re-hosted onto this recorder.
+
+        Returns:
+            A ``redirected()`` copy of ``OpenCodeGoAdapter`` — the seam
+            overrides ``build_base_url``, the one method the bridge calls
+            for the destination — and the provider configuration naming the
+            recorder's base URL.
+        """
+        return (
+            redirected(OpenCodeGoAdapter(), self._recorder.base_url),
+            {"base_url": self._recorder.base_url},
+        )
+
+
 def _inbound_capture(path: str, body: dict) -> CapturedRequest:
     """Reconstruct the agent's inbound request as the bridge received it.
 
@@ -315,6 +364,35 @@ async def _drive_azure(
         )
         inbound = _inbound_capture(inbound_path(InboundProtocol.MESSAGES), body)
         return inbound, captures[0], body, transport.recorder.base_url
+
+
+async def _drive_opencode() -> tuple[CapturedRequest, CapturedRequest]:
+    """Post a minimal Messages body through the bridge on the opencode binding.
+
+    The profile model carries the provider prefix
+    (``opencode/minimax-m2.5``) so ``normalize_model_name``'s prefix strip
+    is exercised through the bridge — the KBR-127 shape.
+
+    Returns:
+        The inbound capture and the captured upstream request.
+
+    Raises:
+        AssertionError: When the drive does not produce exactly one upstream
+            capture — a second would mean a retry ladder fired, and the
+            three-leg assertions would judge the wrong request.
+    """
+    body = minimal_inbound_body(InboundProtocol.MESSAGES, _SENTINEL, model="agent-model")
+    transport = _OpencodeGoAiohttpTransport(format=WireFormat.ANTHROPIC_MESSAGES)
+    async with BridgeFixture(transport, model=_PREFIXED_MESSAGES_MODEL) as fixture:
+        status, _ = await fixture.post(inbound_path(InboundProtocol.MESSAGES), body)
+        assert status == 200, "the recorder's minimal success reply must come back 200"
+        captures = list(fixture.captures)
+        assert len(captures) == 1, (
+            "exactly one upstream request — a second capture would mean "
+            "a retry ladder fired"
+        )
+        inbound = _inbound_capture(inbound_path(InboundProtocol.MESSAGES), body)
+        return inbound, captures[0]
 
 
 # --------------------------------------------------------------------------
@@ -706,3 +784,69 @@ class TestTheAzureRouteDriven:
             expected_route=expected,
         )
         assert report.deltas == ("envelope.model",)
+
+
+# --------------------------------------------------------------------------
+# §3.3.5 seventh falsification case — T-D3 (KBR-53, KBR-127)
+# --------------------------------------------------------------------------
+
+
+class TestPrefixedProfileModel:
+    """The prefixed-model conjunction: path, auth scheme and body shape.
+
+    §3.3.5's seventh case, from KBR-127: a profile whose model carries a
+    provider prefix must route the same normalized model into the path,
+    the auth scheme and the body. The defect showed a correct body
+    reaching a correct-looking host at the wrong path under the wrong
+    auth — each of the three checks alone passes on it; only their
+    conjunction catches it, which is why all three live in one test.
+    """
+
+    async def test_prefixed_messages_model_routes_to_messages_on_all_three_legs(self) -> None:
+        """All three legs agree on the prefixed Messages model.
+
+        The path comes from the published endpoint table read as data; the
+        auth scheme from the published Messages header shape (``x-api-key``,
+        no ``Authorization``); the body shape from the Messages reader
+        accepting the capture. The oracle run underneath carries
+        ``_ROUTE_TRIGGERS`` so the M1 model rewrite is claimed — the
+        body-shape leg proves the reader succeeds, not that the oracle
+        passes vacuously.
+        """
+        inbound, captured = await _drive_opencode()
+
+        # Leg 1 — path: the published table, read independently of src/kitty.
+        # The published operation path composes with the published base's
+        # own path (opencode.ai/zen/go) — the full published URL for this
+        # model is base + endpoint, and `redirected()` preserves the base
+        # path when it re-hosts the adapter onto the recorder (§3.3.5's
+        # scheme/authority-only substitution, the Vertex precedent).
+        bare_model = _PREFIXED_MESSAGES_MODEL.rsplit("/", 1)[1]
+        published_base_path = urlsplit(_ENDPOINTS_TABLE["base_url"]).path.rstrip("/")
+        expected_path = published_base_path + _ENDPOINTS_TABLE["models"][bare_model]
+        assert captured.path == expected_path == "/zen/go/v1/messages"
+
+        # Leg 2 — auth scheme: Messages-routed models take Anthropic's headers.
+        # The recorder stores headers verbatim as (name, value) pairs; the
+        # names are matched exactly as the adapter spells them.
+        header_names = {name for name, _ in captured.headers}
+        assert "x-api-key" in header_names, (
+            f"a Messages-routed model must carry x-api-key; got {sorted(header_names)}"
+        )
+        assert "Authorization" not in header_names, (
+            "a Messages-routed model must not carry Bearer auth; "
+            f"got {sorted(header_names)}"
+        )
+
+        # Leg 3 — body shape: the Messages reader accepts the capture, and
+        # the oracle's full run passes with every delta claimed.
+        oracle._reader_for(WireFormat.ANTHROPIC_MESSAGES).read_request(captured)
+        report = oracle.assert_no_unclaimed_mutation(
+            inbound=inbound,
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            captured=captured,
+            captured_format=WireFormat.ANTHROPIC_MESSAGES,
+            register=r.REGISTER,
+            triggers_met=_ROUTE_TRIGGERS,
+        )
+        assert "envelope.model" in report.deltas
