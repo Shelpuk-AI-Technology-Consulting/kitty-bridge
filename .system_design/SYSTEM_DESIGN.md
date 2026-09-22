@@ -916,18 +916,12 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   payload (`code: 502` integer, no top-level `type`); `/v1/chat/completions`
   byte-mirrors KBR-287's streaming D4 (`error.type: "empty_response"`,
   verbatim CC carries `type`, not `reason`). All four `502`; all four
-  return *before* `_log_usage` and `_mark_backend_healthy`. The
-  `use_native_messages is false` conjunct excludes native (`use_native_messages
-  = True`) providers on every route — same structural carve-out KBR-298
-  made for the native-Messages arm of `/v1/messages`. Concretely on
-  `/v1/messages`: a native Anthropic provider whose `_native_messages_request`
-  was cleared by the KBR-237 tool-use-format fallback (`server.py:4596`)
-  answers in CC form; an empty reply there falls through the widened elif
-  into `translate_response`'s fabricated fallback (today's behaviour,
-  deliberately preserved). Widening to cover native providers is a
-  one-conjunct drop per handler; **proposed follow-up, not yet filed — PO
-  to decide** on scope and priority. Reasoning-only trade-off carries over
-  unchanged: custom-transport non-streaming parsers drop reasoning
+  return *before* `_log_usage` and `_mark_backend_healthy` (with the
+  CC-arm asymmetry on `_mark_backend_healthy` recorded in the gate
+  comment — the CC non-streaming body returns before the healthy-mark
+  site; the asymmetry is pre-existing and unrelated to the widening).
+  Reasoning-only trade-off carries over unchanged: custom-transport
+  non-streaming parsers drop reasoning
   (`BedrockAdapter.translate_from_upstream` reads only `text`/`toolUse`;
   `OllamaCloudAdapter` reads only `message.content`/`message.tool_calls`;
   `OpenAISubscriptionAdapter._parse_sse_to_response` reads only text
@@ -948,6 +942,29 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   `tests/bridge/test_empty_response_retry.py` pinned the raw-CC fallback
   behaviour KBR-300 retires; they were rewritten in-PR to pin the D4
   expectation, mirroring the streaming-side KBR-99 (S11) precedent.
+- **KBR-304 closed the native-provider residual KBR-300 recorded.** KBR-300's
+  gate predicate — `not use_native_messages and _is_empty_cc_response` —
+  carved out native providers as the deliberate non-fix ("proposed follow-up,
+  not yet filed"); that follow-up is now filed and implemented. Each of the
+  four gates' predicate is now `self._is_empty_cc_response(cc_response)` —
+  the `use_native_messages` conjunct is gone, so a native provider's empty
+  `cc_response` on the three sibling routes and on the KBR-237
+  tool-use-format fallback arm of `/v1/messages` (the cell the KBR-300
+  paragraph named) ends in the same per-route D4 `502` as non-native
+  providers, with no usage billed and no healthy-mark. One conjunct dropped
+  per handler, no new ladder logic, no per-route D4 body change. The
+  native-Messages arm of `/v1/messages` — the `if cc_response.get("type") ==
+  "message"` branch, where the reply arrives in native Messages shape —
+  stays structurally out of the gate (it never reaches the elif) and
+  remains the recorded residual for both KBR-300 and KBR-304. Tests: each
+  of the four KBR-300 test files gained a native-provider variant
+  (`test_an_empty_native_completion_ends_in_the_d4_terminal` +
+  `test_an_empty_native_attempt_crosses_to_a_healthy_plain_peer` +
+  content/tool pins) driven by a test-only `_NativeOpenAIAdapter` stub
+  whose only override is `use_native_messages -> True`; the stub
+  deliberately leaves `upstream_wire_shape` at the inherited
+  `CHAT_COMPLETIONS` (the base-class invariant is a production-adapter
+  rule; the test exercises the conjunct dimension only).
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule

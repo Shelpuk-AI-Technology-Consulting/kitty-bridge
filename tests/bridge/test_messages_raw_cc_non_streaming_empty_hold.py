@@ -96,6 +96,33 @@ class _MessagesLauncher(LauncherAdapter):
         return SpawnConfig(env_overrides={}, env_clear=[], cli_args=[])
 
 
+class _NativeOpenAIAdapter(OpenAIAdapter):
+    """An OpenAI-compatible adapter whose ``use_native_messages`` is True.
+
+    The four KBR-300 gates' literal predicate excluded native providers via
+    a ``not use_native_messages and _is_empty_cc_response(cc_response)``
+    conjunct. KBR-304 drops that conjunct; this stub exists only to drive
+    the post-widening gate's native-provider arm without introducing a new
+    real adapter dependency.
+
+    The stub deliberately leaves :attr:`upstream_wire_shape` at the inherited
+    :attr:`WireShape.CHAT_COMPLETIONS` — the base-class invariant
+    ``use_native_messages ⇒ WireShape.MESSAGES`` is a production-adapter rule
+    (see :class:`~kitty.providers.base.ProviderAdapter.use_native_messages`),
+    and this test only exercises the gate's conjunct dimension, not the wire
+    shape.
+    """
+
+    @property
+    def use_native_messages(self) -> bool:
+        """Return True — the dimension under test.
+
+        Returns:
+            Always ``True`` to exercise the widened gate's native arm.
+        """
+        return True
+
+
 # ── Canned upstream shapes ────────────────────────────────────────────────
 #
 # OpenAI Chat Completions JSON bodies; the OpenAI adapter passes them through
@@ -565,6 +592,166 @@ async def test_an_empty_raw_cc_non_streaming_attempt_crosses_to_a_healthy_plain_
     ]
     _server, status, client_body, calls = await _post(
         plain_a,
+        [_cc_empty(), _cc_hello()],
+        monkeypatch,
+        backends=backends,
+        draws=[[0], [1]],
+    )
+
+    assert status == 200
+    assert calls == 2
+    assert "hello" in _message_text_blocks(client_body)
+    assert _EMPTY_ASSISTANT_FALLBACK_TEXT not in client_body
+
+
+# ── Tests — native-provider cells (KBR-304) ───────────────────────────────
+#
+# These exercise the post-widening gate's native-provider arm. The handler
+# sets ``_native_messages_request = True`` for a native provider; the mock
+# returns a CC-shaped body; ``_make_upstream_request`` falls through to
+# ``translate_from_upstream`` (passthrough for the stub); the handler sees
+# a CC-shaped empty reply and the elif fires. This is the cell the KBR-300
+# §5.4 paragraph names as "the KBR-237 tool-use-format fallback arm" — the
+# structural shape (a native provider whose reply is CC-shaped) is reached
+# directly on non-streaming without the streaming-only fallback machinery.
+
+
+@pytest.mark.asyncio
+async def test_a_content_bearing_native_completion_reaches_the_client(monkeypatch):
+    """KBR-304 AC-FR-1.1 — a content-bearing native completion translates and responds unchanged.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff and records
+            ``_log_usage`` / ``_mark_backend_healthy`` calls.
+    """
+    usage_log: list[dict | None] = []
+
+    def _record(server):
+        """Patch the usage recorder onto the server.
+
+        Args:
+            server: The bridge instance, attached just before ``start_async``.
+        """
+        monkeypatch.setattr(server, "_log_usage", lambda usage: usage_log.append(usage))
+
+    _server, status, client_body, calls = await _post(
+        _NativeOpenAIAdapter(), [_cc_hello()], monkeypatch, on_build=_record
+    )
+
+    assert status == 200
+    assert calls == 1
+    assert "hello" in _message_text_blocks(client_body)
+    assert len(usage_log) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_empty_native_completion_ends_in_the_d4_terminal(monkeypatch):
+    """KBR-304 AC-FR-1.2 — a content-free native completion ends in the D4 terminal.
+
+    Pre-fix the gate's ``not use_native_messages`` conjunct excluded native
+    providers, so the empty CC-shaped reply fell through the elif into
+    ``MessagesTranslator.translate_response``'s fabricated
+    ``_EMPTY_ASSISTANT_FALLBACK_TEXT`` — billed once, healthy-marked. KBR-304
+    drops the conjunct; the gate now fires and the route's D4 terminal
+    replaces the fabricated fallback text. The CC-shape fallback (``choices
+    [0].message.content`` empty in raw CC → ``messages[0].content`` text
+    block empty after translation) is not separately pinned: the
+    route-protocol content oracle on the messages side is the text-block
+    list, which is empty for any empty Messages body (fabricated or genuine).
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff and records
+            ``_log_usage`` / ``_mark_backend_healthy`` calls.
+    """
+    usage_log: list[dict | None] = []
+    healthy_log: list[int] = []
+
+    def _record(server):
+        """Patch the usage and healthy-mark recorders onto the server.
+
+        Args:
+            server: The bridge instance, attached just before ``start_async``.
+        """
+        monkeypatch.setattr(server, "_log_usage", lambda usage: usage_log.append(usage))
+        monkeypatch.setattr(server, "_mark_backend_healthy", lambda idx: healthy_log.append(idx))
+
+    _server, status, client_body, calls = await _post(
+        _NativeOpenAIAdapter(), [_cc_empty()], monkeypatch, on_build=_record
+    )
+
+    assert status == 502
+    assert calls == len(server_module._EMPTY_RETRY_DELAYS) + len(server_module._EMPTY_FINAL_DELAYS) + 1
+    error_body = _parse_response(client_body)
+    assert error_body["error"]["reason"] == "empty_response"
+    assert error_body["error"]["type"] == "api_error"
+    assert _NATIVE_EMPTY_REPLY_MESSAGE in error_body["error"]["message"]
+    # The exhausted completion was judged, not dressed: no fabricated
+    # fallback text, no billed usage, no healthy-mark.
+    assert _EMPTY_ASSISTANT_FALLBACK_TEXT not in client_body
+    assert usage_log == []
+    assert healthy_log == []
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_only_native_completion_releases_the_verdict(monkeypatch):
+    """KBR-304 AC-FR-1.3 — a tool-call-only native completion is not treated as empty.
+
+    ``_is_empty_cc_response`` counts a non-empty ``tool_calls`` list as
+    content (KBR-285 lockstep), so the verdict releases the reply on the
+    first attempt: the client receives a Messages body whose ``content``
+    carries the two tool-use blocks with their arguments whole.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    _server, status, client_body, calls = await _post(
+        _NativeOpenAIAdapter(), [_cc_tool_calls()], monkeypatch
+    )
+
+    assert status == 200
+    assert calls == 1
+    tool_blocks = _message_tool_blocks(client_body)
+    assert [block["name"] for block in tool_blocks] == ["Read", "Write"]
+    assert tool_blocks[0]["input"] == {"path": "a"}
+    assert tool_blocks[1]["input"] == {"path": "b"}
+
+
+@pytest.mark.asyncio
+async def test_an_empty_native_attempt_crosses_to_a_healthy_plain_peer(monkeypatch):
+    """KBR-304 AC-FR-1.5 — on a [native, plain] pool the empty walk crosses to the plain peer.
+
+    ``_request_with_retry_balancing``'s empty arm selects the next backend
+    class-agnostically. On a [native, plain] pool the native backend's empty
+    walk crosses to the plain peer; the peer's content-bearing completion
+    reaches the client as a Messages body (200, content oracle present). The
+    widened gate must not fire on a content-bearing crossed peer — that is
+    the regression pin this test enforces (a future regression that fires
+    the gate on a content-bearing reply would break it).
+
+    Args:
+        monkeypatch: Pytest fixture, pins the weighted draws and collapses
+            the retry backoff.
+    """
+    native = _NativeOpenAIAdapter()
+    plain = OpenAIAdapter()
+    native_profile = Profile(
+        name="p-native",
+        provider="openai",
+        model="test-model",
+        auth_ref=str(uuid.uuid4()),
+    )
+    plain_profile = Profile(
+        name="p-plain",
+        provider="openai",
+        model="test-model",
+        auth_ref=str(uuid.uuid4()),
+    )
+    backends = [
+        (native, "key-native", native_profile),
+        (plain, "key-plain", plain_profile),
+    ]
+    _server, status, client_body, calls = await _post(
+        native,
         [_cc_empty(), _cc_hello()],
         monkeypatch,
         backends=backends,

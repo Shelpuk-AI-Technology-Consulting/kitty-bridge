@@ -77,6 +77,33 @@ class _ChatCompletionsLauncher(LauncherAdapter):
         return SpawnConfig(env_overrides={}, env_clear=[], cli_args=[])
 
 
+class _NativeOpenAIAdapter(OpenAIAdapter):
+    """An OpenAI-compatible adapter whose ``use_native_messages`` is True.
+
+    The four KBR-300 gates' literal predicate excluded native providers via
+    a ``not use_native_messages and _is_empty_cc_response(cc_response)``
+    conjunct. KBR-304 drops that conjunct; this stub exists only to drive
+    the post-widening gate's native-provider arm without introducing a new
+    real adapter dependency.
+
+    The stub deliberately leaves :attr:`upstream_wire_shape` at the inherited
+    :attr:`WireShape.CHAT_COMPLETIONS` — the base-class invariant
+    ``use_native_messages ⇒ WireShape.MESSAGES`` is a production-adapter rule
+    (see :class:`~kitty.providers.base.ProviderAdapter.use_native_messages`),
+    and this test only exercises the gate's conjunct dimension, not the wire
+    shape.
+    """
+
+    @property
+    def use_native_messages(self) -> bool:
+        """Return True — the dimension under test.
+
+        Returns:
+            Always ``True`` to exercise the widened gate's native arm.
+        """
+        return True
+
+
 # ── Canned custom-transport raw upstream shapes ───────────────────────────
 #
 # Mirrored from KBR-298's file (physical-mirror-as-divergence-guard
@@ -493,12 +520,18 @@ async def _post_plain(
     upstream_bodies: list[dict],
     monkeypatch: pytest.MonkeyPatch,
     on_build=None,
+    *,
+    provider_factory=OpenAIAdapter,
 ) -> tuple[BridgeServer, int, str, int]:
-    """POST a non-streaming CC request through a real bridge against a scripted raw-CC upstream."""
+    """POST a non-streaming CC request through a real bridge against a scripted raw-CC upstream.
+
+    KBR-304's native-provider cells pass the ``_NativeOpenAIAdapter`` stub
+    via ``provider_factory=``; existing plain-CC cells use the default.
+    """
     monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.01)
     monkeypatch.setattr(server_module, "_EMPTY_RETRY_DELAYS", [0.01, 0.01])
     monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
-    server = BridgeServer(_ChatCompletionsLauncher(), OpenAIAdapter(), "sk-test", host="127.0.0.1", port=0)
+    server = BridgeServer(_ChatCompletionsLauncher(), provider_factory(), "sk-test", host="127.0.0.1", port=0)
     calls = {"n": 0}
 
     def _callback(url, **kwargs):
@@ -815,3 +848,185 @@ async def test_a_reasoning_only_raw_cc_completion_releases_the_verdict(monkeypat
     assert status == 200
     assert calls == 1
     assert "only reasoning" in client_body
+
+
+# ── Tests — native-provider cells (KBR-304) ───────────────────────────────
+#
+# These exercise the post-widening gate's native-provider arm. The Chat
+# Completions route has no native arm itself — every provider answers in CC
+# form on this route — so the stub exercises the conjunct dimension only:
+# pre-fix the gate excludes native providers, post-fix it covers them.
+
+
+@pytest.mark.asyncio
+async def test_a_content_bearing_native_completion_reaches_the_client(monkeypatch):
+    """KBR-304 AC-FR-4.1 — a content-bearing native completion reaches the client verbatim.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff and records
+            ``_log_usage`` calls.
+    """
+    usage_log: list[dict | None] = []
+
+    def _record_usage(server):
+        """Patch the server's ``_log_usage`` to capture every call.
+
+        Args:
+            server: The bridge instance, attached just before ``start_async``.
+        """
+        monkeypatch.setattr(server, "_log_usage", lambda usage: usage_log.append(usage))
+
+    _server, status, client_body, calls = await _post_plain(
+        [_cc_hello()], monkeypatch, on_build=_record_usage,
+        provider_factory=_NativeOpenAIAdapter,
+    )
+
+    assert status == 200
+    assert calls == 1
+    assert "hello" in _cc_message_contents(client_body)
+    assert len(usage_log) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_empty_native_completion_ends_in_the_d4_terminal(monkeypatch):
+    """KBR-304 AC-FR-4.2 — a content-free native completion ends in the D4 terminal.
+
+    Pre-fix the gate's ``not use_native_messages`` conjunct excluded native
+    providers, so the empty CC body shipped verbatim as a well-formed
+    ``200`` skeleton — billed once. The CC non-streaming arm does not call
+    ``_mark_backend_healthy`` (the KBR-300 recorded asymmetry — pre-fix and
+    post-fix), so ``healthy_log`` stays empty either way; the gate's
+    contribution is the ``502`` + D4 envelope that replaces the billed
+    skeleton.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff and records
+            ``_log_usage`` / ``_mark_backend_healthy`` calls.
+    """
+    usage_log: list[dict | None] = []
+    healthy_log: list[int] = []
+
+    def _record(server):
+        """Patch the usage and healthy-mark recorders onto the server.
+
+        Args:
+            server: The bridge instance, attached just before ``start_async``.
+        """
+        monkeypatch.setattr(server, "_log_usage", lambda usage: usage_log.append(usage))
+        monkeypatch.setattr(server, "_mark_backend_healthy", lambda idx: healthy_log.append(idx))
+
+    _server, status, client_body, calls = await _post_plain(
+        [_cc_empty()], monkeypatch, on_build=_record,
+        provider_factory=_NativeOpenAIAdapter,
+    )
+
+    assert status == 502
+    assert calls == len(server_module._EMPTY_RETRY_DELAYS) + len(server_module._EMPTY_FINAL_DELAYS) + 1
+    error_body = _parse_response(client_body)
+    assert error_body["error"]["type"] == "empty_response"
+    assert _NATIVE_EMPTY_REPLY_MESSAGE in error_body["error"]["message"]
+    assert usage_log == []
+    assert healthy_log == []
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_only_native_completion_releases_the_verdict(monkeypatch):
+    """KBR-304 AC-FR-4.3 — a tool-call-only native completion is not judged empty.
+
+    ``_is_empty_cc_response`` counts a non-empty ``tool_calls`` list as
+    content (KBR-285 lockstep), so the verdict releases the reply on the
+    first attempt: the client receives the verbatim CC body with the two
+    ``tool_calls`` and their arguments whole.
+
+    Args:
+        monkeypatch: Pytest fixture, collapses the retry backoff.
+    """
+    _server, status, client_body, calls = await _post_plain(
+        [_cc_tool_calls()], monkeypatch, provider_factory=_NativeOpenAIAdapter
+    )
+
+    assert status == 200
+    assert calls == 1
+    tool_calls = _cc_message_tool_calls(client_body)
+    assert [call["function"]["name"] for call in tool_calls] == ["Read", "Write"]
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"path": "a"}
+    assert json.loads(tool_calls[1]["function"]["arguments"]) == {"path": "b"}
+
+
+@pytest.mark.asyncio
+async def test_an_empty_native_attempt_crosses_to_a_healthy_plain_peer(monkeypatch):
+    """KBR-304 AC-FR-4.5 — on a [native, plain] pool the empty walk crosses to the plain peer.
+
+    ``_request_with_retry_balancing``'s empty arm selects the next backend
+    class-agnostically. On a [native, plain] pool the native backend's empty
+    walk crosses to the plain peer; the peer's content-bearing completion
+    reaches the client verbatim. Total upstream calls == 2.
+
+    Args:
+        monkeypatch: Pytest fixture, pins the weighted draws and collapses
+            the retry backoff.
+    """
+    native = _NativeOpenAIAdapter()
+    plain = OpenAIAdapter()
+    native_profile = Profile(
+        name="p-native",
+        provider="openai",
+        model="test-model",
+        auth_ref=str(uuid.uuid4()),
+    )
+    plain_profile = Profile(
+        name="p-plain",
+        provider="openai",
+        model="test-model",
+        auth_ref=str(uuid.uuid4()),
+    )
+    backends = [
+        (native, "key-native", native_profile),
+        (plain, "key-plain", plain_profile),
+    ]
+    monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(server_module, "_EMPTY_RETRY_DELAYS", [0.01, 0.01])
+    monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
+    server = BridgeServer(
+        _ChatCompletionsLauncher(),
+        native,
+        "key-native",
+        host="127.0.0.1",
+        port=0,
+        backends=backends,
+    )
+    calls = {"n": 0}
+
+    def _callback(url, **kwargs):
+        """Serve the scripted bodies in order: backend 0 empty, backend 1 content.
+
+        Args:
+            url: The request URL, unused.
+            **kwargs: The request parameters, unused.
+
+        Returns:
+            The CallbackResult carrying the next scripted CC body.
+        """
+        calls["n"] += 1
+        body = [_cc_empty(), _cc_hello()][min(calls["n"] - 1, 1)]
+        return _respond(body)
+
+    with aioresponses(passthrough=["http://127.0.0.1"]) as mocked:
+        for _registration in range(4):
+            mocked.post(_UPSTREAM_URL, callback=_callback)
+        draws = iter([[0], [1]])
+        monkeypatch.setattr(server_module.random, "choices", lambda tier, weights=None, k=None: next(draws))
+        await server.start_async()
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(f"http://127.0.0.1:{server.port}/v1/chat/completions", json=_client_request()) as resp,
+            ):
+                status = resp.status
+                client_body = await resp.text()
+        finally:
+            await server.stop_async()
+
+    assert status == 200
+    assert calls["n"] == 2
+    assert "hello" in _cc_message_contents(client_body)
