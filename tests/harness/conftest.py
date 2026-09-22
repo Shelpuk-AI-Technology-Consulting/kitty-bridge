@@ -82,6 +82,7 @@ gated on the sibling's own floor shape).
 from __future__ import annotations
 
 import enum
+import os
 import sys
 from collections.abc import Callable, Generator, Iterator, Sequence
 from typing import Any
@@ -249,6 +250,17 @@ def _enforce_containment_completeness() -> Iterator[None]:
     # below is the partition that fixes the prior implementation's
     # over-eager behaviour (where a single touched row made the gate
     # enforce on landed rows whose slices never ran).
+    #
+    # A mutmut run is partial by construction, and its clean-test phase can
+    # be partial in a way the slice-phase witness cannot see: explicit
+    # mutant names select only the mutants' associated tests (KBR-272), so
+    # a landed slice's probes may never be attempted while other slices'
+    # phases did run and satisfied the witness. The gate's premise — the
+    # session was the full harness suite — does not hold there, so the
+    # gate stands down for mutmut runs entirely (MUTMUT_DEPENDENCY_DEPTH
+    # is exported by mutmut itself and set by nothing else).
+    if "MUTMUT_DEPENDENCY_DEPTH" in os.environ:
+        return
     if not _all_landed_slice_phases_ran():
         return
     _run_completeness_gate()
