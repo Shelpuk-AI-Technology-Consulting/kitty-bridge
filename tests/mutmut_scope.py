@@ -128,6 +128,20 @@ TARGET_GROUPS: dict[str, list[Target]] = {
             "_bedrock_body",
         ),
     ],
+    # Register row P19 — the /api/chat body's stream overwrite. KBR-90
+    # (T-H5) extracted it out of the ollama_cloud transport's network
+    # methods, where mutmut could not reach it, into this pure builder.
+    # Same per-adapter shape as bedrock_transport — a sibling, not a
+    # provider_hooks member (that group's description claims "every
+    # adapter implements these three", and an ollama-only body builder
+    # would violate the claim).
+    "ollama_transport": [
+        Target(
+            "kitty.providers.ollama_cloud",
+            "OllamaCloudAdapter",
+            "_ollama_body",
+        ),
+    ],
     # Egress containment — I3.
     "egress": [
         Target("kitty.egress", None, None),

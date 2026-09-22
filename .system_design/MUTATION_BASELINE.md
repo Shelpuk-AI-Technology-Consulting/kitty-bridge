@@ -108,9 +108,10 @@ registry, not in `pyproject.toml`.
 | model_context | 183 | 73 | 43 | 30 | 0 | 0 | 0 | 110 | 58.9% |
 | openai_subscription | 474 | 474 | 236 | 238 | 0 | 0 | 0 | 0 | 49.8% |
 | bedrock_transport | _pending_ | -- | -- | -- | -- | -- | -- | -- | _pending_ — added by KBR-89 (T-H2); not yet measured; KBR-91 (T-H3) re-measures and sets the threshold row |
+| ollama_transport | _pending_ | -- | -- | -- | -- | -- | -- | -- | _pending_ — added by KBR-90 (T-H5) as the P19 / `OllamaCloudAdapter._ollama_body` sibling of `bedrock_transport`; not yet measured; KBR-91 (T-H3) re-measures and sets the threshold row |
 | egress | 125 | 124 | 94 | 30 | 0 | 0 | 0 | 1 | 75.8% |
 | supporting | 773 | 686 | 445 | 241 | 0 | 0 | 0 | 87 | 64.9% |
-| **TOTAL** | **7288** | **5467** | **3781** | **1676** | **10** | **0** | **0** | **1821** | **61.4%** of tested (648 in `compaction_and_pairing` pending; `bedrock_transport` added by KBR-89, re-measured by KBR-91) |
+| **TOTAL** | **7288** | **5467** | **3781** | **1676** | **10** | **0** | **0** | **1821** | **61.4%** of tested (648 in `compaction_and_pairing` pending; `bedrock_transport` added by KBR-89 and `ollama_transport` by KBR-90, re-measured by KBR-91) |
 
 Column meanings, so the numbers recompute from the formula:
 

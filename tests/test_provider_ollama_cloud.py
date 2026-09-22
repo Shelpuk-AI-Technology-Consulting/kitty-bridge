@@ -245,6 +245,298 @@ class TestOllamaCloudTranslateToUpstream:
         assert "content" not in result["messages"][0] or result["messages"][0].get("content") == ""
 
 
+# ── _ollama_body (KBR-90 / T-H5, register row P19) ──────────────────────────
+
+
+class TestOllamaCloudBody:
+    """L1 — ``OllamaCloudAdapter._ollama_body`` is the pure payload builder (P19).
+
+    Register row P19 ("Overwrite ``stream``") lives inside
+    ``make_request`` / ``stream_request`` today, so ``mutmut`` cannot reach
+    it from the L1 selection. ``_ollama_body`` extracts the body's
+    translation plus the ``stream`` overwrite into a pure function; this
+    class is what makes P19 a mutation-testable surface. The wire-capture
+    characterisation of P19 itself ships at L2 in
+    ``tests/test_wire_shape_honesty_wire.py`` (both halves of the ollama
+    boundary are captured — the KBR-90 scope add closed the streaming-half
+    stated limit flagged in KBR-80).
+    """
+
+    def setup_method(self):
+        self.adapter = OllamaCloudAdapter()
+
+    # ── R1: pure builder — return shape ──────────────────────────────────
+
+    def test_returns_body_dict_with_stream_false_for_make_request(self) -> None:
+        """R1 / AC1 — ``make_request``'s builder sets ``stream`` to False.
+
+        The function returns a dict (no ``(model_id, body)`` tuple like
+        Bedrock — Ollama has no separate model-id argument). The probe
+        carries a ``stream: True`` so the overwrite is observable, not
+        just a set-on-absent.
+        """
+        cc = {
+            "model": "gpt-oss:120b",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+        result = self.adapter._ollama_body(cc, streaming=False)
+        assert isinstance(result, dict)
+        assert result["stream"] is False
+
+    def test_returns_body_dict_with_stream_true_for_stream_request(self) -> None:
+        """R1 / AC1 — ``stream_request``'s builder sets ``stream`` to True."""
+        cc = {
+            "model": "gpt-oss:120b",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        result = self.adapter._ollama_body(cc, streaming=True)
+        assert isinstance(result, dict)
+        assert result["stream"] is True
+
+    # ── R1: pure builder — P19 overwrite is REAL, not vacuously true ────
+
+    def test_overwrites_stream_even_when_translate_emits_it(self) -> None:
+        """R1 / AC4 — the ``stream`` overwrite runs against an injected body.
+
+        Unlike bedrock's defensive pop (which today is vacuously true —
+        ``translate_to_upstream`` never emits ``stream``), the ollama P19
+        overwrite is what the transport really applies: a translation that
+        already set ``stream`` must still be overridden. A mutation that
+        drops the assignment (or rewrites ``streaming`` to something that
+        evaluates to the injected value) leaves ``stream`` at the sentinel
+        and this test fails.
+
+        Two separate patch contexts, deliberately: the builder mutates and
+        returns the translate output dict, so a single ``return_value=``
+        context would alias both calls to one dict and the second call's
+        ``stream=True`` would leak into the first call's captured body.
+        """
+        injected = {
+            "model": "gpt-oss:120b",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": "sentinel-was-not-overwritten",
+        }
+        with patch.object(self.adapter, "translate_to_upstream", return_value=dict(injected)):
+            body_false = self.adapter._ollama_body(
+                {"model": "irrelevant", "messages": [{"role": "user", "content": "x"}]},
+                streaming=False,
+            )
+        with patch.object(self.adapter, "translate_to_upstream", return_value=dict(injected)):
+            body_true = self.adapter._ollama_body(
+                {"model": "irrelevant", "messages": [{"role": "user", "content": "x"}]},
+                streaming=True,
+            )
+        assert body_false["stream"] is False, "the P19 overwrite ran for streaming=False"
+        assert body_true["stream"] is True, "the P19 overwrite ran for streaming=True"
+
+    # ── R1: pure builder — no IO ─────────────────────────────────────────
+
+    def test_does_not_open_an_aiohttp_session(self) -> None:
+        """R1 / AC2 — the builder stays pure (no session, no network)."""
+        cc = {
+            "model": "gpt-oss:120b",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        with patch.object(
+            self.adapter,
+            "_get_session",
+            side_effect=AssertionError(
+                "_ollama_body must stay pure; it must not open an aiohttp session"
+            ),
+        ):
+            self.adapter._ollama_body(cc, streaming=False)
+            self.adapter._ollama_body(cc, streaming=True)
+
+    # ── R2: body equals translate output with stream overridden ──────────
+
+    @pytest.mark.parametrize(
+        "cc",
+        [
+            pytest.param(
+                {
+                    "model": "gpt-oss:120b",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": False,
+                },
+                id="minimal",
+            ),
+            pytest.param(
+                {
+                    "model": "qwen3-coder-next",
+                    "messages": [
+                        {"role": "system", "content": "You are concise."},
+                        {"role": "user", "content": "Hello"},
+                    ],
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                    "max_tokens": 256,
+                    "stop": "END",
+                },
+                id="system-and-options-and-max-tokens",
+            ),
+            pytest.param(
+                {
+                    "model": "gpt-oss:120b",
+                    "messages": [
+                        {"role": "user", "content": "What's the weather?"},
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_abc",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"city": "London"}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_abc",
+                            "content": "15°C",
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Get weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                },
+                            },
+                        }
+                    ],
+                    "stream": True,
+                },
+                id="tools-and-tool-call-round-trip",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_body_matches_translate_to_upstream_with_stream_overridden(
+        self, cc: dict, streaming: bool
+    ) -> None:
+        """R2 / AC3 — body keys equal ``translate_to_upstream(cc)`` with
+        ``stream`` replaced by the flag.
+
+        The hook API is unchanged; the builder is the same body with P19's
+        ``stream`` overwrite applied. Parametrised over a representative
+        minimal request, a system+sampling-request, and a
+        tools+assistant-tool-call round-trip, and over both streaming modes.
+        """
+        translated = self.adapter.translate_to_upstream(cc)
+        body = self.adapter._ollama_body(cc, streaming=streaming)
+
+        expected = {**translated, "stream": streaming}
+        assert body == expected
+        assert body["stream"] is streaming
+
+    # ── R3: transports consume the builder's output ─────────────────────
+
+    @pytest.mark.asyncio
+    async def test_make_request_posts_builder_body_verbatim(self) -> None:
+        """R3 / AC3 — ``make_request`` posts the builder's dict verbatim.
+
+        Sentinel body patched at the builder seam: the transport adds no
+        further body mutation and passes the dict through. Using a sentinel
+        rather than a monkeypatched counter on ``translate_to_upstream``
+        because the builder calls ``translate_to_upstream`` internally —
+        the load-bearing seam is the builder's, not the hook's.
+        """
+        adapter = self.adapter
+        cc = {
+            "model": "gpt-oss:120b",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+            "_resolved_key": "test-key",
+            "_provider_config": {},
+        }
+        sentinel_body = {
+            "model": "sentinel-model",
+            "messages": [{"role": "user", "content": "sentinel"}],
+            "stream": False,
+        }
+        sentinel_response = {
+            "model": "gpt-oss:120b",
+            "message": {"role": "assistant", "content": "ok"},
+            "done": True,
+            "done_reason": "stop",
+            "prompt_eval_count": 1,
+            "eval_count": 1,
+        }
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=sentinel_response)
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_response)
+        with (
+            patch.object(adapter, "_ollama_body", return_value=sentinel_body),
+            patch.object(adapter, "_get_session", return_value=mock_session),
+        ):
+            await adapter.make_request(cc)
+        kwargs = mock_session.post.call_args.kwargs
+        assert kwargs["json"] is sentinel_body, (
+            "the transport posted the builder's body verbatim (identity, not equality)"
+        )
+        assert kwargs["json"]["stream"] is False
+
+    @pytest.mark.asyncio
+    async def test_stream_request_posts_builder_body_verbatim(self) -> None:
+        """R3 / AC3 — ``stream_request`` posts the builder's dict verbatim.
+
+        Mirrors the non-streaming sibling. ``resp.content`` is stubbed
+        with an empty async iterator so the streaming-half error-recovery
+        path is not exercised; the assertion is on ``session.post``'s
+        ``json=`` kwarg.
+        """
+        adapter = self.adapter
+        cc = {
+            "model": "gpt-oss:120b",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+            "_resolved_key": "test-key",
+            "_provider_config": {},
+        }
+        sentinel_body = {
+            "model": "sentinel-model",
+            "messages": [{"role": "user", "content": "sentinel"}],
+            "stream": True,
+        }
+
+        async def mock_aiter():
+            for chunk in []:  # pragma: no cover — empty by construction
+                yield chunk
+
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.content = mock_aiter()
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_response)
+        with (
+            patch.object(adapter, "_ollama_body", return_value=sentinel_body),
+            patch.object(adapter, "_get_session", return_value=mock_session),
+        ):
+            await adapter.stream_request(cc, AsyncMock())
+        kwargs = mock_session.post.call_args.kwargs
+        assert kwargs["json"] is sentinel_body, (
+            "the transport posted the builder's body verbatim (identity, not equality)"
+        )
+        assert kwargs["json"]["stream"] is True
+
+
 # ── translate_from_upstream ─────────────────────────────────────────────────
 
 

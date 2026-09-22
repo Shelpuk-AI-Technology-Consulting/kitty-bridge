@@ -1666,8 +1666,13 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
     MutationRow(
         id="P19",
         site=(
-            "kitty/providers/ollama_cloud.py:OllamaCloudAdapter.make_request",
-            "kitty/providers/ollama_cloud.py:OllamaCloudAdapter.stream_request",
+            # KBR-90 (T-H5) extracted the body's stream overwrite from the
+            # two transport methods into this pure builder. Both
+            # transports now call `_ollama_body` (parametrised on a
+            # `streaming` flag), so the overwrite's load-bearing site is
+            # here — `make_request` and `stream_request` post the returned
+            # body verbatim and add no further mutations.
+            "kitty/providers/ollama_cloud.py:OllamaCloudAdapter._ollama_body",
         ),
         trigger=_ALWAYS,
         paths=(c.ENVELOPE_STREAM,),
