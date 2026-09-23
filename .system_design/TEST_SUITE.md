@@ -795,6 +795,22 @@ it is recoverable only if the register is written carefully:
 > discipline and T-D3's falsification case (mutate a field beneath a registered anchor and assert
 > the oracle still fails) are what keep it honest.**
 
+> ⚠️ **The register can over-declare in two directions, and they are guarded separately.** The
+> first is **anchor-too-coarse** (the callout above) — a *matcher* hazard: the row's path names
+> more than its effect, and the prefix rule turns the surplus into silent claims. The second is
+> **scope-not-enforced** (KBR-307) — a *register-data* hazard: the row's `scope` names adapters
+> its site cannot reach, and without enforcement a row like P17 (`trigger=_ALWAYS`,
+> `scope=("openai_subscription",)`) claims its delta on every adapter the oracle judges, not only
+> the one that can execute its site. The runtime oracle therefore filters `active_rows` in claim
+> matching, and both row-sets in assertion 2, by `row_is_in_scope(row, provider_key)`; the
+> falsification cases live beside the others in `tests/harness/test_oracle.py::TestScopeFilter`
+> (a scope-narrow row leaves the delta unclaimed on a foreign adapter, and a permissive
+> `row_is_in_scope` re-opens the over-claim — the mechanism control). Naming the actor matters
+> because P23's prose calls under-claiming "the unrecoverable direction" from the *register
+> author's* side — a row missing where it should exist — while §3.3.1a calls over-claiming the
+> silent direction from the *matcher's* side. Both sentences are true; they are about different
+> failures, and each has its own guard.
+
 **The prefix stops at a bracket.** Bracket contents are literal and are never re-parsed — which is
 what makes `residual[generationConfig.topK]` legal — so a pattern naming a *parent key* does not
 claim paths nested under it. `residual[generationConfig]` does **not** match
