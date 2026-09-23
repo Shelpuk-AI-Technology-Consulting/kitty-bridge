@@ -5455,8 +5455,8 @@ class BridgeServer:
                 # walked inside _request_with_retry (its built-in walk — mirror the existing
                 # walk, invent no second ladder); the gate sits after the walk, before the
                 # audit/bill/mark block, so a judged-empty completion triggers no handler
-                # side effects at all. The D4 body byte-images the elif D4 (server.py:5492)
-                # and the streaming S11 terminal (server.py:7077); one client branch
+                # side effects at all. The D4 body byte-images the elif D4 (server.py:5510)
+                # and the streaming S11 terminal (server.py:7095); one client branch
                 # (502, reason=empty_response) covers the route in both stream modes.
                 # Whitespace-only text carries over as non-empty (arm as-is — closing that
                 # cell would require widening the arm AND the streaming hold together,

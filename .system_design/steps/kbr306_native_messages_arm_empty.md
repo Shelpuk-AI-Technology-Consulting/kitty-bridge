@@ -14,7 +14,7 @@ on the non-streaming path after KBR-300 (PR #267) and KBR-304 (PR #273, merged
 ## What
 
 The `if cc_response.get("type") == "message"` branch of
-`BridgeServer._handle_messages` non-streaming (`src/kitty/bridge/server.py:5426`)
+`BridgeServer._handle_messages` non-streaming (`src/kitty/bridge/server.py:5444`)
 currently ships the ladder-exhausted empty native Messages reply as a billed,
 healthy-marked `200`: after `_request_with_retry` walks the empty ladder via
 `_is_non_retryable_reply` → the Messages-shaped arm of `_is_empty_cc_response`,
@@ -31,7 +31,7 @@ truncation check and before `result = cc_response`, the parsed native reply is
 judged through `self._is_empty_cc_response` — whose Messages-shaped arm
 (already present and pinned by the streaming twin `PreambleHold._block_start_releases`,
 Q14 D1) decides — and a judged-empty completion ends in the route's D4 terminal
-(`server.py:5492-5502`'s byte-image: bare-JSON `502` +
+(`server.py:5510-5520`'s byte-image: bare-JSON `502` +
 `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"`), before
 `_audit_response_tool_use` / `_log_usage` / `_mark_backend_healthy`. One client
 branch, `(502, reason=empty_response)`, covers `/v1/messages` in both stream
@@ -48,8 +48,8 @@ modes.
 
 - *One D4 discriminator across stream modes.* The D4 body literal — bare-JSON
   `502`, `_NATIVE_EMPTY_REPLY_MESSAGE`, `reason: "empty_response"` — is
-  byte-identical to the elif's at `server.py:5492-5502` and the streaming S11
-  terminal at `server.py:7077-7087`. One client branch covers the route in
+  byte-identical to the elif's at `server.py:5510-5520` and the streaming S11
+  terminal at `server.py:7095-7105`. One client branch covers the route in
   both stream modes; the ticket's design-review question (whether the native
   arm needs a distinct discriminator) is answered: it does not.
 
@@ -88,12 +88,19 @@ modes.
 harness shape in a sibling file (the physical-mirror-as-divergence-guard
 convention, same as each KBR-300 route file):
 
-- `_MessagesLauncher`, `_NativeOpenAIAdapter`, `_post()` — physically mirrored
-  from `tests/bridge/test_messages_raw_cc_non_streaming_empty_hold.py`.
-  The stub deliberately leaves `upstream_wire_shape` at the inherited
-  `WireShape.CHAT_COMPLETIONS` (the base-class invariant is a
-  production-adapter rule; the test exercises the gate's dispatch dimension
-  only).
+- `_MessagesLauncher` and `_NativeOpenAIAdapter` are physically mirrored
+  from `tests/bridge/test_messages_raw_cc_non_streaming_empty_hold.py`
+  (verbatim copies). The stub deliberately leaves `upstream_wire_shape`
+  at the inherited `WireShape.CHAT_COMPLETIONS` (the base-class invariant
+  is a production-adapter rule; the test exercises the gate's dispatch
+  dimension only). `_post()` mirrors the raw-CC sibling's shape (kwargs:
+  `monkeypatch`, `backends=None`, `on_build=None`, `draws=None`; the
+  monkeypatched backoff / final-delays collapse; the aioresponses-on-default-
+  endpoint pattern; the `on_build` recording seam) but differs in
+  signature: this file is native-only, so `_post()` hardcodes
+  `_NativeOpenAIAdapter()` for single-backend mode instead of taking a
+  `provider` first positional as the raw-CC sibling does. The dispatch
+  dimension under test is Messages-shaped replies, not provider swap.
 - Messages-shaped canned bodies flow through the
   `_native_messages_request + type == "message"` guard in
   `_make_upstream_request` as-is — no `translate_from_upstream` — so the
@@ -131,13 +138,13 @@ which is always False in single mode — the recorded KBR-300 asymmetry).
 
 - **One gate, one branch, +31 lines.** The server-side diff is the new
   empty gate inside the `if cc_response.get("type") == "message":` branch
-  of `_handle_messages` (`src/kitty/bridge/server.py:5447`): judge
+  of `_handle_messages` (`src/kitty/bridge/server.py:5465`): judge
   `self._is_empty_cc_response(cc_response)` after the D3 truncation check
   and before `result = cc_response`; on a judged-empty reply return the
   route's D4 terminal — `web.json_response` with `_NATIVE_EMPTY_REPLY_MESSAGE`
   + `reason: "empty_response"`, HTTP `502` — byte-identical to the elif's
-  D4 at `server.py:5492-5502` and the streaming S11 terminal at
-  `server.py:7077-7087`. The gate comment records the mirror rule, the
+  D4 at `server.py:5510-5520` and the streaming S11 terminal at
+  `server.py:7095-7105`. The gate comment records the mirror rule, the
   ladder-walk precedence, the byte-image citations, and both carry-overs.
   The elif's structural comment ("structurally unreachable here") is
   untouched — it remains factually true (the elif is in the translated

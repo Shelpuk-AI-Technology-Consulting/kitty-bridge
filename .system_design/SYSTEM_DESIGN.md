@@ -980,7 +980,7 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   `self._is_empty_cc_response` — whose Messages-shaped arm (pinned by the
   streaming twin `PreambleHold._block_start_releases`, Q14 D1) decides —
   and a judged-empty completion ends in the route's D4 terminal
-  (`server.py:5492-5502`'s byte-image: bare-JSON `502` +
+  (`server.py:5510-5520`'s byte-image: bare-JSON `502` +
   `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"`), before
   `_audit_response_tool_use` / `_log_usage` / `_mark_backend_healthy`. One
   client branch, `(502, reason=empty_response)`, now covers `/v1/messages`

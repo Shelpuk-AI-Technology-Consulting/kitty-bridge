@@ -3,7 +3,7 @@
 The KBR-298/300/304 sweep closed every non-streaming silent-skeleton cell
 **except** the native-Messages arm of ``/v1/messages`` — the
 ``if cc_response.get("type") == "message"`` branch at
-``src/kitty/bridge/server.py:5426``. KBR-300 widened the elif (the KBR-298
+``src/kitty/bridge/server.py:5444``. KBR-300 widened the elif (the KBR-298
 ``use_custom_transport`` gate) by replacing the transport conjunct with
 ``not use_native_messages and _is_empty_cc_response`` so the same gate
 covers the raw-CC cell (``use_custom_transport = False``, the default);
@@ -23,8 +23,8 @@ After KBR-306 the branch judges the parsed native reply through the
 present and pinned by the streaming twin, ``PreambleHold._block_start_releases``
 Q14 D1) and ends the request in the route's D4 terminal — bare-JSON
 ``502`` + ``_NATIVE_EMPTY_REPLY_MESSAGE`` + ``reason: "empty_response"``,
-byte-identical to the elif's D4 (``server.py:5492``) and the streaming S11
-terminal (``server.py:7077``). One client branch ``(502, reason=empty_response)``
+byte-identical to the elif's D4 (``server.py:5510``) and the streaming S11
+terminal (``server.py:7095``). One client branch ``(502, reason=empty_response)``
 covers the route in both stream modes.
 
 D3 truncation 400 is unchanged — ``_messages_truncation_before_content``
