@@ -1172,6 +1172,16 @@ def _read_tool_choice(nested: Mapping[str, tuple[str, Any]], prefix: str, residu
     if allowed is not None:
         if choice == "any" and len(allowed) == 1 and isinstance(allowed[0], str):
             # "must call a function, and only this one" is exactly `tool:<name>`.
+            # Empty `allowed[0]` slips through the isinstance check and
+            # produces the never-legal selection string `"tool:"`. KBR-303
+            # raises on the empty shape; a multi-element list keeps the
+            # residualise posture on the next branch. Same losslessness
+            # argument (`contract.decode_arguments`) as the KBR-281 +
+            # KBR-292 + KBR-295 + KBR-299 family.
+            if not allowed[0]:
+                raise c.UnreadableBodyError(
+                    f"{c.residual_key(path, 'allowedFunctionNames[0]')} must be a non-empty string name"
+                )
             choice = f"tool:{allowed[0]}"
         else:
             # A restriction to several names has no canonical form; the mode

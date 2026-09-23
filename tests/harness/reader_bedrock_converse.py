@@ -606,6 +606,16 @@ def _read_tool_choice(
     if "tool" in choice:
         target = choice["tool"]
         if isinstance(target, Mapping) and isinstance(target.get("name"), str):
+            # Empty `name` slips through the isinstance check and produces
+            # the never-legal selection string `"tool:"`. KBR-303 raises on
+            # the empty shape; absent / non-string keep the residualise
+            # posture on the next line. Same losslessness argument
+            # (`contract.decode_arguments`) as the KBR-281 + KBR-292 +
+            # KBR-295 + KBR-299 family.
+            if not target["name"]:
+                raise c.UnreadableBodyError(
+                    "toolConfig.toolChoice.tool.name must be a non-empty string name"
+                )
             _residualise_block_extras(choice, "toolConfig.toolChoice", {"tool"}, residual)
             return {"tool_choice": f"tool:{target['name']}"}
         residual["toolConfig.toolChoice.tool"] = target

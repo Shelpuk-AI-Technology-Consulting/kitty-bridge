@@ -286,15 +286,23 @@ def _require_tool_call_name(name: Any, path: str) -> str:
     together. The module also carries a **second**, deliberately narrower
     inline spelling in :meth:`ResponsesProjection._read_tool`'s
     non-``function`` fallback (KBR-299): an empty-only raise that fires
-    before the kind dispatch. The strict and narrow spellings share the
-    same error-message shape (``f"{path} must be a non-empty string name"``).
-    ``""`` for a name is not a lossless projection
-    (``contract.decode_arguments``): it claims a tool *named* empty-string,
-    and a call nobody can name cannot be paired with its result or
-    addressed by a register row (KBR-281 settled four invocation readers;
-    KBR-292 extended it to the remaining invocations; KBR-295 closed the
-    ``FunctionTool`` declaration branch; KBR-299 closed the ``custom`` /
-    built-in / ``mcp`` sub-branches with the narrower inline spelling).
+    before the kind dispatch. KBR-303 adds a **third** set of inline
+    spellings on the *selection* surface —
+    :meth:`ResponsesProjection._normalise_tool_choice`'s by-name + mcp
+    branches — and a fourth on the declaration's mcp ``server_label``
+    sub-branch; all four share the family error-message shape
+    (``f"{path} must be a non-empty string name"|server_label"``). The
+    strict and narrow spellings share the same error-message shape
+    (``f"{path} must be a non-empty string name"``). ``""`` for a name
+    is not a lossless projection (``contract.decode_arguments``): it
+    claims a tool *named* empty-string, and a call nobody can name
+    cannot be paired with its result or addressed by a register row
+    (KBR-281 settled four invocation readers; KBR-292 extended it to
+    the remaining invocations; KBR-295 closed the ``FunctionTool``
+    declaration branch; KBR-299 closed the ``custom`` / built-in /
+    ``mcp`` sub-branches with the narrower inline spelling; KBR-303
+    closes the *selection* surface on the five readers whose
+    ``tool_choice`` carries the shape).
 
     Args:
         name: The raw ``name`` value.
@@ -492,6 +500,16 @@ class ResponsesProjection:
 
         Returns:
             The canonical string, or ``None`` when the shape is unrecognised.
+
+        Raises:
+            UnreadableBodyError: When an empty-string ``name`` /
+                ``server_label`` slips through a by-name or mcp branch —
+                the same losslessness argument
+                (``contract.decode_arguments``) the invocation / declaration
+                settlements (KBR-281 + KBR-292 + KBR-295 + KBR-299) closed,
+                extended to the selection surface by KBR-303. Absent /
+                non-string keep the deliberate residualise / narrow-to-server
+                posture.
         """
         if isinstance(choice, str):
             return _TOOL_CHOICE_STRINGS.get(choice)
@@ -527,12 +545,28 @@ class ResponsesProjection:
             label = choice.get("server_label")
             if not isinstance(label, str):
                 return None
+            # Empty `server_label` slips through the isinstance check and
+            # `_mcp_tool_name("")` returns `"mcp:"`, producing the never-legal
+            # selection string `"tool:mcp:"`. Raise on the empty shape;
+            # absent / non-string keep their residualise posture above.
+            if not label:
+                raise c.UnreadableBodyError("tool_choice.server_label must be a non-empty string server_label")
             name = choice.get("name")
             declared = _mcp_tool_name(label)
+            # Empty `name` produces the trailing-colon `"tool:mcp:<label>:"`,
+            # which corresponds to no tool. Raise; absent / non-string keep
+            # the narrow-to-server form on the next line.
+            if isinstance(name, str) and not name:
+                raise c.UnreadableBodyError("tool_choice.name must be a non-empty string name")
             return f"tool:{declared}:{name}" if isinstance(name, str) else f"tool:{declared}"
 
         if kind in _TOOL_CHOICE_BY_NAME:
             name = choice.get("name")
+            # Empty `name` slips through the isinstance check and produces the
+            # never-legal selection string `"tool:"`. Raise; absent /
+            # non-string keep the residualise posture above.
+            if isinstance(name, str) and not name:
+                raise c.UnreadableBodyError("tool_choice.name must be a non-empty string name")
             return f"tool:{name}" if isinstance(name, str) else None
 
         if kind in _TOOL_CHOICE_BY_TYPE:
@@ -1309,6 +1343,17 @@ class ResponsesProjection:
             raise c.UnreadableBodyError(f"{c.residual_key(path, 'name')} must be a non-empty string name")
         if kind == "mcp":
             label = entry.get("server_label")
+            # Empty `server_label` slips through the isinstance check and
+            # `_mcp_tool_name("")` returns `"mcp:"`, projecting
+            # `ToolDecl(name="mcp:")` — a server nobody named, the same
+            # never-legal-empty-identity family KBR-299 closed one field
+            # over on `name`. Raise on the empty shape; absent / non-string
+            # keep the documented `"mcp"` fallback posture KBR-299
+            # recorded as deliberate.
+            if isinstance(label, str) and not label:
+                raise c.UnreadableBodyError(
+                    f"{c.residual_key(path, 'server_label')} must be a non-empty string server_label"
+                )
             name = _mcp_tool_name(label) if isinstance(label, str) else "mcp"
         elif not isinstance(name, str):
             name = str(kind)

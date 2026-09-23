@@ -667,6 +667,49 @@ class TestToolChoice:
 
         assert projected.envelope.extra["tool_choice"] == "tool:f"
 
+    def test_an_empty_allowed_function_name_raises(self) -> None:
+        """R4.5 — ``allowedFunctionNames: [""]`` → ``"tool:"`` silently is a
+        defect (KBR-303).
+
+        Empty passes ``isinstance(allowed[0], str)`` and produces the
+        never-corresponds-to-anything selection string. A multi-element
+        list with an empty member still residualises (the existing else
+        branch), so the raise is scoped to the single-element
+        "must call only this one" shape.
+        """
+        with pytest.raises(
+            c.UnreadableBodyError,
+            match=r"toolConfig\.functionCallingConfig\.allowedFunctionNames\[0\]",
+        ):
+            project(
+                {
+                    "toolConfig": {
+                        "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [""]}
+                    }
+                }
+            )
+
+    def test_a_multi_element_restriction_with_an_empty_member_residualises(self) -> None:
+        """R4.5 — the single-element shape is the only raise shape; a
+        multi-element restriction keeps the existing residualise posture
+        at the ``allowedFunctionNames`` path (KBR-303 control).
+        """
+        projected = project_untotalled(
+            {
+                "toolConfig": {
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": ["", "g"],
+                    }
+                }
+            }
+        )
+
+        assert projected.envelope.extra["tool_choice"] == "any"
+        assert projected.residual == {
+            "toolConfig.functionCallingConfig.allowedFunctionNames": ["", "g"]
+        }
+
     def test_any_restricted_to_several_keeps_the_mode_and_names_what_was_lost(self) -> None:
         """R4.5 — the restriction has no canonical form; the mode still projects."""
         projected = project_untotalled(

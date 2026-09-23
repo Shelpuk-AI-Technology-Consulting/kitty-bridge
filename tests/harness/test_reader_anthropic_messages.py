@@ -303,6 +303,18 @@ class TestEnvelope:
         assert projected.envelope.extra["tool_choice"] == expected
         c.verify_total(projected)
 
+    def test_an_empty_name_on_a_tool_selector_raises(self) -> None:
+        """R2.4 — ``{"type": "tool", "name": ""}`` → ``"tool:"`` silently is a
+        defect (KBR-303).
+
+        Empty ``name`` passes ``isinstance(name, str)`` and produces the
+        never-corresponds-to-anything selection string. The existing
+        non-string raise at line 458 already covers the absent and
+        non-string shapes; KBR-303 extends that raise to the empty shape.
+        """
+        with pytest.raises(c.UnreadableBodyError, match=r"tool_choice\.name"):
+            _read(_minimal(tool_choice={"type": "tool", "name": ""}))
+
     def test_disable_parallel_tool_use_true_maps_onto_parallel_tool_calls_false(self) -> None:
         """R2.4 — KBR-205, closing G36. The flag inverts onto ``parallel_tool_calls = False``,
         the Chat Completions spelling and polarity fixed in §3.3.1b so the T-A2
