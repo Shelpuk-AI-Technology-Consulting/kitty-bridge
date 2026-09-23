@@ -251,6 +251,55 @@ class GeminiTranslator:
         if isinstance(top_k, int) and not isinstance(top_k, bool):
             cc_request["_top_k"] = top_k
 
+        # KBR-301: the four remaining sampling mappings whose Gemini
+        # spellings map onto Chat Completions spellings without a name
+        # collision. `candidateCount` is Chat Completions' `n` (choices
+        # per prompt); `presencePenalty` / `frequencyPenalty` / `seed`
+        # are the CC spellings verbatim. Every guard mirrors the harness
+        # reader's `_typed_leaf` (`tests/harness/reader_gemini.py:915-960`):
+        # presence + type, with booleans excluded because `bool` is an
+        # `int` subclass and an unguarded `isinstance` would carry `true`
+        # through as the integer 1 — the same trap KBR-213 guarded `topK`
+        # against.
+        candidate_count = gen_config.get("candidateCount")
+        if isinstance(candidate_count, int) and not isinstance(candidate_count, bool):
+            cc_request["n"] = candidate_count
+        presence_penalty = gen_config.get("presencePenalty")
+        if isinstance(presence_penalty, (int, float)) and not isinstance(presence_penalty, bool):
+            cc_request["presence_penalty"] = presence_penalty
+        frequency_penalty = gen_config.get("frequencyPenalty")
+        if isinstance(frequency_penalty, (int, float)) and not isinstance(frequency_penalty, bool):
+            cc_request["frequency_penalty"] = frequency_penalty
+        seed = gen_config.get("seed")
+        if isinstance(seed, int) and not isinstance(seed, bool):
+            cc_request["seed"] = seed
+
+        # KBR-301: the `logprobs` name collision. Gemini `logprobs` is
+        # the **integer** count Chat Completions calls `top_logprobs`;
+        # Gemini `responseLogprobs` is the **boolean** flag Chat
+        # Completions calls `logprobs`. Each maps onto the *other*
+        # spelling — carrying either onto its own spelling would silently
+        # break every request that asks for logprobs on a Gemini route
+        # (the CC wire would interpret the integer as the flag, or vice
+        # versa). `reader_gemini.py:129-137` documents the same
+        # collision on the projection side; `tests/test_reader_gemini.py`
+        # pins it.
+        response_logprobs = gen_config.get("responseLogprobs")
+        if isinstance(response_logprobs, bool):
+            cc_request["logprobs"] = response_logprobs
+        logprobs = gen_config.get("logprobs")
+        if isinstance(logprobs, int) and not isinstance(logprobs, bool):
+            cc_request["top_logprobs"] = logprobs
+
+        # KBR-301: the five format-specific control fields
+        # (`responseMimeType`, `responseSchema`, `thinkingConfig`,
+        # `mediaResolution`, `speechConfig`) are deliberately dropped —
+        # Chat Completions declares no equivalent, and folding any onto
+        # `response_format` would mis-carry a schema constraint as a
+        # format request. The omission is registered in
+        # `.system_design/TEST_SUITE.md` §9.2 with a gap row that waits
+        # on the T-D5 corpus for its trigger case + §3.3.2 complement.
+
         # Tools mapping
         tools = self._translate_tools(gemini_request.get("tools", []))
         if tools:

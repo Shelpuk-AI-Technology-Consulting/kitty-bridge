@@ -75,6 +75,9 @@ SOCKET_BINDING_L1_MODULES: tuple[str, ...] = (
     # Binding real BridgeServers since before KBR-144 named it as the
     # convention; bulleted by the KBR-272 reconciliation.
     "tests/bridge/test_crash_resilience.py",
+    # KBR-56 (T-D6) bullet: the botocore-oracle slice starts a real
+    # ``BridgeServer`` and the ``BedrockRecordingUpstream`` (two sockets).
+    "tests/harness/test_oracle_botocore_slice.py",
     # KBR-10 paragraph (38 child interpreters; §8.2 describes it after the
     # bullets, which is why it is a separate entry here).
     "tests/cli/test_stream_encoding.py",

@@ -4017,24 +4017,23 @@ class BridgeServer:
                     status=500,
                 )
 
-            # KBR-300: judge the parsed cc_response from either transport class through
-            # _is_empty_cc_response before translate_response dresses it in fabricated
-            # fallback text. The empty ladder already walked inside _request_with_retry
-            # (its built-in walk — mirror the existing walk, invent no second ladder);
-            # the exhaust of that walk is a defined D4 terminal, not a fabricated
-            # assistant reply, and no usage is billed and no backend is marked healthy
-            # for a judged-empty completion. The gate uses the ticket's literal
-            # predicate (`not use_native_messages and _is_empty_cc_response`); the
-            # `use_native_messages` conjunct is a one-conjunct drop away from a wider
-            # sweep (proposed follow-up, not yet filed — PO to decide). The D4 body
-            # carries no top-level `type` wrapper — every other non-streaming error
-            # envelope on this route returns `{"error": {...}}` only, and OpenAI's
-            # documented Responses error shape puts the error class inside `error`
-            # (ticket correction, PR review round 1; recorded in SYSTEM_DESIGN §5.4).
-            # Reasoning-only trade-off (KBR-287/293/297/298) carries over unchanged:
-            # custom transports drop reasoning in the parser → ladder; raw-CC counts
-            # reasoning_content (KBR-277) → release on first attempt.
-            if not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response):
+            # KBR-300 closed the four non-native cells; KBR-304 dropped the
+            # `not use_native_messages` conjunct so native providers on this
+            # route hit the same D4 terminal. The empty ladder already walked
+            # inside _request_with_retry (its built-in walk — mirror the existing
+            # walk, invent no second ladder); the exhaust of that walk is a
+            # defined D4 terminal, not a fabricated assistant reply, and no
+            # usage is billed and no backend is marked healthy for a
+            # judged-empty completion. The D4 body carries no top-level `type`
+            # wrapper — every other non-streaming error envelope on this route
+            # returns `{"error": {...}}` only, and OpenAI's documented Responses
+            # error shape puts the error class inside `error` (ticket
+            # correction, KBR-300 PR review round 1; recorded in SYSTEM_DESIGN
+            # §5.4). Reasoning-only trade-off (KBR-287/293/297/298) carries
+            # over unchanged: custom transports drop reasoning in the parser →
+            # ladder; raw-CC counts reasoning_content (KBR-277) → release on
+            # first attempt.
+            if self._is_empty_cc_response(cc_response):
                 logger.warning(
                     "Responses non-streaming empty response (%s), responding with the "
                     "empty-response terminal",
@@ -5373,26 +5372,28 @@ class BridgeServer:
                 if truncation is not None:
                     return web.json_response(_d3_truncation_error_body(truncation), status=400)
                 result = cc_response
-            # KBR-298 widened by KBR-300: judge the parsed cc_response through
-            # _is_empty_cc_response before translate_response dresses it in fabricated
-            # fallback text. KBR-298 gated on use_custom_transport and closed only the
-            # custom-transport cell; KBR-300 widens to the ticket's literal predicate —
-            # `not use_native_messages and _is_empty_cc_response(cc_response)` — so the
-            # same gate closes the raw-CC cell (use_custom_transport = False, the
-            # default) without a parallel structure to maintain. The empty ladder
-            # already walked inside _request_with_retry (its built-in walk — mirror the
-            # existing walk, invent no second ladder); the exhaust of that walk is a
-            # defined D4 terminal, not a fabricated assistant reply, and no usage is
-            # billed and no backend is marked healthy for a judged-empty completion.
-            # The gate sits in the translated arm, so a native Messages reply (the
-            # `if` above) is structurally unreachable here; the use_native_messages
-            # conjunct excludes native Anthropic providers on the KBR-237 tool-use-format
-            # fallback arm and is a one-conjunct drop away from a wider sweep
-            # (recorded in REQUIREMENTS.md D1). The reasoning-only accepted trade-off
+            # KBR-298 widened by KBR-300, KBR-304 closed the native carve-out: judge
+            # the parsed cc_response through _is_empty_cc_response before
+            # translate_response dresses it in fabricated fallback text. KBR-298
+            # gated on use_custom_transport and closed only the custom-transport
+            # cell; KBR-300 widens to the ticket's literal predicate —
+            # `not use_native_messages and _is_empty_cc_response(cc_response)` — so
+            # the same gate closes the raw-CC cell (use_custom_transport = False,
+            # the default) without a parallel structure to maintain; KBR-304 drops
+            # the `not use_native_messages` conjunct so native providers — including
+            # the KBR-237 tool-use-format fallback cell on this route (a native
+            # Anthropic provider whose reply is CC-shaped) — hit the same D4
+            # terminal. The empty ladder already walked inside _request_with_retry
+            # (its built-in walk — mirror the existing walk, invent no second
+            # ladder); the exhaust of that walk is a defined D4 terminal, not a
+            # fabricated assistant reply, and no usage is billed and no backend is
+            # marked healthy for a judged-empty completion. The gate sits in the
+            # translated arm, so a native Messages reply (the `if` above) is
+            # structurally unreachable here. The reasoning-only accepted trade-off
             # KBR-287/293/297/298 pin carries over (none of the three custom parsers
             # surfaces reasoning; on raw-CC the KBR-277 predicate counts
             # reasoning_content non-empty as content and releases the reply).
-            elif not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response):
+            elif self._is_empty_cc_response(cc_response):
                 logger.warning(
                     "Messages non-streaming empty response (%s), responding with the "
                     "empty-response terminal",
@@ -7351,20 +7352,19 @@ class BridgeServer:
                 status=500,
             )
 
-        # KBR-300: judge the parsed cc_response from either transport class through
-        # _is_empty_cc_response before translate_response ships it as a well-formed
-        # empty turn (``candidates[0].content.parts[0].text == ""``). The empty
-        # ladder already walked inside _request_with_retry (its built-in walk);
-        # the exhaust of that walk is a defined D4 terminal, not an empty billed
-        # turn, and no usage is billed and no backend is marked healthy for a
-        # judged-empty completion. The D4 body byte-mirrors KBR-293's Gemini
-        # streaming SSE error payload: ``error.code == 502``, ``error.message ==
+        # KBR-300 closed the four non-native cells; KBR-304 dropped the
+        # `not use_native_messages` conjunct so native providers on this route
+        # hit the same D4 terminal. The empty ladder already walked inside
+        # _request_with_retry (its built-in walk); the exhaust of that walk is
+        # a defined D4 terminal, not an empty billed turn, and no usage is
+        # billed and no backend is marked healthy for a judged-empty completion.
+        # The D4 body byte-mirrors KBR-293's Gemini streaming SSE error
+        # payload: ``error.code == 502``, ``error.message ==
         # _NATIVE_EMPTY_REPLY_MESSAGE``, ``error.reason == "empty_response"`` —
-        # no top-level ``type`` (Gemini carries ``code`` as int, not the responses
-        # error envelope). The gate uses the ticket's literal predicate
-        # (``not use_native_messages and _is_empty_cc_response``); reasoning-only
-        # trade-off (KBR-287/293/297/298) carries over unchanged.
-        if not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response):
+        # no top-level ``type`` (Gemini carries ``code`` as int, not the
+        # responses error envelope). Reasoning-only trade-off
+        # (KBR-287/293/297/298) carries over unchanged.
+        if self._is_empty_cc_response(cc_response):
             logger.warning(
                 "Gemini non-streaming empty response (%s), responding with the "
                 "empty-response terminal",
@@ -8882,23 +8882,23 @@ class BridgeServer:
                 status=500,
             )
 
-        # KBR-300: judge the parsed cc_response from either transport class
-        # through _is_empty_cc_response before _log_usage / the verbatim
-        # ``web.json_response(cc_response)`` of the body ships a billed
-        # empty skeleton (``200`` with empty content, billed once). There is
-        # no translate_response on this route (verbatim passthrough), so the
-        # gate sits here, before _log_usage and before the verbatim body
-        # return. The D4 body byte-mirrors KBR-287's Chat Completions
-        # streaming D4: ``error.message == _NATIVE_EMPTY_REPLY_MESSAGE``,
-        # ``error.type == "empty_response"`` — verbatim CC carries ``type``,
-        # not ``reason``. The gate uses the ticket's literal predicate
-        # (``not use_native_messages and _is_empty_cc_response``); reasoning-
-        # only trade-off (KBR-287/293/297/298) carries over unchanged.
-        # Unlike its three siblings this arm does NOT call
+        # KBR-300 closed the four non-native cells; KBR-304 dropped the
+        # `not use_native_messages` conjunct so native providers on this route
+        # hit the same D4 terminal. The empty ladder already walked inside
+        # _request_with_retry (its built-in walk); the exhaust of that walk is
+        # a defined D4 terminal, not an empty billed turn, and no usage is
+        # billed and no backend is marked healthy for a judged-empty completion.
+        # The D4 body byte-mirrors KBR-287's Chat Completions streaming D4:
+        # ``error.message == _NATIVE_EMPTY_REPLY_MESSAGE``, ``error.type ==
+        # "empty_response"`` — verbatim CC carries ``type``, not ``reason``.
+        # There is no translate_response on this route (verbatim passthrough),
+        # so the gate sits here, before _log_usage and before the verbatim body
+        # return. Reasoning-only trade-off (KBR-287/293/297/298) carries over
+        # unchanged. Unlike its three siblings this arm does NOT call
         # ``_mark_backend_healthy`` (the CC non-streaming body returns before
         # the healthy-mark site) — recorded so the gate comment doesn't
         # imply symmetry that isn't there.
-        if not self._active_provider.use_native_messages and self._is_empty_cc_response(cc_response):
+        if self._is_empty_cc_response(cc_response):
             logger.warning(
                 "Chat Completions non-streaming empty response (%s), responding "
                 "with the empty-response terminal",

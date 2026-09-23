@@ -34,45 +34,18 @@ import ast
 from pathlib import Path
 
 import pytest
+from socket_binding_l1_modules import SOCKET_BINDING_L1_MODULES
 
 pytestmark = pytest.mark.l2
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# The section 8.2 set: the bullet list plus the KBR-10 paragraph's module, in
-# the order the doc introduces them. One entry per module; the guard below
-# holds each against its source file.
-SOCKET_BINDING_L1_MODULES: tuple[str, ...] = (
-    # KBR-132 bullet.
-    "tests/bridge/test_tls_certs.py",
-    # T-W4 bullets.
-    "tests/harness/test_recorder.py",
-    "tests/harness/test_recorder_falsification.py",
-    # T-W8 bullets.
-    "tests/harness/test_bridge.py",
-    "tests/harness/test_bridge_falsification.py",
-    # T-W9 bullet.
-    "tests/harness/test_vertical_slice.py",
-    # T-B1 bullet.
-    "tests/harness/test_provider_aiohttp.py",
-    # T-E1 bullet.
-    "tests/harness/test_containment.py",
-    # KBR-144 bullet.
-    "tests/bridge/test_responses_string_input.py",
-    # KBR-176 bullet.
-    "tests/bridge/test_bridge_management.py",
-    # KBR-220 bullet.
-    "tests/cli/test_bridge_state_location.py",
-    # Prose-named since T-W5, bulleted by the KBR-272 reconciliation.
-    "tests/test_egress_https_proxy.py",
-    "tests/harness/test_connect_proxy.py",
-    # Binding real BridgeServers since before KBR-144 named it as the
-    # convention; bulleted by the KBR-272 reconciliation.
-    "tests/bridge/test_crash_resilience.py",
-    # KBR-10 paragraph (38 child interpreters; §8.2 describes it after the
-    # bullets, which is why it is a separate entry here).
-    "tests/cli/test_stream_encoding.py",
-)
+# The section 8.2 set is imported from ``tests/socket_binding_l1_modules.py``:
+# KBR-290 made that module the shared source of truth, read by this mark
+# registry and by the mutmut ``--ignore`` exclusion guard
+# (``tests/test_socket_binding_l1_mutation_exclusion.py``) alike, so a new
+# socket-binding module joins both treatments with one edit. This file owns
+# the mark half; the exclusion guard owns the ignore half.
 
 REQUIRED_TIMEOUT_SECONDS = 120
 

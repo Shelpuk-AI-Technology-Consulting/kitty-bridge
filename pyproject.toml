@@ -401,6 +401,8 @@ pytest_add_cli_args_test_selection = [
     "--ignore",
     "tests/bridge/test_crash_resilience.py",
     "--ignore",
+    "tests/harness/test_oracle_botocore_slice.py",
+    "--ignore",
     "tests/cli/test_stream_encoding.py",
 ]
 only_mutate = [
