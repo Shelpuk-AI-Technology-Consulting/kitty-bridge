@@ -233,9 +233,71 @@ oracle-driven shape requires:
 Filling in after the PR lands. Will append here rather than write a new
 file, mirroring `kbr139_register_scope.md`'s convention.
 
+### What shipped (2026-09-23, pre-PR commit)
+
+- **`tests/harness/test_oracle_curl_cffi.py`** — the slice module, 7
+  tests at `l1` path-default. Three happy-path (CC origin, Responses
+  origin, routing), one routing falsification, three row-level
+  falsifications (P17 override, P25 override, §3.3.3 distinguishing
+  property). Harness-TLS wiring via the `certs` fixture +
+  `server_ssl_context`; the transport's `CODEX_CA_CERTIFICATE` env
+  wiring is what makes the adapter trust the harness CA (KBR-41).
+- **One helper** `_post_one(...)` deduplicates the fixture/post/capture
+  pattern across the seven tests (MUST-FIX-10 finding).
+- **The oracle's `report.deltas` is the full delta list, not the
+  unclaimed subset** — T-D1's `custom_openai` route happens to have
+  zero legitimate deltas on a minimal body, but T-D5's
+  `openai_subscription` route has three (`envelope.stream` +
+  `envelope.store` via P17's forced streaming, and
+  `conversation.sampling[max_tokens]` via M1's profile-model rewrite
+  claimed by P13's bare anchor). A green run is "the call returned
+  normally"; the happy-path test pins the three-path list so a
+  regression that widens the delta set turns red rather than silent.
+- **The P13 falsification was replaced with a P25 falsification.**
+  Driving the fourteen CC sampling parameters onto an Anthropic
+  Messages body residualises at the Anthropic reader (`temperature`
+  and friends are CC-only keys, not Anthropic reader sampling keys),
+  which turns the run red on the *inbound* side before P13 can
+  fire. P13's bare-`conversation.sampling` anchor is a defensive
+  claim — its drops are unreachable on the natural
+  Anthropic→CC→Responses path because the Messages→CC translator
+  only forwards `temperature` / `top_p` and `_cc_to_responses` builds
+  the shipped body from named keys, so no sampled value reaches the
+  wire for P13 to drop. P25 (allowlisted-but-falsy) *is* reachable
+  on the Responses-origin path via `include: []`, and that
+  falsification exercises the same structural claim (removing a row
+  makes the run red).
+- **§3.3.3's distinguishing property lands in the slice** per the
+  KBR-51 pattern, with the two halves: (i) an inbound body carrying
+  `kitty-bridge` arrives byte-identical in the captured body
+  (direct assertion on the capture, not via the oracle);
+  (ii) the captured body mutated to add an `input_text` turn with
+  no inbound counterpart must raise `UnclaimedMutationError` —
+  the orphan turn lands at `conversation.turns[0].parts[1]` per
+  §3.3.1b's merge rule (consecutive same-role turns form one turn),
+  and no triggered row claims that path. The prior attempt used a
+  content type the Responses reader does not consume
+  (`"text"`), which residualised at the reader instead of
+  reaching the diff — fixed to `input_text`.
+- **`test_corpus.py` grew** `TestTheKbr55Td5CorpusEntries` —
+  the requirements doc's AC 5 as a committed-corpus guard: P34
+  ≥1 trigger + ≥1 complement, P35 ≥2 triggers (case 1 + case 2)
+  + ≥1 complement, P33 ==0 trigger + ≥1 complement.
+
+### Deferred out of scope (with the reason)
+
+- **P33's trigger case** — T-D6's deliverable per the P33 row's own
+  comment (the bedrock trigger requires driving the bedrock
+  adapter, which the curl_cffi slice does not own).
+- **P13's falsification via the natural route** — see the P25
+  replacement note above; P13's bare-anchor claim is defensive
+  (its drops are unreachable on the natural path).
+
 ## Status
 
-In progress (2026-09-23); PR not yet opened. Requirements doc and
-step file have been through one
-system-design-reviewer round (9 BLOCKING + 7 MUST-FIX findings,
-all applied); implementation not yet started.
+Implemented (2026-09-23); PR not yet opened. Three commits on
+`feat/kbr-55-t-d5-curl-cffi-oracle-slice`:
+`6b3dcf2` (register rows), `9e8f537` (six corpus entries),
+Phase-3 slice commit pending. Requirements doc and step file
+have been through one system-design-reviewer round (9 BLOCKING +
+7 MUST-FIX findings, all applied).
