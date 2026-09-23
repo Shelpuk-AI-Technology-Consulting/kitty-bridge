@@ -22,6 +22,8 @@ vertical-slice precedent). ``l3`` activation is T-K6's job.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from harness import contract as c
@@ -164,6 +166,31 @@ class TestTotalityGate:
         )
         with pytest.raises(c.DroppedFieldsError):
             c.verify_total(projected)
+
+    def test_injected_unrecognised_field_fails_closed(self) -> None:
+        """§3.3.1 falsification: an injected ``x-kitty-trace`` fails closed.
+
+        The captured body carries an unrecognised top-level field — the
+        shape a bridge-added metadata field takes on the wire. The reader
+        residuals it under its bare key and ``verify_total`` rejects the
+        projection before the structural diff runs: a non-empty residual is
+        neither reported as a diff nor ignored (§3.3.1). The
+        ``NON_NATIVE_UPSTREAM_WIRE`` trigger skips the native-passthrough
+        byte check, which is not the subject here — the two bodies differ
+        in content, and the gate must fire before that check is reached.
+        """
+        injected = json.loads(_valid_messages_body())
+        injected["x-kitty-trace"] = "injected"
+        with pytest.raises(c.ResidualFieldsError) as info:
+            assert_no_unclaimed_mutation(
+                inbound=_capture(body=_valid_messages_body()),
+                inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+                captured=_capture(body=json.dumps(injected).encode("utf-8")),
+                captured_format=WireFormat.ANTHROPIC_MESSAGES,
+                register=r.REGISTER,
+                triggers_met=frozenset({r.Trigger.NON_NATIVE_UPSTREAM_WIRE}),
+            )
+        assert "x-kitty-trace" in str(info.value)
 
 
 # --------------------------------------------------------------------------
@@ -438,6 +465,165 @@ class TestAssertion1:
                 inbound, captured, register=(row,), triggers_met=frozenset({r.Trigger.ALWAYS})
             )
         assert "envelope.model" in info.value.paths
+
+
+# --------------------------------------------------------------------------
+# §3.3.1 oracle falsification suite — T-D3 (KBR-53)
+# --------------------------------------------------------------------------
+
+
+def _request_with_tools(tools: tuple[ToolDecl, ...]) -> Request:
+    """Return a minimal :class:`Request` whose conversation carries ``tools``.
+
+    Args:
+        tools: The tool declarations both sides of a diff start from.
+
+    Returns:
+        A :class:`Request` with an empty envelope and a conversation whose
+        only content is the supplied tools.
+    """
+    return Request(envelope=Envelope(), conversation=Conversation(tools=tools))
+
+
+class TestFalsificationSuite:
+    """§3.3.1's remaining body-falsification cases and §3.3.1a's tripwire.
+
+    Each case arranges one defect — a mutation the bridge is not registered
+    to make — and asserts the oracle raises with the exact delta path. The
+    cases run in the suite (plan §1.4), not demonstrated once by hand: the
+    §3.3.1 totality argument is only as good as the suite's evidence that
+    the projection sees each control field.
+
+    All cases run at projection level through :func:`oracle._run_assertions`
+    (the T-D1 precedent), so a failure here names the oracle's own layer.
+    The trigger vocabulary is wholesale under-declared (``frozenset()``)
+    except where a case needs a row live: no register row claims anything,
+    so every delta the differ emits is unclaimed and assertion 1 must fire.
+    """
+
+    def test_flipped_stream_unclaimed(self) -> None:
+        """A flipped ``stream`` is an unclaimed ``envelope.stream`` delta.
+
+        P17 claims ``envelope.stream``, but only under ``ALWAYS`` — not in
+        the under-declared vocabulary — and M11, P18 and P19 anchor the
+        same path on other routes. None is active, so the flip must fail
+        assertion 1 naming ``envelope.stream``.
+        """
+        inbound = _empty_request(Envelope(stream=True))
+        captured = _empty_request(Envelope(stream=False))
+
+        with pytest.raises(UnclaimedMutationError) as info:
+            oracle._run_assertions(
+                inbound, captured, register=r.REGISTER, triggers_met=frozenset()
+            )
+        assert "envelope.stream" in info.value.paths
+
+    def test_deleted_tool_description_unclaimed(self) -> None:
+        """A deleted tool ``description`` is an unclaimed delta.
+
+        No register row anchors a tool's ``description`` — M21 anchors
+        ``.behavior`` and P15 ``.strict`` precisely so this deletion stays
+        claimable by nothing (§3.3.1a). The differ must see the leaf and
+        assertion 1 must fail naming it.
+        """
+        inbound = _request_with_tools(
+            (ToolDecl(name="get_weather", description="Get the weather", schema={}),)
+        )
+        captured = _request_with_tools((ToolDecl(name="get_weather", schema={}),))
+
+        with pytest.raises(UnclaimedMutationError) as info:
+            oracle._run_assertions(
+                inbound, captured, register=r.REGISTER, triggers_met=frozenset()
+            )
+        assert "conversation.tools[get_weather].description" in info.value.paths
+
+    def test_stripped_tool_strict_unclaimed(self) -> None:
+        """A stripped ``strict`` where no register row applies is unclaimed.
+
+        P15 strips ``strict`` only on the Responses-origin path; its
+        trigger is not met here, so the strip is a defect the oracle must
+        catch. ``strict=None`` (absent) and ``strict=False`` are distinct
+        values in the projection, so the delta is visible.
+        """
+        inbound = _request_with_tools(
+            (ToolDecl(name="get_weather", description="d", schema={}, strict=True),)
+        )
+        captured = _request_with_tools(
+            (ToolDecl(name="get_weather", description="d", schema={}),)
+        )
+
+        with pytest.raises(UnclaimedMutationError) as info:
+            oracle._run_assertions(
+                inbound, captured, register=r.REGISTER, triggers_met=frozenset()
+            )
+        assert "conversation.tools[get_weather].strict" in info.value.paths
+
+    def test_mutation_beneath_registered_anchor_is_unclaimed(self) -> None:
+        """§3.3.1a tripwire: P15's live anchor does not swallow the delta.
+
+        P15 (``conversation.tools[*].strict``, ``RESPONSES_ORIGIN_PATH``)
+        is active — its trigger is met. The deleted ``description`` sits
+        beneath the ``conversation.tools`` node, yet P15's anchor is the
+        ``.strict`` leaf, so the delta must stay unclaimed. This is the
+        tripwire: if P15 were re-anchored at the coarser
+        ``conversation.tools[*]`` (the §3.3.1a hazard), the coarse pattern
+        would claim the deep delta, this raise would silently stop
+        happening, and this test would go red.
+        """
+        inbound = _request_with_tools(
+            (
+                ToolDecl(
+                    name="get_weather", description="Get the weather", schema={}, strict=True
+                ),
+            )
+        )
+        captured = _request_with_tools((ToolDecl(name="get_weather", schema={}, strict=True),))
+
+        with pytest.raises(UnclaimedMutationError) as info:
+            oracle._run_assertions(
+                inbound,
+                captured,
+                register=r.REGISTER,
+                triggers_met=frozenset({r.Trigger.RESPONSES_ORIGIN_PATH}),
+            )
+        assert "conversation.tools[get_weather].description" in info.value.paths
+
+    def test_coarse_anchor_claims_a_descendant_delta(self) -> None:
+        """Mechanism control: a coarse anchor claims everything beneath it.
+
+        The tripwire test's same input, judged against a fixture register
+        whose single row is anchored at the coarse ``conversation.tools[*]``:
+        the deep ``.description`` delta is claimed via the prefix rule and
+        the oracle passes. This is what a re-anchored P15 would do — the
+        reason the tripwire above must keep failing (§3.3.1a: a pattern is
+        a prefix, and the matcher cannot detect over-claiming, by
+        construction).
+        """
+        coarse_row = r.MutationRow(
+            id="Z-COARSE",
+            site=("tests/harness/test_oracle.py:Z-COARSE",),
+            trigger=r.Trigger.RESPONSES_ORIGIN_PATH,
+            paths=(c.tool_path(c.WILDCARD),),
+            conditional=False,
+            design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
+        )
+        inbound = _request_with_tools(
+            (
+                ToolDecl(
+                    name="get_weather", description="Get the weather", schema={}, strict=True
+                ),
+            )
+        )
+        captured = _request_with_tools((ToolDecl(name="get_weather", schema={}, strict=True),))
+
+        deltas = oracle._run_assertions(
+            inbound,
+            captured,
+            register=(coarse_row,),
+            triggers_met=frozenset({r.Trigger.RESPONSES_ORIGIN_PATH}),
+        )
+        assert deltas == ("conversation.tools[get_weather].description",)
 
 
 # --------------------------------------------------------------------------
