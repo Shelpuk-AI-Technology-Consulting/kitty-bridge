@@ -107,6 +107,20 @@ from harness import contract as c
 #: unrecognised wire key and residualises.
 _PUBLISHED_EXTRA_KEYS: frozenset[str] = frozenset({"format", "think", "keep_alive"})
 
+#: Top-level ``ChatRequest`` keys that map onto the canonical Chat
+#: Completions sampling spelling (§3.3.1b's closed fifteen). Two keys here
+#: — the same spellings Chat Completions uses for the request-side
+#: controls — ``Logprobs bool`` and ``TopLogprobs int`` in
+#: ``ollama/api/types.go`` on main, verified 2026-09-23.
+#:
+#: The reader projects verbatim (no inner-type guard) — the family's
+#: documented "no inner-type validation" posture that
+#: ``_project_options`` records immediately below. The adapter's typed
+#: guard on the request-side (`OllamaCloudAdapter.translate_to_upstream`,
+#: KBR-305) keeps a direct-CC ``top_logprobs: true`` off this wire; the
+#: reader is total over the wire format whatever shape arrives.
+_TOP_LEVEL_SAMPLING_KEYS: frozenset[str] = frozenset({"logprobs", "top_logprobs"})
+
 #: ``options.*`` keys that map onto the canonical Chat Completions sampling
 #: spelling (§3.3.1b, the closed fifteen). Eight keys here — seven
 #: identities (``temperature``, ``top_p``, ``top_k``, ``seed``, ``stop``,
@@ -540,6 +554,11 @@ def _project(body: Mapping[str, Any]) -> c.Request:
             consumed.add(key)
         elif key in _PUBLISHED_EXTRA_KEYS:
             extra[key] = value
+            consumed.add(key)
+        elif key in _TOP_LEVEL_SAMPLING_KEYS:
+            # Project verbatim (KBR-305): the family's no-inner-type-guard
+            # posture; type discipline belongs to the corpus and the oracle.
+            sampling[key] = value
             consumed.add(key)
         elif key == "options":
             consumed.add(key)

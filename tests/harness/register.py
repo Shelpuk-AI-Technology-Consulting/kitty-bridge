@@ -2083,6 +2083,55 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
         scope=("opencode_go",),
     ),
+    MutationRow(
+        id="P43",
+        site=(
+            "kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",
+            "kitty/providers/bedrock.py:BedrockAdapter.translate_to_upstream",
+            "kitty/providers/ollama_cloud.py:OllamaCloudAdapter.translate_to_upstream",
+        ),
+        trigger=_ALWAYS,
+        # KBR-305: drop the six KBR-301 sampling keys on the rebuild-trio.
+        # The keys reach the CC body at hop 1 (KBR-301) and the verbatim
+        # forwarders ship them, but the three rebuild-from-allowlist
+        # adapters read only what their destination wire accepts:
+        # Anthropic Messages accepts none of the six; Bedrock
+        # ``InferenceConfiguration`` is exactly
+        # ``{maxTokens, temperature, topP, stopSequences}``; Ollama
+        # ``ChatRequest`` + ``Options`` accepts five of the six on the
+        # wire (``seed``, ``presence_penalty``, ``frequency_penalty`` under
+        # ``options``; ``logprobs`` and ``top_logprobs`` top-level) but has
+        # no ``n``/``num_choices`` field anywhere on Ollama's Go source.
+        # The split is named on the row in TEST_SUITE.md §3.2.2 so a
+        # reader does not mistake the row for a blanket drop.
+        #
+        # ⚠️ Departure from the P31/P32 "paths must be true of every
+        # site" rule, recorded: on ``ollama_cloud`` only ``n`` is
+        # actually dropped; the five carried keys' claims are dormant on
+        # that adapter. The five carries live in the mutmut scope per
+        # TEST_SUITE.md §6.1 (``kitty.providers.* translate_to_upstream``),
+        # so the L1 carry suite is the discriminating guard on that
+        # route; the owner confirmed the one-row shape on 2026-09-23.
+        #
+        # The exact tuple is pinned by
+        # ``test_register.py::test_row_ids_are_unique`` — a data-side drift
+        # turns that assertion red. The L2 agreement guard compares
+        # ids/conditionality/order but not path content, and the markdown
+        # row's path list is held by review; the pin is what makes a
+        # future widening a deliberate edit to both halves rather than a
+        # silent one.
+        paths=tuple(c.sampling_path(key) for key in (
+            "n",
+            "seed",
+            "presence_penalty",
+            "frequency_penalty",
+            "logprobs",
+            "top_logprobs",
+        )),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-305",
+        scope=_ANTHROPIC_FAMILY + ("bedrock", "ollama_cloud"),
+    ),
 )
 
 #: The register. Ordered as §3.2 publishes it — bridge rows, then provider rows —

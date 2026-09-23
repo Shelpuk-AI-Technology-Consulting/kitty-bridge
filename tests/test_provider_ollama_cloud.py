@@ -245,6 +245,136 @@ class TestOllamaCloudTranslateToUpstream:
         assert "content" not in result["messages"][0] or result["messages"][0].get("content") == ""
 
 
+# ── KBR-305: the six carried sampling keys on the rebuild ────────────────────
+
+
+class TestOllamaCloudSixSamplingKeys:
+    """KBR-305 — the KBR-301 sampling keys survive hop 2 where Ollama accepts them.
+
+    KBR-301 put the six Gemini ``generationConfig`` sampling fields onto the
+    CC body at their canonical Chat Completions spellings; this adapter
+    rebuilds its ``/api/chat`` body from an allowlist, so each key that
+    Ollama accepts has to be written explicitly or it dies one hop after
+    KBR-301 fixed. Ollama's published ``ChatRequest`` + ``Options``
+    (``ollama/api/types.go`` on main, verified 2026-09-23) accept five of
+    the six: ``seed``/``presence_penalty``/``frequency_penalty`` under
+    ``options``, ``logprobs`` (bool) and ``top_logprobs`` (int) top-level.
+    There is no ``n``/``num_choices`` anywhere in the Go source — Ollama
+    generates one completion per request — so ``n`` stays dropped, and the
+    drop is the register row's business (P43), not a carry.
+
+    The two logprob carries are accepted-but-inert upstream on ollama.com
+    (logprobs support is local-models-only, ollama/ollama#13638) and the
+    response direction forwards no logprobs either way; they are carried
+    for projection fidelity — both projections agree on the sampling
+    addresses, so the corpus can drive such a request without a false I1
+    breach.
+    """
+
+    def setup_method(self):
+        self.adapter = OllamaCloudAdapter()
+
+    def _cc(self, **extra):
+        """Build a minimal CC request, plus whatever the case under test adds."""
+        cc = {
+            "model": "gpt-oss:120b",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        cc.update(extra)
+        return cc
+
+    # ── the three options keys ───────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        ("cc_key", "value"),
+        [
+            ("seed", 42),
+            ("presence_penalty", 0.5),
+            ("frequency_penalty", -0.25),
+            # 0 is falsy but meaningful for all three; the loop's
+            # presence+non-null guard must land it, not drop it.
+            ("seed", 0),
+            ("presence_penalty", 0.0),
+            ("frequency_penalty", 0.0),
+        ],
+    )
+    def test_options_key_lands(self, cc_key, value):
+        """Each accepted key lands verbatim inside ``options``."""
+        result = self.adapter.translate_to_upstream(self._cc(**{cc_key: value}))
+        assert result["options"][cc_key] == value
+
+    @pytest.mark.parametrize("cc_key", ["seed", "presence_penalty", "frequency_penalty"])
+    def test_options_key_absent_omitted(self, cc_key):
+        """No key invents no option (and no ``options`` container)."""
+        result = self.adapter.translate_to_upstream(self._cc())
+        assert cc_key not in result.get("options", {})
+
+    @pytest.mark.parametrize("cc_key", ["seed", "presence_penalty", "frequency_penalty"])
+    def test_options_key_null_omitted(self, cc_key):
+        """A null value is the loop's documented absence — no key written."""
+        result = self.adapter.translate_to_upstream(self._cc(**{cc_key: None}))
+        assert cc_key not in result.get("options", {})
+
+    def test_options_only_container_when_only_new_key(self):
+        """A request whose only extra is a new key still gets an ``options`` container."""
+        result = self.adapter.translate_to_upstream(self._cc(seed=7))
+        assert result["options"] == {"seed": 7}
+
+    # ── the two top-level logprob keys ───────────────────────────────────
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_logprobs_lands_top_level(self, value):
+        """``logprobs`` forwards both booleans — presence, not truthiness.
+
+        ``False`` is the one falsy-but-meaningful value in the six: a
+        truthiness guard would silently rewrite an explicit opt-out into
+        an omission.
+        """
+        result = self.adapter.translate_to_upstream(self._cc(logprobs=value))
+        assert result["logprobs"] is value
+
+    def test_top_logprobs_lands_top_level(self):
+        result = self.adapter.translate_to_upstream(self._cc(top_logprobs=5))
+        assert result["top_logprobs"] == 5
+
+    @pytest.mark.parametrize("cc_key", ["logprobs", "top_logprobs"])
+    def test_logprob_key_absent_omitted(self, cc_key):
+        result = self.adapter.translate_to_upstream(self._cc())
+        assert cc_key not in result
+
+    @pytest.mark.parametrize("cc_key", ["logprobs", "top_logprobs"])
+    def test_logprob_key_null_omitted(self, cc_key):
+        result = self.adapter.translate_to_upstream(self._cc(**{cc_key: None}))
+        assert cc_key not in result
+
+    def test_top_logprobs_bool_does_not_land(self):
+        """A bool ``top_logprobs`` does not reach the wire as the integer 1.
+
+        ``isinstance(True, int)`` is True — the KBR-213/KBR-301 bool/int
+        subclass trap. The adapter is downstream of every ingress, so hop
+        1's typed guard does not cover a direct-CC ``top_logprobs: true``;
+        the guard here mirrors hop 1's ``_typed_leaf`` instead of letting
+        Ollama's Go decoder reject the body.
+        """
+        result = self.adapter.translate_to_upstream(self._cc(top_logprobs=True))
+        assert "top_logprobs" not in result
+
+    # ── the drop ─────────────────────────────────────────────────────────
+
+    def test_n_stays_dropped(self):
+        """`candidateCount` has no Ollama equivalent — the drop is deliberate.
+
+        Ollama's Go source declares no ``n``/``num_choices`` field (the
+        ticket's "options.n" half was wrong); a carry would 400 every
+        request that asks for more than one choice. Register row P43
+        claims this drop.
+        """
+        result = self.adapter.translate_to_upstream(self._cc(n=3))
+        assert "n" not in result
+        assert "num_predict" not in result.get("options", {})
+        assert "num_choices" not in result.get("options", {})
+
+
 # ── _ollama_body (KBR-90 / T-H5, register row P19) ──────────────────────────
 
 

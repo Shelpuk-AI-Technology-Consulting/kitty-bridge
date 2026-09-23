@@ -1915,6 +1915,53 @@ fuzzer's distribution is the only producer.
   (`TEST_SUITE.md` §3.3.1b is the closed-set authority; gap row G44
   registers the five named format-specific control fields that stay dropped).
 
+**Hop-2 landing on the rebuild-trio — [KBR-305](https://shelpuk.atlassian.net/browse/KBR-305).**
+The six KBR-301 sampling keys reach the CC body. On the **verbatim-forwarder**
+routes the body reaches the upstream with the keys intact. On the three
+rebuild-from-allowlist adapters — `AnthropicAdapter` (and its four delegates
+`zai_coding`, `custom_anthropic`, `minimax_token`, `opencode_go` on
+Messages-routed models), `BedrockAdapter`, `OllamaCloudAdapter` — the
+allowlists read only the keys their destination wire accepts. The per-adapter
+disposition, verified against each destination's published schema or source
+(Anthropic Messages `platform.claude.com/docs/en/api/messages` accepts none
+of the six; Bedrock `InferenceConfiguration` is exactly
+`{maxTokens, temperature, topP, stopSequences}`;
+[Ollama `ChatRequest` + `Options`](https://raw.githubusercontent.com/ollama/ollama/main/api/types.go)
+on main carries `Logprobs bool`/`TopLogprobs int` top-level and
+`Seed`/`PresencePenalty`/`FrequencyPenalty` under `options` — but no
+`n`/`num_choices` field anywhere):
+
+| CC key | Anthropic family | Bedrock | Ollama Cloud |
+|---|---|---|---|
+| `seed` | drop | drop | carry → `options.seed` |
+| `presence_penalty` | drop | drop | carry → `options.presence_penalty` |
+| `frequency_penalty` | drop | drop | carry → `options.frequency_penalty` |
+| `logprobs` (bool) | drop | drop | carry → top-level `logprobs` |
+| `top_logprobs` (int) | drop | drop | carry → top-level `top_logprobs` |
+| `n` | drop | drop | drop (no Ollama equivalent) |
+
+**Ticket correction, recorded.** The ticket's text states "Ollama Cloud's
+`/api/chat` accepts `seed` and `options.n`". The `options.n` half is wrong —
+Ollama's Go source declares no `n`/`num_choices` field anywhere, so `n`
+cannot be carried and is drop-and-register on Ollama like the others; the
+five other Ollama keys are real (Go struct + `docs.ollama.com/api/chat` for
+`logprobs`/`top_logprobs`). **Ticket scope clarification.** The two logprob
+carries are accepted-but-inert upstream — ollama.com accepts the keys but
+serves logprobs from local models only (maintainer statement,
+ollama/ollama#13638), and `OllamaCloudAdapter.translate_from_upstream` does
+not forward response logprobs either way. The carry is chosen because (a)
+forwarding keeps both projections agreeing on those addresses with no
+claimed delta at the wire, and (b) the carry starts working with no further
+change if Ollama ever serves them on cloud. The reader widening
+(`tests/harness/reader_ollama.py`) is owed either way because the published
+`ChatRequest` carries the keys — the reader is total over the published
+format, independent of whether the bridge forwards them. The
+register-row P43 (per the test suite's design of record) lands the
+conditional carry/drop split at the rebuild-trio sites; the row text records
+the split and the accepted P31/P32-rule departure (L1 suite carries the
+discriminating duty on the five ollama carries per `TEST_SUITE.md` §6.1's
+mutmut scope).
+
 ### 12.6 Out of scope
 
 - The response direction (`translate_response`, `translate_stream_chunk`) processes

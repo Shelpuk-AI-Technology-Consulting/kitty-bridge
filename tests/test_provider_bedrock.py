@@ -1182,6 +1182,70 @@ class TestBedrockBody:
         assert "stream" not in kwargs
 
 
+class TestBedrockSixSamplingKeysDrop:
+    """KBR-305: the six KBR-301 sampling keys stay dropped on the Converse rebuild.
+
+    Bedrock Converse's ``InferenceConfiguration`` is exactly
+    ``{maxTokens, temperature, topP, stopSequences}`` (AWS API reference,
+    verified 2026-09-23) — no seed, no penalties, no logprobs, no choice
+    count.  The adapter rebuilds its body from an allowlist, so the keys die
+    here by omission; these tests pin the omission as deliberate so a future
+    widening is a code change plus a register edit, never a silent one.
+    Register row P43 claims the drop.
+
+    Asserted at ``_bedrock_body`` — the §3.2.3 capture boundary: the hook
+    builds the body and this pure builder applies P18's pops, so what this
+    returns is what the transports splat into ``client.converse``.
+    """
+
+    SIX_SAMPLING_KEYS = ("n", "seed", "presence_penalty", "frequency_penalty", "logprobs", "top_logprobs")
+
+    # Every Converse-camelCase spelling a plausible widening might invent.
+    CONVERSE_SPELLINGS = (
+        "numChoices",
+        "num_choices",
+        "seed",
+        "presencePenalty",
+        "frequencyPenalty",
+        "logprobs",
+        "topLogprobs",
+    )
+
+    def setup_method(self) -> None:
+        self.adapter = BedrockAdapter()
+
+    def test_each_key_stays_absent_from_body(self) -> None:
+        """Carrying all six at once leaves none of them on the Converse body."""
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+            "n": 3,
+            "seed": 42,
+            "presence_penalty": 0.5,
+            "frequency_penalty": 0.5,
+            "logprobs": True,
+            "top_logprobs": 5,
+        }
+        _, body = self.adapter._bedrock_body(cc)
+        for key in self.SIX_SAMPLING_KEYS:
+            assert key not in body, f"`{key}` leaked onto the Converse body"
+            assert key not in body.get("inferenceConfig", {}), f"`{key}` leaked into inferenceConfig"
+
+    def test_no_converse_spelling_invention(self) -> None:
+        """The rebuild invents no camelCase Converse spelling for the six."""
+        cc = {
+            "model": "us.anthropic.claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+            **{key: 1 for key in self.SIX_SAMPLING_KEYS},
+        }
+        cc["logprobs"] = True
+        _, body = self.adapter._bedrock_body(cc)
+        leaked = [spelling for spelling in self.CONVERSE_SPELLINGS if spelling in body]
+        assert not leaked, f"the rebuild invented {leaked} on the Converse body"
+
+
 # ── Bedrock → CC response translation ────────────────────────────────────
 
 

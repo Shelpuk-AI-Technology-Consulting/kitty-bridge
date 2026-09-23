@@ -18,6 +18,7 @@ nobody knows to write.
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 
 import pytest
@@ -128,10 +129,10 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 79 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 80 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """27 bridge-level rows less the withdrawn M13, plus 52 provider-level.
+        """27 bridge-level rows less the withdrawn M13, plus 53 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
@@ -146,11 +147,15 @@ class TestTheRowsThemselves:
         Responses-route mutations (whole-body translate, eight CC-only drops,
         the max_tokens rename, the reasoning injection). The +2 over the
         pre-KBR-271 count is M9a/M9b, the two cache-breakpoint drops the M9
-        fallback converter performs (KBR-271). All literals are the
-        no-reflow damage test — a future change that drops a row or adds one
-        without updating the guard fails loudly.
+        fallback converter performs (KBR-271). The +1 over the pre-KBR-305
+        count is P43, the six KBR-301 sampling keys dropped on the rebuild
+        trio (Anthropic family + Bedrock + Ollama Cloud for ``n``; the
+        other five carried on Ollama Cloud, the row's claims dormant on
+        that route). All literals are the no-reflow damage test — a future
+        change that drops a row or adds one without updating the guard
+        fails loudly.
         """
-        assert len(r.REGISTER) == 79
+        assert len(r.REGISTER) == 80
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -162,6 +167,34 @@ class TestTheRowsThemselves:
     def test_row_ids_are_unique(self) -> None:
         """Every document and ticket refers to a row by id, so a duplicate is ambiguous."""
         ids = [row.id for row in r.REGISTER]
+        # KBR-305: P43 must claim exactly the six KBR-301 sampling keys, in
+        # the documented order. ``register_disagreements`` compares
+        # membership + conditionality + order but not path content (the
+        # row's ``paths`` tuple), so without this pin a data-side drift
+        # goes uncaught — and the markdown row's path list is review-only.
+        # Pinned here, in one place, against the closed ``SAMPLING_KEYS``
+        # set so a future widening is a deliberate edit to both halves
+        # rather than a silent one.
+        p43 = next(row for row in r.REGISTER if row.id == "P43")
+        assert p43.paths, "P43 must claim at least one sampling-path delta"
+        assert p43.paths == tuple(c.sampling_path(k) for k in (
+            "n",
+            "seed",
+            "presence_penalty",
+            "frequency_penalty",
+            "logprobs",
+            "top_logprobs",
+        )), (
+            "P43 path tuple drifted from the documented six (KBR-305); "
+            "update the markdown row in TEST_SUITE.md §3.2.2 to match"
+        )
+        for path in p43.paths:
+            m = re.fullmatch(r"conversation\.sampling\[(.+)\]", path)
+            assert m, f"P43 path {path!r} is not a sampling_path form"
+            assert m.group(1) in c.SAMPLING_KEYS, (
+                f"P43 path {path!r} names a sampling key outside the closed "
+                f"SAMPLING_KEYS set — the projection cannot match it"
+            )
 
         assert len(set(ids)) == len(ids)
 

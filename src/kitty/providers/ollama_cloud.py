@@ -132,8 +132,15 @@ class OllamaCloudAdapter(ProviderAdapter):
         # agent's value on `_top_k` and only Anthropic-family adapters restore
         # it, so a bare `top_k` never arrives here.  Ollama would accept one --
         # gap G28 records the trade-off.  Do not "fix" this without reading it.
+        #
+        # KBR-305: `seed`, `presence_penalty` and `frequency_penalty` join the
+        # loop — Ollama's published `Options` carries all three
+        # (ollama/api/types.go), and KBR-301 put the Gemini originals onto the
+        # CC body at these spellings.  The loop forwards any non-null value
+        # verbatim; a wrong-typed one fails Ollama's Go decode, the same
+        # posture `temperature` has always had here.
         options: dict = {}
-        for key in ("temperature", "top_p", "top_k"):
+        for key in ("temperature", "top_p", "top_k", "seed", "presence_penalty", "frequency_penalty"):
             if key in cc_request and cc_request[key] is not None:
                 options[key] = cc_request[key]
         # KBR-178: Ollama carries stop sequences inside `options` too.  Tested
@@ -148,6 +155,31 @@ class OllamaCloudAdapter(ProviderAdapter):
         if "max_tokens" in cc_request and cc_request["max_tokens"] is not None:
             result["options"] = result.get("options", {})
             result["options"]["num_predict"] = cc_request["max_tokens"]
+
+        # KBR-305: the two top-level logprob keys.  Ollama's published
+        # `ChatRequest` carries both top-level at the Chat Completions
+        # spellings (`Logprobs bool`, `TopLogprobs int`), so no rename is
+        # needed — only the write, or the rebuild allowlist drops them.  The
+        # carries are accepted-but-inert on ollama.com today (logprobs support
+        # is local-models-only, ollama/ollama#13638) and the response
+        # direction forwards no logprobs either way; they ship for projection
+        # fidelity — both projections agree on the sampling addresses, so the
+        # corpus can drive such a request without a false I1 breach
+        # (register row P43 records the arrangement).
+        #
+        # Typed guards, not truthiness: `logprobs: False` is the one
+        # falsy-but-meaningful value in the six and must forward, while a
+        # bool `top_logprobs` must NOT reach the wire as the integer 1
+        # (`isinstance(True, int)` — the KBR-213/KBR-301 subclass trap).  The
+        # adapter sits downstream of every ingress, so hop 1's typed guard
+        # does not cover a direct-CC `top_logprobs: true`; these mirrors of
+        # hop 1's `_typed_leaf` keep Ollama's Go decoder from rejecting the
+        # body.
+        if isinstance(cc_request.get("logprobs"), bool):
+            result["logprobs"] = cc_request["logprobs"]
+        top_logprobs = cc_request.get("top_logprobs")
+        if isinstance(top_logprobs, int) and not isinstance(top_logprobs, bool):
+            result["top_logprobs"] = top_logprobs
 
         return result
 
