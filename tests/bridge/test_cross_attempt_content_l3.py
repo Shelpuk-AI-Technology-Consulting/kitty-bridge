@@ -1158,7 +1158,12 @@ class _CapturingUpstream:
         await self._runner.setup()
         site = web.TCPSite(self._runner, "127.0.0.1", 0)
         await site.start()
-        return f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/v1"
+        # Public API: matches `tests/bridge/test_post_emission_no_failover.py`'s
+        # `_Upstream` (line 155). The private-attribute access the previous
+        # implementation reached into (`site._server.sockets`) is brittle
+        # to aiohttp version bumps; the runner exposes the bound port
+        # directly through `addresses` (review-bot note, KBR-302 round 1).
+        return f"http://127.0.0.1:{self._runner.addresses[0][1]}/v1"
 
     async def __aexit__(self, *exc_info: object) -> None:
         if self._runner is not None:

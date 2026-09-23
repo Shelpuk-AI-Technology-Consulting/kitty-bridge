@@ -824,6 +824,20 @@ def context_too_large(
                 "status": "INVALID_ARGUMENT",
             }
         }
+    elif fmt is WireFormat.OPENAI_RESPONSES:
+        # The Responses API's rejection envelope mirrors `error_status`'s —
+        # the message/type/code triple with a stringified code. Written as
+        # its own branch rather than falling through to the CC `else:` so
+        # the per-format shape stays explicit (review-bot note, KBR-302
+        # round 1): a future divergence between the two envelopes would
+        # otherwise be silently shared.
+        body = {
+            "error": {
+                "message": "This model's maximum context length is 8192 tokens. Please reduce the length.",
+                "type": "invalid_request_error",
+                "code": str(status),
+            }
+        }
     else:
         # `code` as a string, matching `error_status`'s CC envelope — a
         # consistent contract across both builders, and the shape real
