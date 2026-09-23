@@ -1940,7 +1940,7 @@ None`. `mutmut` closes that gap.
   `pytest_add_cli_args_test_selection` take **arrays**.
 - **Test selection:** `pytest_add_cli_args_test_selection = ["-m", "l1", "--ignore",
   "tests/test_internal_keys_not_sent_upstream.py"]` followed by one `--ignore <path>` row per
-  module in `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the fifteen §8.2
+  module in `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the sixteen §8.2
   socket/process-binding modules, KBR-290). Mutation testing measures the L1 suite; letting it
   run L3 subsystem tests would make each mutant minutes long and attribute kills to the wrong
   layer. The `tests/test_internal_keys_not_sent_upstream.py` `--ignore` is mutmut-only — the
@@ -4739,7 +4739,7 @@ standing amnesty:
   its reason.
 
 A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
-Fifteen modules under `tests/` bind real sockets or spawn processes and are `l1` by default
+Sixteen modules under `tests/` bind real sockets or spawn processes and are `l1` by default
 today (an earlier draft said "roughly six"; the count has grown as Epic B, E and the
 KBR-132/144/176/220 fixes each landed a socket-binding module, and the bullet list below is now
 the authoritative enumeration). One new module is `l3`-marked from birth pending the Subsystem
@@ -4753,9 +4753,9 @@ the job that runs them; doing it earlier would remove them from every gate. T-H1
 reclassification into account before it measures a mutation baseline, because it selects on
 `l1`.
 
-**Fifteen modules are bulleted below — in twelve bullets, since the T-W4, T-W8 and
+**Sixteen modules are bulleted below — in thirteen bullets, since the T-W4, T-W8 and
 KBR-272-egress rows each name two modules — and `tests/cli/test_stream_encoding.py`
-(KBR-10) is described after them, sixteen in all, named here so T-K6 inherits a list rather than a
+(KBR-10) is described after them, seventeen in all, named here so T-K6 inherits a list rather than a
 search** — the count is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph
 were already drifting apart before T-W8 added two; spelling out both is what stops the next
 addition guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it.)
@@ -4847,6 +4847,13 @@ addition guessing which set it joins. T-W9 joins the **bulleted** set, not the p
   crash-resilience tests predate the convention's articulation). Its socket-binding reality was
   unenumerated before KBR-272 surfaced the drift; it now joins the bullets so the §8.2 set the
   timeout registry pins matches the set the doc claims.
+- **KBR-56 (T-D6):** `tests/harness/test_oracle_botocore_slice.py` starts a real `BridgeServer`
+  against the `BedrockRecordingUpstream` — two sockets per run — to drive the transparency
+  oracle's botocore slice end to end. The module runs in **~0.7 seconds**, measured, the number
+  the fast-gate budget carries until T-K6 moves it. It is `l1` by path default per the T-D1
+  precedent (`tests/harness/test_oracle_driven.py`; §3.4 names the surface L3). That sibling
+  binds the same two sockets and is an inherited pre-KBR-272 gap in this enumeration — flagged
+  for the owner rather than silently added here.
 - **KBR-96 (T-I4):** `tests/cli/test_background_bridge_ownership.py` spawns real
   `kitty.bridge_runner` children on real sockets, then calls
   `kitty.bridge.manage.{stop_bridge,start_bridge,restart_bridge,bridge_status}` **in-process**
@@ -4880,7 +4887,7 @@ hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before a
 exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~13s,
 measured on Linux). T-H1 should note that mutation testing over `l1` used to re-pay that cost
 per mutant — KBR-290's deselection (below) closed that question for this file together with the
-fourteen others: the mutation baseline no longer runs it, the gate still does.
+fifteen others: the mutation baseline no longer runs it, the gate still does.
 
 **KBR-204 added three of the 38**, for the same Windows family by another route: an interactive
 command whose stdin reports as a terminal while its stdout is a pipe. The children get a
@@ -4889,7 +4896,7 @@ One cost to know about: a child that gets past **both** guards — the prompts' 
 with that stdin **blocks** waiting for keys nothing will type, so a regression there shows up as
 the runner's 60-second `TimeoutExpired`, not as a fast assertion.
 
-**KBR-290 reconciliation (2026-09-21).** The fifteen §8.2 modules are excluded from **mutmut's** test
+**KBR-290 reconciliation (2026-09-21).** The sixteen §8.2 modules are excluded from **mutmut's** test
 selection (`--ignore <path>` rows in `[tool.mutmut] pytest_add_cli_args_test_selection`) so the
 nightly mutation run never depends on loopback socket timing. The Fast job selection
 (`pytest -m "l1 or l2"`, `.github/workflows/tests.yml` line 110) is unchanged — every module here
