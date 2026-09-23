@@ -183,6 +183,15 @@ the underscore difference — KBR-296 registers `_cache_control`, not
   (`t.get("name", "")` consistency in the carriage loop); S2 declined
   (the two-loop split preserves the pre-existing rebuild block — surgical
   diff).
+- CI review bot (PR #275, commit `de5de7d`): no critical/warning
+  findings; 3 suggestions. S-1 (same key name at two scopes) deferred
+  per the reviewer's own note — a third carriage is the trigger to
+  rename, not a second. S-2 fixed (`f54c28f`): direct mirror-completeness
+  guard in `tests/providers/test_native_passthrough_cache_breaks.py`
+  (the harness's §3.3.1 independence rule is why it lives outside
+  `cache_breakpoints.py`). S-3 fixed (`f54c28f`): empty-join
+  marked-text pin in `tests/bridge/test_native_format_fallback.py`.
+  S-2/S-3 threads resolved; S-1 left open with the stated reason.
 
 ## Status
 
