@@ -36,9 +36,14 @@ Translation layers (bridge → adapter → Ollama Cloud):
      calls ``parse_stream_to_cc_response`` to re-parse them into a CC
      response dict before translating to Messages API SSE events.
 
-  6. **Sampling parameters**: CC ``temperature`` / ``top_p`` / ``max_tokens``
-     are mapped into Ollama's ``options`` dict (``num_predict`` for
-     ``max_tokens``).
+  6. **Sampling parameters**: CC ``temperature`` / ``top_p`` /
+     ``top_k`` / ``stop`` / ``max_tokens`` are mapped into Ollama's
+     ``options`` dict (``num_predict`` for ``max_tokens``). KBR-305
+     widens this to ``seed``, ``presence_penalty``,
+     ``frequency_penalty`` (also under ``options``) and adds top-level
+     ``logprobs`` (bool) and ``top_logprobs`` (int, bool excluded)
+     carries on the ``/api/chat`` body. ``n`` is dropped — Ollama's
+     Go source declares no ``n``/``num_choices`` field.
 """
 
 from __future__ import annotations
@@ -113,7 +118,14 @@ class OllamaCloudAdapter(ProviderAdapter):
         Handles:
         - System messages (forwarded as-is; Ollama supports system role)
         - Tool result messages (CC ``tool_call_id``/``name`` → Ollama ``tool_name``)
-        - Options (CC ``temperature``/``top_p``/``stop`` → Ollama ``options``)
+        - Options (CC ``temperature``/``top_p``/``top_k``/``stop``/``seed``/
+          ``presence_penalty``/``frequency_penalty`` → Ollama ``options``,
+          ``max_tokens`` → ``options.num_predict``); ``n`` is dropped — Ollama
+          has no equivalent field
+        - Top-level ``logprobs`` (bool) and ``top_logprobs`` (int, bool
+          excluded) carries (KBR-305), with typed guards mirroring
+          KBR-213/KBR-301's ``_typed_leaf`` so a direct-CC
+          ``top_logprobs: true`` does not reach the wire as the integer 1
         - Strips internal metadata keys
         """
         result: dict = {

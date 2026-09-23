@@ -305,15 +305,29 @@ class TestOllamaCloudSixSamplingKeys:
 
     @pytest.mark.parametrize("cc_key", ["seed", "presence_penalty", "frequency_penalty"])
     def test_options_key_absent_omitted(self, cc_key):
-        """No key invents no option (and no ``options`` container)."""
+        """No sampling extras invents no ``options`` container at all.
+
+        Container-level, not key-level: the pre-KBR-305 loop also passed a
+        key-absence check on a request that never carried the key, but an
+        edit that attached ``options`` unconditionally (a plausible
+        KBR-305-shaped mistake) would fail here.
+        """
         result = self.adapter.translate_to_upstream(self._cc())
-        assert cc_key not in result.get("options", {})
+        assert "options" not in result
+        assert cc_key not in result
 
     @pytest.mark.parametrize("cc_key", ["seed", "presence_penalty", "frequency_penalty"])
     def test_options_key_null_omitted(self, cc_key):
-        """A null value is the loop's documented absence — no key written."""
+        """A null value is the loop's documented absence — nothing written.
+
+        The null must not resurface under ``options`` nor as a top-level
+        body key: a mutation that writes the value before the guard (or
+        carries the key top-level the way ``logprobs`` is carried) fails
+        the top-level half.
+        """
         result = self.adapter.translate_to_upstream(self._cc(**{cc_key: None}))
         assert cc_key not in result.get("options", {})
+        assert cc_key not in result
 
     def test_options_only_container_when_only_new_key(self):
         """A request whose only extra is a new key still gets an ``options`` container."""
