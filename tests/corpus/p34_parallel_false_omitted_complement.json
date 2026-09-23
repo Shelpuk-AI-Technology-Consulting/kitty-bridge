@@ -1,0 +1,36 @@
+{
+  "id": "p34_parallel_false_omitted_complement",
+  "description": "P34 complement - Anthropic Messages body whose tool_choice carries disable_parallel_tool_use: true; carry forwards parallel_tool_calls: false. The omit-false row fires only on the false value, so this body proves the omission is absent.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). A complement to entry p34_parallel_false_omitted_trigger; the row triggers only on the explicit-false value, so a body carrying true is the canonical 3.3.2 assertion-2 complement (KBR-186's classification).",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.anthropic.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "p34_parallel_false_omitted_complement.body",
+  "body_sha256": "ddbed5774b03903ec728ae52bd2a4195a252af94a5e556427e8bb6fc5cd03c74",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": [
+    "anthropic_parallel_false_omitted",
+    "tool_choice_omitted_as_legal_but_unsupported"
+  ]
+}

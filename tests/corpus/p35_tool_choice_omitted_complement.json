@@ -1,0 +1,36 @@
+{
+  "id": "p35_tool_choice_omitted_complement",
+  "description": "P35 complement - Anthropic Messages body with a tool_choice beside ordinary tools; the carry forwards the choice (type: any over ordinary tools is carried, per KBR-214).",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). Complement to entries p35_tool_choice_omitted_no_tools_trigger and p35_tool_choice_omitted_forcing_anthropic_tool_trigger; 3.3.2 assertion 2 owes a body where the omit is provably absent, and this is it (KBR-186's classification).",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.anthropic.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "p35_tool_choice_omitted_complement.body",
+  "body_sha256": "f2925f0e56154b1e2d7d208f943f1a647a07a61b716214cc94ed123eed68909b",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": [
+    "anthropic_parallel_false_omitted",
+    "tool_choice_omitted_as_legal_but_unsupported"
+  ]
+}

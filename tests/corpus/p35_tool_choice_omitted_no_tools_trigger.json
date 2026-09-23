@@ -1,0 +1,37 @@
+{
+  "id": "p35_tool_choice_omitted_no_tools_trigger",
+  "description": "P35 case (1) trigger - Anthropic Messages body with a tool_choice but no tools array; KBR-214 D9 omits the choice because OpenAI's 'tool_choice is only allowed when tools are specified'.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). Case (1) of P35 (G35); KBR-214 named this as the row's first case. No captured Claude Code body on the pinned client omits tools when carrying a choice (Claude Code always declares tools before forcing one); the body is the synthetic constructable trigger for assertion-2 enforcement.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.anthropic.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "p35_tool_choice_omitted_no_tools_trigger.body",
+  "body_sha256": "07042fa60ec2a08c16a6ff6f83f76b09b07695e9742713ef7e8db1d6d261a719",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "tool_choice_omitted_as_legal_but_unsupported"
+  ],
+  "triggers_absent": [
+    "anthropic_parallel_false_omitted"
+  ]
+}

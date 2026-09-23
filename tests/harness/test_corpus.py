@@ -1860,3 +1860,89 @@ class TestEvidenceIsSeparableFromConstruction:
         )
 
         assert k.captured_only([entry(), real]) == (real,)
+
+
+#: The repository root, three levels up from this file. Mirrored from
+#: ``tests/harness/test_corpus_lint.py::CORPUS`` so the corpus covers itself
+#: on its own terms.
+_CORPUS_ROOT = Path(__file__).resolve().parent.parent.parent / "tests" / "corpus"
+
+
+class TestTheKbr55Td5CorpusEntries:
+    """KBR-55 / T-D5 §3.3.2 acceptance criterion — the three triggers' coverage.
+
+    The six committed entries (``tests/corpus/p3*.{json,body}`` plus
+    ``tests/corpus/p33*.{json,body}``) discharge the §3.3.2 trigger-case +
+    complement obligation for **P34** (1 trigger + 1 complement),
+    **P35** (2 trigger shapes per KBR-214 D9/D10 + 1 complement) and
+    **P33**'s complement (the trigger case is T-D6's deliverable per
+    the P33 row's own comment).
+
+    The committed-corpus counts pin the delivery — a future edit that
+    renames or removes one of the entries fails the gate with a missing
+    ID, which the lint already enforces (:class:`TestTheLint`); this
+    test pins the *coverage* the slice promises:
+
+    * P33 / T-D5 share: ``entries_meeting == 0`` (T-D6 owns the trigger
+      case), ``entries_without >= 1`` (the T-D5-authored complement).
+    * P34 / T-D5 share: at least one trigger case and at least one
+      complement.
+    * P35 / T-D5 share: at least two trigger cases (case (1) and
+      case (2)) and at least one complement.
+    """
+
+    @classmethod
+    def setup_class(cls) -> None:
+        """Load the committed corpus once per class — 20 entries on disk today."""
+        cls.entries = k.load_corpus(_CORPUS_ROOT)
+
+    def test_p34_has_one_trigger_and_one_complement(self) -> None:
+        """The omit-false branch's trigger + the carry-forward complement."""
+        met = k.entries_meeting(self.entries, Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED)
+        without = k.entries_without(self.entries, Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED)
+
+        assert len(met) >= 1, (
+            f"P34 trigger case is missing from the corpus: "
+            f"entries with triggers_absent={Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED.name!r} = {[e.id for e in without]}"
+        )
+        assert len(without) >= 1, (
+            f"P34 complement is missing from the corpus: "
+            f"entries with triggers_met={Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED.name!r} = {[e.id for e in met]}"
+        )
+
+    def test_p35_has_two_triggers_and_one_complement(self) -> None:
+        """D9 (no tools) + D10 (Anthropic-defined forced call) + the carry-forward.
+
+        The KBR-214 design review's two cases land as two trigger entries
+        (different bodies, same trigger); the carry-forward lands as the
+        complement.
+        """
+        met = k.entries_meeting(self.entries, Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED)
+        without = k.entries_without(self.entries, Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED)
+
+        assert len(met) >= 2, (
+            f"P35 has two trigger cases (no-tools + Anthropic-defined forced call); "
+            f"only {[e.id for e in met]} found"
+        )
+        assert len(without) >= 1
+
+    def test_p33_trigger_case_is_t_d6s_and_complement_is_t_d5s(self) -> None:
+        """The bedrock trigger requires driving the bedrock adapter — T-D6's deliverable.
+
+        T-D5 authors the complement; T-D8 enforces the §3.3.2 complement
+        rule over both. A `BEDROCK_FORCES_AUTO_TOOL_CHOICE` entry whose
+        ``triggers_met`` declares it as met would be the trigger case;
+        after KBR-55 lands, the corpus has **only** the complement, so
+        ``entries_meeting == 0`` and ``entries_without >= 1``.
+        """
+        met = k.entries_meeting(self.entries, Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE)
+        without = k.entries_without(self.entries, Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE)
+
+        assert met == (), (
+            f"P33 trigger case is T-D6's deliverable, not T-D5's; "
+            f"trigger cases found = {[e.id for e in met]}"
+        )
+        assert len(without) >= 1, (
+            f"P33 complement is missing from the corpus: "
+            f"no entry declares triggers_absent=bedrock_forces_auto_tool_choice"
+        )

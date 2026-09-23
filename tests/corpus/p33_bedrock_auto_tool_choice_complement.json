@@ -1,0 +1,35 @@
+{
+  "id": "p33_bedrock_auto_tool_choice_complement",
+  "description": "P33 complement - Chat Completions body whose tool_choice is 'required'; BedrockAdapter's hook translates this to Converse 'any', NOT the unconditional 'auto' P33 writes for absent/none / G35-omitted choices.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). KBR-184 / KBR-214 named P33's 3.3.2 complement as a body where the choice IS carried, so the 'auto' rewrite is provably absent. T-D5 owns the complement (the trigger case is the bedrock slice's deliverable, T-D6): the bedrock trigger requires driving the bedrock adapter, which the curl_cffi slice does not own.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.openai.com",
+  "path": "/v1/chat/completions",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.openai.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "authorization",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "p33_bedrock_auto_tool_choice_complement.body",
+  "body_sha256": "6775cb5ac7181d9971a03653736f62ab35664e0f257ae42270f113c2f2c1b1d7",
+  "wire_format": "chat_completions",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": [
+    "bedrock_forces_auto_tool_choice"
+  ]
+}
