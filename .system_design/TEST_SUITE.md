@@ -4067,6 +4067,115 @@ second reader to consume the URL after Gemini; ``TestRoute`` owns §3.3.5's clai
 byte-identical bodies on ``converse`` and ``converse-stream`` yield different
 ``envelope.stream`` values.
 
+#### 7.4.4 What T-D4 settled — the corpus-driven default slice, and the findings it names
+
+`tests/harness/test_oracle_default_slice.py` — plan task **T-D4** ([KBR-54]). T-D1 proved
+the oracle's obligations on one synthetic body; T-D4 extends the proof across the golden
+corpus: every inbound-Anthropic-Messages entry is driven end to end through a real
+``BridgeFixture`` against ``custom_openai`` (the Chat Completions upstream — the
+non-native route, where unannounced body changes are most likely to hide), and the oracle
+runs with all four obligations active: §3.3.1 totality, §3.3.2 assertions 1 + 2, §3.3.5
+routing. Six of the fourteen entries pass clean; eight are ``pytest.skip``'d against a
+module-level skip table that names each finding and its owner-tracking marker — T-D1's
+docstring anticipated these ("real bridge-side gaps … the KBR-style register rows for
+those drops belong in their own PRs"), and T-D4 is where they become visible in CI rather
+than in a comment.
+
+**The routing authority is the recorder's, not the bridge's.** The bridge and the
+recording transport bind *different* ephemeral ports; the first working version rewrote
+the expectation's authority from ``fixture.base_url`` (the bridge's URL) and every
+captured request mismatched on ``route.host``. The recorder is the party the captured
+``Host`` header names, so the rewrite reads
+``urlsplit(fixture.transport.recorder.base_url)`` — the same shape T-D2's
+``_drive_azure`` uses. Recorded because the two fixtures' port confusion is the first
+trap the next transport slice (T-D5–T-D7) will hit.
+
+**The routing derivation stays literal, restricted to parameter-free ``base_url``s.**
+The default binding's ``provider_config["base_url"]`` carries no query and
+``custom_openai`` contributes no endpoint query, so T-D2's literal comparison is correct
+here without reproducing KBR-143's merge rule. The choice was T-D2's Jira scope
+addition's to make (2026-09-19 comment on KBR-54): extend the derivation, or restrict
+and record. T-D4 restricts and records — in the module docstring, on KBR-54, and in the
+step file's inter-task contract — because extending would re-implement product merge
+logic in the test (the awkward edge §3.3.5 already names for KBR-134), and the literal
+comparison is *loud* when the assumption breaks (the KBR-52 comment's own words: it
+"fails safe, naming ``route.query`` with both values"). **T-D5–T-D7 inherit** the
+restriction, the skip-table pattern, and the ``_SENTINEL_ROUTE_PATH`` constant pattern;
+KBR-55 and KBR-56 were already In Progress when T-D4 landed, so the inheritance is a
+tracked contract (each inheritor is asked to ack on its own ticket), not a hopeful note.
+
+**The expected path is pinned twice — once as a literal, once behaviourally.**
+``_SENTINEL_ROUTE_PATH`` equals ``CustomOpenAIAdapter().get_upstream_path(...)`` so an
+adapter rename fails with both values in the message; and the §1.4 falsification
+(``TestRoutingFalsification``) drives a real body through the bridge, passes every body
+obligation on the real route, then re-runs the oracle with a sentinel-wrong expected
+path and asserts ``RoutingMismatchError`` naming ``route.path``. Because §3.3.5 orders
+routing last, the routing error is the only thing that can fire — T-D2's
+reroute-with-byte-identical-body shape, applied to the L3-driven surface. A derivation
+that hardcoded a wrong path would pass the sentinel (both sides wrong the same way) and
+fail the falsification; a derivation that drifted from the adapter would fail both.
+
+**No special small-context profile — the first draft's premise was numerically false.**
+An earlier plan (F1.c draft) proposed driving the 2.8 MB compaction pair on a
+redirected, small-context profile so M5 would fire. The default ``"harness-model"``
+profile resolves through ``get_model_context_tokens`` to ``DEFAULT_CONTEXT_TOKENS =
+200_000`` × 4 chars/token — an **800 000-char** budget, not the 4 M the corpus README's
+calibration story assumes — so ``compaction_budget_over`` already triggers M5 on the
+default profile and passes the oracle with all 200+ M5 deltas claimed. The
+``redirected(...)`` seam was also dead weight: ``custom_openai`` honours
+``provider_config["base_url"]`` directly. Measured before specified; the design
+review's blocker, and the reason the requirements doc now records the budget's
+derivation beside the literal.
+
+**Four findings the corpus-driven run surfaces, named and owned.** Each is excluded by
+the skip table with its unclaimed-delta path and marker; each is recorded on KBR-54's
+scope-addition comment for the owner to ticket:
+
+- **F3.a / F3.b** — ``envelope.extra[context_management]`` and
+  ``envelope.extra[metadata]`` are dropped on the Messages→CC translation with no
+  register row. The Codex row P23 names both keys in
+  ``_CODEX_DROPPED_CONTROL_FIELDS``, but P23 is ``openai_subscription``-specific;
+  nothing covers the CC adapter. ``plain_turn`` and ``effort_configured`` also surface
+  two further user-turn part drops on the same route.
+- **F3.c** — ``messages[N].reasoning_content`` is residualised by the CC reader (no
+  slot in T-A2's grammar); KBR-285 widened the classifier to
+  refusal/``function_call``/list content but did not touch ``reasoning_content``.
+  ``tool_use_and_tool_result`` fails the totality gate on it.
+- **F3.d** — ``conversation.turns[2]`` (the whole tool_result turn) is dropped on the
+  CC adapter from a Messages body carrying a ~50 000-char ``tool_result`` — both the
+  under- and over-limit entries. Likely M7 pairing-validation territory; the trigger
+  and claim are not in the register.
+
+Two more entries are excluded for **framing**, not fidelity: ``tools_declared`` carries
+a ``role: "system"`` inside ``messages`` (forbidden by the Messages format — the
+adapter rejects with ``UnreadableBodyError`` before any capture), and
+``system_prompt_over_window_compacts_normally`` is answered 400 at ingress. Neither is
+an I1 finding; both are recorded so a future reader knows the exclusion is deliberate.
+
+**A calibration gap the default profile exposes.** ``compaction_budget_under`` was
+calibrated to the static 2.8 M-char threshold (§7.1's threshold-pair table), but the
+runtime budget on the default profile is 800 K chars — so the entry is a *trigger*
+case for M5 (and M3 fires on its boundary tool_result, violating the entry's declared
+``triggers_absent``). The README's own third bullet anticipated the shape ("an oracle
+slice resolving a much larger profile builds its own fixture or accepts that neither
+boundary pair exercises M5 for that profile"); the default profile is the *smaller*
+case, and the entry is skipped with that rationale until a sibling ticket recalibrates
+the pair against the real budget.
+
+**The trigger vocabulary is declared at the call site, per the corpus README's
+PROFILE-decided rule.** ``NON_NATIVE_UPSTREAM_WIRE`` (route) and
+``PROFILE_SETS_MODEL`` (profile) are added by the driver; ``OVER_COMPACTION_BUDGET``
+is added when the body exceeds the 800 K budget, computed from a literal
+(``_DEFAULT_PROFILE_BUDGET_CHARS``) rather than imported from ``src/kitty`` — the
+driver is a judge module and §3.3.1's independent-oracle rule forbids the import (same
+decision T-D2 made for Azure's ``api-version``). The literal's derivation is recorded
+beside it; the raw-body-vs-CC-converted approximation (~92 chars, per §7.1) is
+documented and no corpus entry sits within that margin of the boundary.
+
+**Layer.** No ``pytestmark``; the file defaults to ``l1`` per the T-D1/T-D2 precedent.
+§3.4 calls this surface L3 and T-K6 owns the ``l3`` activation; when it lands, the file
+gains the marker and the selection matrix picks it up.
+
 ### 7.5 The bridge fixture
 
 `tests/harness/bridge.py` — plan task **T-W8** ([KBR-31]). The counterpart of §7.2 on the
