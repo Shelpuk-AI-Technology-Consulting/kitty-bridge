@@ -349,6 +349,12 @@ class TestDrivenScopeEnforcement:
     companion stays projection-level (``test_oracle.py``) — the curl_cffi
     transport's binding needs TLS certs and OAuth seeding, and the per-adapter
     rule is pinned at the cheapest layer that can prove it.
+
+    **Scope of this coverage: the wiring, not the adapter matrix.** One
+    adapter route (``custom_anthropic`` on the aiohttp Messages transport)
+    is what a driven slice can prove in isolation; the full per-adapter
+    matrix is the corpus runner's job (KBR-55/56/57) once ``provider_key``
+    moves into the harness, per §3.3.4's parametrised-over-transport rule.
     """
 
     async def test_drive_anthropic_route_stream_flip_is_unclaimed(self) -> None:
