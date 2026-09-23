@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -557,6 +558,61 @@ def test_post_image_commit_handles_two_and_three_dot_ranges(mcm: ModuleType) -> 
     # Degenerate inputs still degrade sanely.
     assert mcm._post_image_commit("B") == "B"
     assert mcm._post_image_commit("A..B") == "B"
+
+
+def test_diff_meta_raises_git_command_error_on_bad_revision(
+    mcm: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``git diff`` surfaces as ``GitCommandError`` whose ``str``
+    carries the first stderr line — the actionable form that masks a bare
+    ``returned non-zero exit status 128``.
+
+    Pin the contract the round-4 fix introduced: the exception type is
+    ``GitCommandError`` (not the stdlib ``CalledProcessError``), the
+    message embeds the stderr, and ``returncode`` is preserved. Without
+    this test a revert that drops ``stderr`` from the message or
+    re-raises the wrong type would pass every existing test.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=128,
+            stdout="",
+            stderr="fatal: bad revision '30a91a0^1..30a91a'\n",
+        )
+
+    monkeypatch.setattr(mcm.subprocess, "run", fake_run)
+    with pytest.raises(mcm.GitCommandError) as excinfo:
+        mcm.diff_meta_from_git_range("30a91a0^1..30a91a", str(_REPO_ROOT))
+    assert excinfo.value.returncode == 128
+    assert "fatal: bad revision" in str(excinfo.value)
+    assert "30a91a0^1..30a91a" in str(excinfo.value)
+    assert not isinstance(excinfo.value, subprocess.CalledProcessError)
+    assert captured["cmd"][:3] == ["git", "diff", "--name-only"]
+
+
+def test_hunk_post_lines_soft_fails_on_git_error(
+    mcm: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-file hunk read failure soft-fails to an empty set.
+
+    ``_hunk_post_lines`` is a per-file probe: one bad pathspec must not
+    sink the whole diff. Pin the empty-set fallback so the contract does
+    not silently harden into an exception.
+    """
+    def fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="fatal: bad pathspec\n",
+        )
+
+    monkeypatch.setattr(mcm.subprocess, "run", fake_run)
+    assert (
+        mcm._hunk_post_lines("A..B", "src/kitty/bridge/server.py", "/no/repo")
+        == set()
+    )
 
 
 def test_runner_kills_alive_child_in_finally_on_caller_interrupt(
