@@ -353,6 +353,36 @@ class TestConvertNativeToCCFormat:
             },
         ]
 
+    def test_marked_empty_text_produces_no_text_carriage(self):
+        """KBR-296: a marked but empty-text assistant turn carries no text carriage.
+
+        The join of empty texts is empty, and the rebuild emits no text block
+        to host a breakpoint — attaching one would trade the silent drop for
+        an upstream 400 (Anthropic rejects empty text blocks). Pinned so a
+        future refactor of the join logic cannot flip the guard by accident.
+        """
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "",
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                        },
+                    ],
+                },
+            ],
+        }
+        cc = _convert_native_to_cc_format(body)
+
+        assert cc["messages"][1]["content"] is None
+        assert "_cache_control" not in cc["messages"][1]
+
     def test_anthropic_tools_become_cc_tools(self):
         body = _anthropic_body_with_tool_use()
         result = _convert_native_to_cc_format(body)
