@@ -89,10 +89,14 @@ extends them across all 20 default adapters.
   KBR-54's scope-addition comment for owner tracking; the fix is out of scope here.
 - **A corpus-calibration gap on `compaction_budget_under`.** The entry was calibrated to
   the 2.8 M-char static threshold (per `tests/corpus/README.md`), but the default profile
-  resolves to 800 000-char budget. The entry is no longer a clean M5 complement (M5 fires,
-  M3 also fires on the boundary tool_result, violating the entry's
-  `triggers_absent: tool_result_over_limit`). Recorded as a calibration gap; the fix is
-  a corpus-regeneration ticket (sibling, TBD).
+  resolves to 800 000-char budget. The entry is no longer a clean M5 complement: M5 fires
+  (body 2.8 MB > 800 K budget). The body carries no `tool_result` (zero tool blocks in
+  `compaction_budget_under.body`; manifest's `triggers_absent: tool_result_over_limit`
+  matches), so M3 has nothing to act on — the probe's M3 conditional violation came
+  from M3's coarse `parts[*]` anchor matching M5's pruned turn texts (M5's anchor is
+  a proper prefix of M3's, so M5 does not specifically claim for M3 per the
+  `_conditional_violations` specificity rule). Recorded as a calibration gap; the fix
+  is a corpus-regeneration ticket (sibling, TBD).
 - **No pytestmark.** The slice defaults to `l1` per the T-D1 / T-D2 precedent; the
   §3.4 table calls this surface L3, and T-K6 owns `l3` activation. When T-K6 lands,
   `@pytest.mark.l3` is added; until then, the file runs as `l1` and the
@@ -154,9 +158,11 @@ Linux 3.13. Awaiting human review; not merged.
   load-bearing entry — a known gap the oracle catches and names, the test green because
   the catch is the proof (the same shape T-D2's "reroute with byte-identical body"
   follows). `TestRoutingFalsification` is a separate §1.4 case: it drives a **clean**
-  entry (`format_example`, the smallest non-skipped one — selection iterates rather than
-  hardcoding the id) so the routing assertion's "body obligations pass first" ordering
-  has a body that actually passes them.
+  entry (the smallest Anthropic-Messages entry not in the skip table — selection
+  iterates the corpus at collection time, so a future entry's deletion or addition
+  flows through without breaking the test). Today that selection resolves to
+  `format_example`, but the design does not depend on that name — the test code
+  itself never names it.
 - Empirical baseline: `.scratch/probe_corpus.py` (corrected version, 2026-09-23). Six
   clean entries pass with `report.deltas == ("envelope.model",)` (the M1
   PROFILE_SETS_MODEL rewrite); `compaction_budget_over` produces 383 deltas, first

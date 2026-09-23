@@ -4155,11 +4155,16 @@ an I1 finding; both are recorded so a future reader knows the exclusion is delib
 **A calibration gap the default profile exposes.** ``compaction_budget_under`` was
 calibrated to the static 2.8 M-char threshold (§7.1's threshold-pair table), but the
 runtime budget on the default profile is 800 K chars — so the entry is a *trigger*
-case for M5 (and M3 fires on its boundary tool_result, violating the entry's declared
-``triggers_absent``). The README's own third bullet anticipated the shape ("an oracle
-slice resolving a much larger profile builds its own fixture or accepts that neither
-boundary pair exercises M5 for that profile"); the default profile is the *smaller*
-case, and the entry is skipped with that rationale until a sibling ticket recalibrates
+case for M5 (body over budget). The body carries no ``tool_result`` (zero tool blocks
+in ``compaction_budget_under.body``; the manifest's ``triggers_absent:
+tool_result_over_limit`` says the same), so M3 has nothing to act on — the probe's M3
+conditional violation came from M3's coarse ``parts[*]`` anchor matching M5's pruned
+turn texts (M5's anchor is a proper prefix of M3's, so M5 does not specifically claim
+for M3 per the ``_conditional_violations`` specificity rule). The README's own third
+bullet anticipated the shape ("an oracle slice resolving a much larger profile builds
+its own fixture or accepts that neither boundary pair exercises M5 for that profile");
+the default profile is the *smaller* case, and the entry is skipped with that rationale
+until a sibling ticket recalibrates
 the pair against the real budget.
 
 **The trigger vocabulary is declared at the call site, per the corpus README's

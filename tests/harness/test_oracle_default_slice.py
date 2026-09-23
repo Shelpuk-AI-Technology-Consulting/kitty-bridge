@@ -133,14 +133,18 @@ _CORPUS_SKIP_TABLE: dict[str, str] = {
     ),
     # Calibration gap: the entry was calibrated to the 2.8 M-char static threshold
     # (tests/corpus/README.md) but the default profile's derived budget is 800 000
-    # chars. M5 fires and M3 fires on the boundary tool_result, violating the entry's
-    # declared triggers_absent: tool_result_over_limit. The entry is no longer a clean
-    # M5 complement at the default profile. A sibling ticket regenerating the entry
-    # against the 800 K-char budget is TBD.
+    # chars, so M5 fires (body 2.8 MB > 800 K budget) and the entry is no longer a
+    # clean M5 complement. The body carries no tool_result (verified empirically
+    # against `compaction_budget_under.body`: zero tool blocks; manifest's
+    # `triggers_absent: tool_result_over_limit` matches), so M3 has nothing to act
+    # on — assertion 2's flag of M3 in the probe came from M3's coarse
+    # `parts[*]` anchor matching M5's pruned turn texts (M5's anchor is a
+    # proper prefix of M3's, so M5 does not specifically claim for M3). A
+    # sibling ticket regenerating the entry against the 800 K-char budget is TBD.
     "compaction_budget_under": (
         "calibration gap: entry calibrated to 2.8 M-char static threshold; default "
-        "profile's 800 000-char budget makes this a trigger case for both M5 and M3, "
-        "violating the entry's triggers_absent: tool_result_over_limit"
+        "profile's 800 000-char budget makes this a trigger case for M5 (body over "
+        "budget); the entry has no oversized tool_result so M3 has nothing to act on"
     ),
 }
 
