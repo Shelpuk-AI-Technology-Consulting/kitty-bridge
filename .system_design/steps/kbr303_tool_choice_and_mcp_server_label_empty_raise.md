@@ -1,7 +1,7 @@
 ---
 id: kbr303_tool_choice_and_mcp_server_label_empty_raise
 depends_on:
-  - kbr296_responses_custom_declaration_empty_name_raise
+  - kbr299_responses_custom_declaration_empty_name_raise
 ---
 
 # KBR-303 — Close the silent `tool_choice.name=""` admission across the five readers that carry the shape, plus the Responses MCP `server_label=""` declaration slip

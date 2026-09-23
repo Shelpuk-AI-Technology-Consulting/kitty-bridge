@@ -290,18 +290,19 @@ def _require_tool_call_name(name: Any, path: str) -> str:
     spellings on the *selection* surface —
     :meth:`ResponsesProjection._normalise_tool_choice`'s by-name + mcp
     branches — and a fourth on the declaration's mcp ``server_label``
-    sub-branch; all four share the family error-message shape
-    (``f"{path} must be a non-empty string name"|server_label"``). The
-    strict and narrow spellings share the same error-message shape
-    (``f"{path} must be a non-empty string name"``). ``""`` for a name
-    is not a lossless projection (``contract.decode_arguments``): it
-    claims a tool *named* empty-string, and a call nobody can name
-    cannot be paired with its result or addressed by a register row
-    (KBR-281 settled four invocation readers; KBR-292 extended it to
-    the remaining invocations; KBR-295 closed the ``FunctionTool``
-    declaration branch; KBR-299 closed the ``custom`` / built-in /
-    ``mcp`` sub-branches with the narrower inline spelling; KBR-303
-    closes the *selection* surface on the five readers whose
+    sub-branch. The four spellings share one family error-message
+    shape: ``f"{path} must be a non-empty string name"`` for ``name``
+    and ``f"{path} must be a non-empty string server_label"`` for
+    ``server_label``. The strict and narrow spellings share the same
+    error-message shape (``f"{path} must be a non-empty string name"``).
+    ``""`` for a name is not a lossless projection
+    (``contract.decode_arguments``): it claims a tool *named* empty-string,
+    and a call nobody can name cannot be paired with its result or
+    addressed by a register row (KBR-281 settled four invocation readers;
+    KBR-292 extended it to the remaining invocations; KBR-295 closed the
+    ``FunctionTool`` declaration branch; KBR-299 closed the ``custom`` /
+    built-in / ``mcp`` sub-branches with the narrower inline spelling;
+    KBR-303 closes the *selection* surface on the five readers whose
     ``tool_choice`` carries the shape).
 
     Args:
