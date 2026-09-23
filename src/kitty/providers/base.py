@@ -106,6 +106,26 @@ class ProviderAdapter(ABC):
             # to; AnthropicAdapter restores it there, verbatim. Stripping it
             # here keeps documents off the wire of every other provider's.
             "_documents",
+            # KBR-296: written by server._convert_native_to_cc_format to carry
+            # the agent's top-level automatic-caching form, which Chat
+            # Completions has no slot for. AnthropicAdapter restores it onto
+            # the rebuilt Anthropic body verbatim. Stripping it here keeps it
+            # off the wire of every other provider's.
+            "_cache_control",
+            # KBR-296: written by server._convert_native_to_cc_format to carry
+            # per-tool `cache_control` breakpoints, name-keyed (the register's
+            # P30 vocabulary). AnthropicAdapter._translate_tools restores them
+            # onto the rebuilt declarations. Stripping it here keeps it off
+            # the wire of every other provider's.
+            "_tool_cache_controls",
+            # KBR-296: dual-registered like `_thinking_blocks` above — it
+            # rides *message* dicts (assistant messages, index-keyed by
+            # position in `tool_calls`), so `_INTERNAL_MESSAGE_KEYS` is what
+            # the real message-level strip reads; the top-level entry here
+            # keeps the key off every wire if it ever rides the request
+            # itself (the internal-key regression guards drive discovered
+            # keys at top level).
+            "_tool_call_cache_controls",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().
@@ -125,6 +145,18 @@ class ProviderAdapter(ABC):
             # Messages -> CC converters (request direction) and onto the reply
             # message by the Anthropic-family adapters (response direction).
             "_thinking_blocks",
+            # KBR-296: written by server._convert_native_to_cc_format onto a
+            # tool message (the ``tool_result`` block's own breakpoint, for
+            # ``_tool_result_block`` to restore) or onto an assistant message
+            # (the joined text block's breakpoint, for
+            # ``_translate_assistant_msg`` to restore).  The message-level
+            # strip keeps it off every wire that does not consume it.
+            "_cache_control",
+            # KBR-296: written by server._convert_native_to_cc_format onto an
+            # assistant message, index-keyed by position in ``tool_calls``;
+            # ``_translate_assistant_msg`` restores each onto the rebuilt
+            # ``tool_use`` block.  Stripped like its sibling above.
+            "_tool_call_cache_controls",
         }
     )
 

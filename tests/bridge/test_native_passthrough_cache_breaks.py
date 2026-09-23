@@ -38,26 +38,28 @@ native branch's passthrough does the same on its route. CB-3 covers
 CB-4/CB-5's wire concern, not this one's. So every site in
 ``harness.cache_breakpoints.SITES`` is asserted here.
 
-**The M9 fallback's exact breakpoint behaviour (pinned, not fixed).** The
-``tool_use`` format-error fallback — ``_convert_native_to_cc_format``
-``server.py`` ~702 — is reached only from the four streaming handlers
-(``_stream_responses`` ~3580, ``_stream_messages`` ~4669, ``_stream_gemini``
-~5964, ``_stream_chat_completions`` ~7137). Its rebuild loses most
-breakpoints; two survive by carriage and restore, on the adapters whose
-flags admit the restore:
+**The M9 fallback's breakpoint behaviour (KBR-296).** The ``tool_use``
+format-error fallback — ``_convert_native_to_cc_format`` ``server.py``
+~1089 — is reached only from the four streaming handlers
+(``_stream_responses``, ``_stream_messages``, ``_stream_gemini``,
+``_stream_chat_completions``). KBR-296 carries every breakpoint the
+rebuild can express through carriage keys and restores them on the
+adapter's CC→Messages rebuild:
 
 - **``system``** survives on ``zai_anthropic`` and ``custom_anthropic`` (both
   set ``forwards_thinking_signature = True``). The converter carries
-  ``body["system"]`` verbatim under ``_anthropic_system`` (~845-847, KBR-228
-  part B); the rebuild restores it verbatim.
-- **``document``** survives on all three native adapters. The shared user-
-  content builder (``bridge.messages.translator.build_user_content_message``)
-  appends the whole block verbatim into ``_documents``; the rebuild
-  re-attaches those blocks verbatim.
-
-The other eight sites (``tool``, ``image``, ``user_text``, ``assistant_text``,
-``tool_use``, ``tool_result``, ``tool_result_nested``, ``top_level``) do not
-survive — pinned as today's behaviour.
+  ``body["system"]`` verbatim under ``_anthropic_system`` (KBR-228 part B);
+  the rebuild restores it verbatim. **Lost on ``minimax_token``** — the
+  restore is flag-gated and MiniMax's endpoint rejects ``cache_control`` on
+  system blocks outright, so the carve-out is deliberate (G43).
+- **``document``** survives on all three native adapters (the ``_documents``
+  restore is not flag-gated).
+- **All other eight sites** (``tool``, ``image``, ``user_text``,
+  ``assistant_text``, ``tool_use``, ``tool_result``, ``tool_result_nested``,
+  ``top_level``) survive on all three since KBR-296: the converter carries
+  each onto a carriage key the adapter reads (attempt-0 parity — the same
+  value already reached the upstream on the first attempt, where native
+  passthrough ships the raw body verbatim).
 
 **Why L2 drives the serialization boundary, not the socket.** Per §6.2.3,
 the wire-bound body lives at ``BridgeServer._upstream_body_for``. A transport-
@@ -555,19 +557,57 @@ def _fallback_factory() -> Callable[[int], _StubStreamUpstream]:
     return factory
 
 
-#: The sites that survive the M9 fallback per native adapter.
-#:
-#: * ``zai_anthropic`` and ``custom_anthropic`` set
-#:   ``forwards_thinking_signature = True``, so the rebuild restores the
-#:   ``_anthropic_system`` carriage verbatim — ``system`` survives alongside
-#:   the always-restored ``_documents`` carriage.
-#: * ``minimax_token`` sets the flag False: its rebuild re-joins the system
-#:   messages to one string, so ``system`` is lost. ``document`` still
-#:   survives (the ``_documents`` restore is not gated on the flag).
+#: The sites that survive the M9 fallback per native adapter. Since KBR-296:
+#: every site on every adapter except ``system`` on ``minimax_token`` — the
+#: ``_anthropic_system`` restore is coupled to ``forwards_thinking_signature``,
+#: and MiniMax's endpoint rejects ``cache_control`` on system blocks outright,
+#: so the carve-out is deliberate (G43). All other carriers survive by
+#: attempt-0 parity: the same value already reached the upstream on attempt 0,
+#: where native passthrough ships the raw body verbatim.
 _SURVIVES_ON_ADAPTER: dict[str, frozenset[str]] = {
-    "zai_anthropic": frozenset({"system", "document"}),
-    "custom_anthropic": frozenset({"system", "document"}),
-    "minimax_token": frozenset({"document"}),
+    # (Rationale for the widened set lives in the ``#:`` block above; the
+    # per-adapter split is exactly "all of SITES minus system-on-minimax".)
+    "zai_anthropic": frozenset(
+        {
+            "system",
+            "document",
+            "top_level",
+            "tool",
+            "tool_result",
+            "tool_result_nested",
+            "image",
+            "user_text",
+            "assistant_text",
+            "tool_use",
+        }
+    ),
+    "custom_anthropic": frozenset(
+        {
+            "system",
+            "document",
+            "top_level",
+            "tool",
+            "tool_result",
+            "tool_result_nested",
+            "image",
+            "user_text",
+            "assistant_text",
+            "tool_use",
+        }
+    ),
+    "minimax_token": frozenset(
+        {
+            "document",
+            "top_level",
+            "tool",
+            "tool_result",
+            "tool_result_nested",
+            "image",
+            "user_text",
+            "assistant_text",
+            "tool_use",
+        }
+    ),
 }
 
 _FALLBACK_ADAPTERS: tuple[tuple[str, Callable[[], ProviderAdapter]], ...] = (
@@ -598,22 +638,22 @@ async def test_m9_fallback_preserves_carriage_breakpoints_and_loses_the_rest(
 
     * **Per site** (10 values): what the converter preserves vs. drops.
     * **Per native adapter** (3 values): which carriers the rebuild restores.
-      The split is gated by the adapter's flags:
+      Since KBR-296 the only per-adapter split is ``system`` on
+      ``minimax_token`` — the ``_anthropic_system`` restore is coupled to
+      ``forwards_thinking_signature``, and MiniMax's endpoint rejects
+      ``cache_control`` on system blocks outright (the scope-out recorded
+      on G43). All other carriers — top-level ``cache_control``, every
+      tool/part carriage, the verbatim-forwarded nested ``tool_result``
+      content — survive on every adapter by attempt-0 parity (the same
+      value already reached the upstream on attempt 0, where the native
+      passthrough ships the raw body verbatim).
 
-      - ``system`` survives on the adapters that set
-        ``forwards_thinking_signature = True`` (``zai_anthropic``,
-        ``custom_anthropic``); ``minimax_token``'s flag is False and its
-        rebuild joins system to a string.
-      - ``document`` survives on all three — the ``_documents`` restore is
-        not flag-gated.
-
-    The per-site + per-adapter cross-product proves the gate, not just one
-    half of it: a regression that breaks the ``_documents`` restore on
-    ``minimax_token``'s native-opt-in path is caught here, and a regression
-    that drops the ``_anthropic_system`` carriage on either signature-
-    binding adapter is caught here too. For ``tool_result_nested`` the
-    rebuild flattens ``tool_result.content`` to a string on every adapter —
-    the mechanism pin catches a regression that un-flattens it.
+    The per-site + per-adapter cross-product proves both halves of the
+    contract: the 30 cell-survivals are guarded by the post-fallback
+    assertion, and the ``system``/``minimax_token`` carve-out is guarded
+    by the post-fallback loss assertion. The ``tool_result_nested``
+    mechanism pin asserts the rebuild forwards list-form content
+    verbatim (so the nested breakpoint rides in place).
     """
     server = BridgeServer(_FakeLauncher(), adapter_factory(), "sk-test-key", host="127.0.0.1", port=0)
     body = cb.build_request(site)
@@ -630,16 +670,20 @@ async def test_m9_fallback_preserves_carriage_breakpoints_and_loses_the_rest(
     if site in survives:
         assert cb.find_breakpoints(retry) == [dict(cb.BREAKPOINT)], (
             f"site {site!r} survives the M9 fallback on {adapter_name!r} via "
-            "the _anthropic_system / _documents carriage"
+            "the KBR-296 carriage keys (_anthropic_system / _documents / "
+            "_cache_control / _tool_cache_controls / part-level restore)"
         )
     else:
         assert cb.find_breakpoints(retry) == [], (
             f"site {site!r} should be lost on the M9 fallback for {adapter_name!r}"
         )
 
-    # Mechanism pin for tool_result_nested: the rebuild flattens content on
-    # every adapter (verified at the serialization boundary rather than from
-    # the converter output, so the pin catches a regression at either layer).
+    # Mechanism pin for tool_result_nested: since KBR-296 the converter
+    # forwards list-form tool_result.content verbatim (hop 1's KBR-198/KBR-199
+    # preservation, restored on this path), so the nested block — breakpoint
+    # included — rides the rebuilt tool message's content array. The pin
+    # asserts the array survives at the serialization boundary rather than
+    # from the converter output, so it catches a regression at either layer.
     # The retry body is Anthropic-shaped (rebuilt from the CC intermediate by
     # ``AnthropicAdapter.translate_to_upstream``), so the relevant block type
     # is ``tool_result``, not the CC shape's ``tool``.
@@ -648,8 +692,8 @@ async def test_m9_fallback_preserves_carriage_breakpoints_and_loses_the_rest(
             for block in message.get("content") or []:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     inner = block.get("content")
-                    assert isinstance(inner, str), (
-                        "M9 fallback flattens tool_result.content to a string — "
+                    assert isinstance(inner, list), (
+                        "M9 fallback forwards tool_result.content verbatim — "
                         "pin the mechanism, not Anthropic's nested-depth behaviour"
                     )
 

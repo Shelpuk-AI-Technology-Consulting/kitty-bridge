@@ -129,7 +129,9 @@ def carry_tool_choice_and_metadata(messages_request: dict, cc_request: dict) -> 
 _GA_THINKING_DISPLAYS: tuple[str, ...] = ("summarized", "omitted")
 
 
-def build_user_content_message(blocks: list, documents_out: list[dict]) -> dict:
+def build_user_content_message(
+    blocks: list, documents_out: list[dict], *, carry_cache_control: bool = False
+) -> dict:
     """Build one CC user message from non-``tool_result`` Messages blocks.
 
     The shared body of the two Messages→CC converters (:meth:`MessagesTranslator.
@@ -146,6 +148,14 @@ def build_user_content_message(blocks: list, documents_out: list[dict]) -> dict:
         blocks: The user message's non-``tool_result`` content blocks.
         documents_out: Collector for ``document`` blocks; each entry is
             addressed to the message dict this function builds.
+        carry_cache_control: KBR-296 — opt-in, M9 fallback path only. When
+            true, a block's ``cache_control`` breakpoint is re-attached to
+            the CC part the adapter restores it from, and a turn whose text
+            carries a breakpoint keeps the parts-list form (a joined string
+            would lose the breakpoint). Default off keeps hop 1
+            byte-identical: hop 1's drops stay M16-claimed until the KBR-258/
+            KBR-263 product halves land, and this ticket's scope binds the
+            carry to the M9 site.
 
     Returns:
         The CC user message dict.
@@ -160,7 +170,10 @@ def build_user_content_message(blocks: list, documents_out: list[dict]) -> dict:
             continue
         kind = block.get("type")
         if kind == "text":
-            parts.append({"type": "text", "text": block.get("text", "")})
+            part: dict = {"type": "text", "text": block.get("text", "")}
+            if carry_cache_control and block.get("cache_control") is not None:
+                part["cache_control"] = block["cache_control"]
+            parts.append(part)
         elif kind == "image":
             source = block.get("source") or {}
             if source.get("type") == "base64":
@@ -173,7 +186,10 @@ def build_user_content_message(blocks: list, documents_out: list[dict]) -> dict:
                 # empty-URL part would corrupt the reference and buy an
                 # opaque upstream 400.
                 continue
-            parts.append({"type": "image_url", "image_url": {"url": url}})
+            image_part: dict = {"type": "image_url", "image_url": {"url": url}}
+            if carry_cache_control and block.get("cache_control") is not None:
+                image_part["cache_control"] = block["cache_control"]
+            parts.append(image_part)
         elif kind == "document":
             documents.append(block)
 
@@ -181,7 +197,13 @@ def build_user_content_message(blocks: list, documents_out: list[dict]) -> dict:
         "role": "user",
         "content": "\n".join(p["text"] for p in parts if p["type"] == "text") if parts else "",
     }
-    if any(p["type"] != "text" for p in parts):
+    # KBR-296: a text part carrying a breakpoint needs the parts-list form —
+    # the join would lose it. Image-bearing turns were already list-form; the
+    # carve is conditional so unmarked text-only turns keep the joined string
+    # (attempt-0 parity).
+    if any(p["type"] != "text" for p in parts) or (
+        carry_cache_control and any(p.get("cache_control") is not None for p in parts)
+    ):
         message["content"] = parts
     if documents:
         documents_out.append({"message": message, "blocks": documents})

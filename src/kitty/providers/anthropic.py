@@ -518,7 +518,9 @@ class AnthropicAdapter(ProviderAdapter):
 
         # Translate tools
         if "tools" in cc_request and cc_request["tools"]:
-            anthropic["tools"] = self._translate_tools(cc_request["tools"])
+            anthropic["tools"] = self._translate_tools(
+                cc_request["tools"], cc_request.get("_tool_cache_controls")
+            )
 
         # KBR-214: this body is rebuilt from an allowlist, so an agent's tool
         # constraint is dropped here unless it is written back explicitly.
@@ -531,6 +533,14 @@ class AnthropicAdapter(ProviderAdapter):
         # no field of its own that means Anthropic's `metadata`.
         if cc_request.get("_metadata") is not None:
             anthropic["metadata"] = cc_request["_metadata"]
+
+        # KBR-296: restored from internal metadata, because Chat Completions
+        # has no top-level slot for Anthropic's automatic-caching form. The
+        # same value already reached this upstream on attempt 0 (native
+        # passthrough ships the raw body verbatim), so restoring it cannot
+        # newly 400 — attempt-0 parity, no gating.
+        if cc_request.get("_cache_control") is not None:
+            anthropic["cache_control"] = cc_request["_cache_control"]
 
         # Restore thinking from normalized effort metadata
         if cc_request.get("_thinking_adaptive"):
@@ -629,18 +639,27 @@ class AnthropicAdapter(ProviderAdapter):
 
         text = msg.get("content")
         if text:
-            content_blocks.append({"type": "text", "text": text})
+            text_block: dict = {"type": "text", "text": text}
+            # KBR-296: the joined text block's breakpoint, restored from the
+            # message-level carriage (last-marked-wins on the carry side).
+            if msg.get("_cache_control") is not None:
+                text_block["cache_control"] = msg["_cache_control"]
+            content_blocks.append(text_block)
 
-        for tc in msg.get("tool_calls", []):
+        # KBR-296: per-tool_use breakpoints ride an index-keyed message-level
+        # carriage; each rebuilt ``tool_use`` block reads its own position.
+        tool_call_cache_controls = msg.get("_tool_call_cache_controls")
+        for idx, tc in enumerate(msg.get("tool_calls", [])):
             func = tc.get("function", {})
-            content_blocks.append(
-                {
-                    "type": "tool_use",
-                    "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
-                    "name": func.get("name", ""),
-                    "input": _safe_json_load_args(func.get("arguments")),
-                }
-            )
+            tool_use_block: dict = {
+                "type": "tool_use",
+                "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                "name": func.get("name", ""),
+                "input": _safe_json_load_args(func.get("arguments")),
+            }
+            if isinstance(tool_call_cache_controls, dict) and idx in tool_call_cache_controls:
+                tool_use_block["cache_control"] = tool_call_cache_controls[idx]
+            content_blocks.append(tool_use_block)
 
         return {"role": "assistant", "content": content_blocks or ""}
 
@@ -656,11 +675,18 @@ class AnthropicAdapter(ProviderAdapter):
             to be inside a user message; the caller decides whether that is a
             message of its own or a re-joined tool run (KBR-222).
         """
-        return {
+        block: dict = {
             "type": "tool_result",
             "tool_use_id": msg.get("tool_call_id", ""),
             "content": msg.get("content", ""),
         }
+        # KBR-296: the block's own ``cache_control`` breakpoint rides the
+        # internal ``_cache_control`` message key (list-form content
+        # ``tool_result.content`` is forwarded verbatim, so any nested
+        # breakpoint rides inside the array without a carriage).
+        if msg.get("_cache_control") is not None:
+            block["cache_control"] = msg["_cache_control"]
+        return block
 
     def _translate_user_content(self, msg: dict, cc_request: dict) -> list[dict] | str | None:
         """Translate a CC user message's content into Anthropic content blocks.
@@ -734,18 +760,32 @@ class AnthropicAdapter(ProviderAdapter):
         # ``_translate_message`` fallback rather than ship it raw.
         return str(content)
 
-    def _translate_tools(self, cc_tools: list[dict]) -> list[dict]:
-        """Translate CC tool definitions to Anthropic format."""
+    def _translate_tools(
+        self, cc_tools: list[dict], tool_cache_controls: dict[str, dict] | None = None
+    ) -> list[dict]:
+        """Translate CC tool definitions to Anthropic format.
+
+        Args:
+            cc_tools: The CC ``tools`` list.
+            tool_cache_controls: KBR-296 carriage — per-tool ``cache_control``
+                breakpoints, **name-keyed** to align with the register's P30
+                vocabulary (``conversation.tools[<name>].cache_control``) and
+                to survive any future normalisation that reorders tools.
+                Restored onto the rebuilt declaration verbatim.
+        """
         anthropic_tools = []
         for tool in cc_tools:
             func = tool.get("function", {})
-            anthropic_tools.append(
-                {
-                    "name": func.get("name", ""),
-                    "description": func.get("description", ""),
-                    "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
-                }
-            )
+            anthropic_tool: dict = {
+                "name": func.get("name", ""),
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+            }
+            # KBR-296: a carried declaration breakpoint is restored by name;
+            # a name nothing carried simply has no entry.
+            if tool_cache_controls and func.get("name") in tool_cache_controls:
+                anthropic_tool["cache_control"] = tool_cache_controls[func["name"]]
+            anthropic_tools.append(anthropic_tool)
         return anthropic_tools
 
     # ── Anthropic response → CC translation ──────────────────────────────

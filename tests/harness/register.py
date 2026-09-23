@@ -753,11 +753,19 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     MutationRow(
         id="M9a",
         # KBR-271: the M9 fallback's top-level twin of M16's fourth path
-        # (KBR-263 / G38). `_convert_native_to_cc_format` builds its result
-        # dict from named keys and never copies `body["cache_control"]`, so
-        # Anthropic's automatic-caching form -- projected to
-        # `envelope.extra[cache_control]` (§3.3.1) -- is dropped by omission
-        # on the retried wire. Pinned at the wire by the KBR-200 CB-3 suite's
+        # (KBR-263 / G38). At the KBR-271 measurement, `_convert_native_to_cc_format`
+        # built its result dict from named keys and never copied
+        # `body["cache_control"]`, so Anthropic's automatic-caching form --
+        # projected to `envelope.extra[cache_control]` (§3.3.1) -- was dropped
+        # by omission on the retried wire.
+        #
+        # KBR-296 (2026-09-23) amended this text: the converter now carries
+        # `body["cache_control"]` onto the internal `_cache_control` carriage
+        # and `AnthropicAdapter.translate_to_upstream` restores it verbatim,
+        # so the retried WIRE carries the form again. The row remains the
+        # register's record of the KBR-271 measurement and of the address
+        # this site touches; its claim is dormant on any route where the
+        # restore runs. Pinned at the wire by the KBR-200 CB-3 suite's
         # `top_level` site (`tests/bridge/test_native_passthrough_cache_breaks.py`).
         #
         # Two overlap facts, stated so no future reader re-derives them from
@@ -789,14 +797,28 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     MutationRow(
         id="M9b",
         # KBR-271: the M9 fallback's block-level twin of M16's three carrier
-        # paths. The rebuild flattens every block it touches -- assistant
-        # text joined to a string, `tool_use` rebuilt as a `tool_calls`
-        # entry, `tool_result.content` flattened to a string *before* any
-        # carriage (the Messages translator preserves the nested half; this
-        # converter defeats it), `tools` rebuilt from
+        # paths. At the KBR-271 measurement the rebuild flattened every block
+        # it touched -- assistant text joined to a string, `tool_use` rebuilt
+        # as a `tool_calls` entry, `tool_result.content` flattened to a string
+        # *before* any carriage (the Messages translator preserves the nested
+        # half; this converter defeated it), `tools` rebuilt from
         # `name`/`description`/`input_schema` only -- so a breakpoint on a
-        # tool declaration or on any content part is dropped on the retried
-        # wire. Pinned at the wire by the CB-3 suite's `tool`, `image`,
+        # tool declaration or on any content part was dropped on the retried
+        # wire.
+        #
+        # KBR-296 (2026-09-23) amended this text: the converter now carries
+        # per-tool breakpoints onto the internal `_tool_cache_controls`
+        # carriage (name-keyed, P30-aligned) and part-level breakpoints onto
+        # the CC parts themselves (the adapter's restore side reads them via
+        # the existing part-spread paths at `anthropic.py:714, 718-719`); the
+        # assistant-text join carries a last-marked-wins breakpoint on the
+        # message-level `_cache_control`; per-tool_use breakpoints ride the
+        # message-level `_tool_call_cache_controls`; and `tool_result.content`
+        # is now forwarded verbatim, restoring hop 1's KBR-198/KBR-199
+        # nested preservation. The retried WIRE carries every carrier the
+        # rebuild can express. The row remains the register's record of the
+        # KBR-271 measurement; its claim is dormant on any route where the
+        # restore runs. Pinned at the wire by the CB-3 suite's `tool`, `image`,
         # `user_text`, `assistant_text`, `tool_use`, `tool_result` and
         # `tool_result_nested` sites. See M9a for the two overlap facts
         # (site-blind matching against M16; anticipatory, native-route-only
