@@ -1948,3 +1948,25 @@ class TestTheKbr55Td5CorpusEntries:
             "P33 complement is missing from the corpus: "
             "no entry declares triggers_absent=bedrock_forces_auto_tool_choice"
         )
+
+    def test_m28_has_one_trigger_and_one_complement(self) -> None:
+        """The empty-`stop_sequences` omission's trigger + the non-empty complement.
+
+        M28 is `conditional=True` per §3.3.2: the row drops an empty
+        inbound `stop_sequences` (correct per `StopConfiguration.minItems: 1`),
+        so the non-empty case is the complement state. The review round's
+        critical finding was that M28's obligation was not discharged by
+        the P33 / P34 / P35 entries' `triggers_met` / `triggers_absent`
+        lists; the two `m28_empty_stop_sequences_*` entries are the fix.
+        """
+        met = k.entries_meeting(self.entries, Trigger.EMPTY_STOP_SEQUENCES)
+        without = k.entries_without(self.entries, Trigger.EMPTY_STOP_SEQUENCES)
+
+        assert len(met) >= 1, (
+            "M28 trigger case is missing from the corpus: "
+            "no entry declares triggers_met=empty_stop_sequences"
+        )
+        assert len(without) >= 1, (
+            "M28 complement is missing from the corpus: "
+            "no entry declares triggers_absent=empty_stop_sequences"
+        )
