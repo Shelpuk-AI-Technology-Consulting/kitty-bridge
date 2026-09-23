@@ -363,6 +363,7 @@ def assert_no_unclaimed_mutation(
     triggers_met: frozenset[r.Trigger],
     *,
     expected_route: ExpectedRoute | None = None,
+    provider_key: str = r.ALL_PROVIDERS,
 ) -> OracleReport:
     """Assert that every difference between the two projections is registered.
 
@@ -376,11 +377,12 @@ def assert_no_unclaimed_mutation(
        §3.3.1 calls out by name.
     2. **§3.3.2 assertion 1 + assertion 2** (§3.3.2). Every concrete delta
        path is classified against the register rows whose trigger is in
-       ``triggers_met``. Unclaimed deltas fail assertion 1. Conditional
-       rows whose trigger is *not* in ``triggers_met`` but whose anchor has
-       an unclaimed delta fail assertion 2 — phrased so a coarser-anchor
-       row (e.g. M3) does not false-fail when an M5 drop beneath it is
-       legitimately claimed by M5's own trigger.
+       ``triggers_met`` **and** whose site is reachable on the adapter
+       ``provider_key`` names (KBR-307). Unclaimed deltas fail assertion
+       1. Conditional rows whose trigger is *not* in ``triggers_met`` but
+       whose anchor has an unclaimed delta fail assertion 2 — phrased so
+       a coarser-anchor row (e.g. M3) does not false-fail when an M5 drop
+       beneath it is legitimately claimed by M5's own trigger.
     3. **§4.3 C2 native passthrough key-order assertion.** When
        :attr:`~harness.register.Trigger.NON_NATIVE_UPSTREAM_WIRE` is *not* in
        ``triggers_met``, the captured body must equal the inbound body
@@ -420,6 +422,12 @@ def assert_no_unclaimed_mutation(
             query — after the caller has rewritten the expectation's
             authority with the recorder's own. ``None`` (every T-D1 caller)
             leaves the routing assertion out entirely.
+        provider_key: The adapter this run is judging — narrows the
+            runtime oracle's notion of "live on this adapter" by scoping
+            each register row by its :attr:`~harness.register.MutationRow.scope`.
+            Defaults to :data:`~harness.register.ALL_PROVIDERS`, the
+            permissive sentinel — see the helpers' ``Args:`` for the
+            call-site short-circuit. KBR-307.
 
     Returns:
         An :class:`OracleReport` recording the projections, the deltas, and
@@ -454,7 +462,9 @@ def assert_no_unclaimed_mutation(
     verify_total(captured_projection)
 
     # Step 3–5 — diff, claim matching, assertion 1, assertion 2.
-    deltas = _run_assertions(inbound_projection, captured_projection, register, triggers_met)
+    deltas = _run_assertions(
+        inbound_projection, captured_projection, register, triggers_met, provider_key=provider_key
+    )
 
     # Step 6 — §4.3 C2 native passthrough byte-level check. Route is the
     # *absence* of NON_NATIVE_UPSTREAM_WIRE in triggers_met.
@@ -482,6 +492,8 @@ def _run_assertions(
     captured_projection: Request,
     register: tuple[r.MutationRow, ...],
     triggers_met: frozenset[r.Trigger],
+    *,
+    provider_key: str = r.ALL_PROVIDERS,
 ) -> list[str]:
     """Run §3.3.2 assertions 1 and 2 over two already-projected requests.
 
@@ -495,6 +507,16 @@ def _run_assertions(
         captured_projection: The captured request's projection.
         register: The Permitted-Mutation Register rows.
         triggers_met: The trigger vocabulary the input met.
+        provider_key: The adapter this run is judging — narrows the
+            runtime oracle's notion of "live on this adapter" by scoping
+            each row by its :attr:`~harness.register.MutationRow.scope`.
+            Defaults to :data:`~harness.register.ALL_PROVIDERS`, the
+            permissive sentinel — a caller that has no opinion passes
+            through every row; the helper's body is **not** permissive
+            when handed the sentinel (the sentinel is a valid value of
+            ``row.scope``, not of ``provider_key``), so the helpers'
+            default-empty behaviour is provided by an explicit call-site
+            short-circuit, not by the helper. KBR-307.
 
     Returns:
         The concrete delta paths the structural diff found (also the input
@@ -506,10 +528,14 @@ def _run_assertions(
     """
     deltas = _structural_diff(inbound_projection, captured_projection)
 
-    # Claim matching. For each delta, the rows whose trigger is met and
-    # whose pattern matches are the claimers; rows whose trigger is not
-    # met do not contribute.
-    claimers: dict[str, tuple[str, ...]] = _claim_matching(deltas, register, triggers_met)
+    # Claim matching. For each delta, the rows whose trigger is met,
+    # whose pattern matches, and whose site is reachable on the adapter
+    # the oracle is judging are the claimers. The provider_key == ALL_PROVIDERS
+    # short-circuit is what makes the default permissive: the helper is
+    # not itself permissive when handed the sentinel (KBR-307).
+    claimers: dict[str, tuple[str, ...]] = _claim_matching(
+        deltas, register, triggers_met, provider_key=provider_key
+    )
     unclaimed = [path for path in deltas if not claimers[path]]
 
     if unclaimed:
@@ -521,7 +547,9 @@ def _run_assertions(
 
     # Assertion 2: conditional rows whose trigger was *not* met, whose
     # anchored paths have an unclaimed delta, are violations.
-    conditional_violations = _conditional_violations(register, triggers_met, deltas)
+    conditional_violations = _conditional_violations(
+        register, triggers_met, deltas, provider_key=provider_key
+    )
     if conditional_violations:
         # Surface one row at a time so the failure message names a specific
         # row id; the report keeps the full list.
@@ -1037,7 +1065,11 @@ def _diff_tools(inbound: Conversation, captured: Conversation) -> Iterable[str]:
 
 
 def _claim_matching(
-    deltas: Sequence[str], register: tuple[r.MutationRow, ...], triggers_met: frozenset[r.Trigger]
+    deltas: Sequence[str],
+    register: tuple[r.MutationRow, ...],
+    triggers_met: frozenset[r.Trigger],
+    *,
+    provider_key: str = r.ALL_PROVIDERS,
 ) -> dict[str, tuple[str, ...]]:
     """Return, per delta, every register row id whose trigger is met and
     whose pattern matches.
@@ -1055,6 +1087,14 @@ def _claim_matching(
         deltas: The concrete delta paths to classify.
         register: The register rows.
         triggers_met: The trigger vocabulary the input met.
+        provider_key: The adapter this run is judging — narrows the
+            runtime notion of "live on this adapter" via
+            :func:`~harness.register.row_is_in_scope`. Defaults to
+            :data:`~harness.register.ALL_PROVIDERS`, the permissive
+            sentinel — the call-site short-circuit makes the default
+            permissive; the helper itself is **not** permissive when
+            handed the sentinel (the sentinel is a valid value of
+            ``row.scope``, not of ``provider_key``). KBR-307.
 
     Returns:
         A mapping from delta path to the tuple of claiming row ids. Empty
@@ -1062,6 +1102,8 @@ def _claim_matching(
     """
     claimers: dict[str, list[str]] = {delta: [] for delta in deltas}
     active_rows = [row for row in register if row.trigger in triggers_met]
+    if provider_key != r.ALL_PROVIDERS:
+        active_rows = [row for row in active_rows if r.row_is_in_scope(row, provider_key)]
     for row in active_rows:
         if not row.is_projectable:
             continue
@@ -1076,6 +1118,8 @@ def _conditional_violations(
     register: tuple[r.MutationRow, ...],
     triggers_met: frozenset[r.Trigger],
     deltas: Sequence[str],
+    *,
+    provider_key: str = r.ALL_PROVIDERS,
 ) -> list[tuple[str, list[str]]]:
     """Find conditional rows whose anchor carries a delta on an input that
     did not meet their trigger, under **specificity attribution**.
@@ -1112,10 +1156,27 @@ def _conditional_violations(
     to make. The oracle reports raw presence subject to the specificity
     rule; the corpus construction owns arranging the rest.
 
+    **Scope filter (KBR-307).** R's iteration is also filtered by
+    ``row_is_in_scope(row, provider_key)``: a conditional row whose site
+    cannot execute on ``provider_key`` cannot "fire without its trigger"
+    on that adapter, and the violation would be a false positive. The
+    ``active`` set used for specificity-attribution is filtered the same
+    way, so both halves of the oracle agree about what a row is allowed
+    to fire on. The default-permissive short-circuit is at the
+    ``provider_key == ALL_PROVIDERS`` boundary, the same shape as
+    ``_claim_matching``'s.
+
     Args:
         register: The register rows.
         triggers_met: The trigger vocabulary the input met.
         deltas: The concrete delta paths the structural diff found.
+        provider_key: The adapter this run is judging — narrows the
+            runtime notion of "live on this adapter" via
+            :func:`~harness.register.row_is_in_scope`, applied to both
+            the iteration over conditional rows **and** the triggered
+            ``active`` set. Defaults to
+            :data:`~harness.register.ALL_PROVIDERS`, the permissive
+            sentinel. KBR-307.
 
     Returns:
         A list of ``(row_id, [paths, ...])`` pairs, one per violation. Each
@@ -1123,12 +1184,16 @@ def _conditional_violations(
         row's anchors without a specifically-claiming triggered row.
     """
     active = [row for row in register if row.trigger in triggers_met and row.is_projectable]
+    if provider_key != r.ALL_PROVIDERS:
+        active = [row for row in active if r.row_is_in_scope(row, provider_key)]
 
     violations: list[tuple[str, list[str]]] = []
     for row in register:
         if not row.conditional or row.trigger in triggers_met:
             continue
         if not row.is_projectable:
+            continue
+        if provider_key != r.ALL_PROVIDERS and not r.row_is_in_scope(row, provider_key):
             continue
         offending: list[str] = []
         for delta in deltas:
