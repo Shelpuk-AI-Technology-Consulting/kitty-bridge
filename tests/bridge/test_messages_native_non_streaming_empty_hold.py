@@ -483,7 +483,13 @@ async def test_an_empty_native_messages_non_streaming_completion_ends_in_the_d4_
     assert error_body["error"]["type"] == "api_error"
     assert _NATIVE_EMPTY_REPLY_MESSAGE in error_body["error"]["message"]
     # The exhausted completion was judged, not dressed: no fabricated
-    # fallback text, no billed usage, no healthy-mark.
+    # fallback text, no billed usage, no healthy-mark. The healthy_log
+    # assertion is vacuous in single-backend mode (the mark site guards on
+    # `if self._backends and self._current_backend_idx >= 0`, always False
+    # here — the recorded KBR-300 asymmetry);
+    # test_an_empty_native_pool_exhausts_into_the_d4_terminal_without_a_healthy_mark
+    # carries the meaningful balancing-mode pin. Both are kept so a refactor
+    # does not silently lose either half.
     assert usage_log == []
     assert healthy_log == []
 

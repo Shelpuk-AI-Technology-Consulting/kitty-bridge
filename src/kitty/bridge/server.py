@@ -5337,6 +5337,24 @@ class BridgeServer:
 
     async def _handle_messages(self, request: web.Request) -> web.StreamResponse:
         # pragma: no mutate block
+        """Handle an inbound Anthropic Messages request end to end.
+
+        Validates and normalizes the request, then either streams the reply
+        (delegating to :meth:`_stream_messages`) or, non-streaming, sends one
+        upstream request and decides by the reply's shape: a native
+        Messages-shaped reply is judged through the D3 truncation check and
+        the empty gate (KBR-306) before it ships as-is; a Chat
+        Completions-shaped reply is judged by the empty gate and translated.
+        Errors surface in the endpoint's own envelope (``type: "error"``).
+
+        Args:
+            request: The inbound client request carrying the Messages API body.
+
+        Returns:
+            A JSON ``Response`` — the translated message, the D3 ``400``
+            truncation terminal, or the D4 ``502 empty_response`` terminal —
+            or, for ``stream: true``, the prepared SSE stream.
+        """
         exc = await self._select_backend_or_hold(request)
         if exc is not None:
             return self._all_unhealthy_response(exc, style="anthropic")
