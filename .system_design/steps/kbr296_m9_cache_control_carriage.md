@@ -192,6 +192,17 @@ the underscore difference — KBR-296 registers `_cache_control`, not
   `cache_breakpoints.py`). S-3 fixed (`f54c28f`): empty-join
   marked-text pin in `tests/bridge/test_native_format_fallback.py`.
   S-2/S-3 threads resolved; S-1 left open with the stated reason.
+- CI round 2 (commit `59994d4`): the root-level regression guards
+  `tests/test_internal_key_completeness.py` and
+  `tests/test_internal_keys_not_sent_upstream.py` — missed by the local
+  bridge+providers+harness sweep, which does not cover `tests/` root —
+  caught two gaps: `_tool_call_cache_controls` needed dual registration
+  in `_INTERNAL_KEYS` (the `_thinking_blocks` precedent: the
+  not-sent-upstream guard drives every AST-discovered key at request
+  level), and `_EXPECTED_KEYS["bridge/server.py"]` needed the three new
+  keys. Complete `tests/` run after the fix: **8955 passed, 16
+  skipped** (27 min). Lesson recorded: the local pre-push sweep must be
+  the whole `tests/` tree, not three subdirectories.
 
 ## Status
 
