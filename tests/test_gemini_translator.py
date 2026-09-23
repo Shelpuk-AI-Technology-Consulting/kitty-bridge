@@ -395,6 +395,525 @@ class TestTranslateRequestGenerationConfig:
         assert cc["stop"] == ["END", "\n\nHuman:"]
         assert cc["_top_k"] == 40
 
+    # ── KBR-301: the six remaining sampling fields + the five named drops ─
+    #
+    # Gemini v1beta `GenerationConfig` publishes 25 keys (the harness
+    # reader's `PUBLISHED_GENERATION_CONFIG_KEYS` and
+    # `test_reader_gemini.py::TestSchemaAgreement` pin them at
+    # `SCHEMA_VERSION == "20260910"`). KBR-213 carried five sampling
+    # fields (`temperature`, `topP`, `maxOutputTokens`, `stopSequences`,
+    # `topK`); the six remaining sampling mappings land here, and the five
+    # named format-specific control fields stay dropped (registered in
+    # `.system_design/TEST_SUITE.md` §9.2). Every guard mirrors the harness
+    # reader's `_typed_leaf` discipline (`reader_gemini.py:915-960`):
+    # `isinstance(v, expected) and not isinstance(v, bool)` — the bool/int
+    # subclass trap that would silently coerce `True` → `1`.
+    #
+    # The two logprobs fields form a name collision: Gemini `logprobs` is
+    # the **integer** count (CC `top_logprobs`); Gemini `responseLogprobs`
+    # is the **boolean** flag (CC `logprobs`). Mapping either onto its own
+    # Gemini spelling would silently break every request that asks for
+    # logprobs on a Gemini route — the CC wire would interpret the integer
+    # as the boolean flag, or vice versa. The collision tests assert
+    # **both** the positive landing and the negative (the *other* key
+    # absent), so a swap turns them red.
+
+    # ── candidateCount → n (int, not bool) ────────────────────────────────
+
+    def test_candidate_count_int_lands_on_n(self):
+        """KBR-301: Gemini `candidateCount` becomes CC `n`."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"candidateCount": 2},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["n"] == 2
+        assert "candidateCount" not in cc
+
+    def test_candidate_count_zero_lands_on_n(self):
+        """`candidateCount: 0` is a value the user sent, not an absent
+        field — the int-not-bool guard lets it through.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"candidateCount": 0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["n"] == 0
+
+    def test_candidate_count_none_is_omitted(self):
+        """A present-but-null `candidateCount` is omitted; `gen_config.get()`
+        returns None, the isinstance guard skips it, no `n` key is invented.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"candidateCount": None},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "n" not in cc
+
+    def test_candidate_count_bool_is_omitted(self):
+        """`isinstance(True, int) is True`, so a wire `true` decoded as
+        Python `True` would otherwise land as the integer 1 and silently
+        restrict sampling. The bool-trap mirrors the harness reader's
+        `(int,)` typing via `_typed_leaf`.
+        """
+        for boolean in (True, False):
+            t = GeminiTranslator()
+            gemini_req = {
+                "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+                "generationConfig": {"candidateCount": boolean},
+            }
+            cc = t.translate_request(gemini_req)
+            assert "n" not in cc, f"boolean={boolean!r} leaked"
+
+    def test_candidate_count_float_is_omitted(self):
+        """A non-int value is wrong-typed; the harness reader's `(int,)`
+        typing rejects it.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"candidateCount": 1.5},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "n" not in cc
+
+    # ── presencePenalty → presence_penalty (_NUMBER: int|float, not bool) ─
+
+    def test_presence_penalty_float_lands_on_presence_penalty(self):
+        """KBR-301: Gemini `presencePenalty` (real-valued) becomes CC
+        `presence_penalty`. The float arm matters because Gemini accepts
+        real-valued penalties.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"presencePenalty": 0.3},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["presence_penalty"] == 0.3
+
+    def test_presence_penalty_int_lands_on_presence_penalty(self):
+        """An integer value also lands — `isinstance(1, (int, float))` is
+        True and the value is not a bool.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"presencePenalty": 1},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["presence_penalty"] == 1
+
+    def test_presence_penalty_zero_lands_on_presence_penalty(self):
+        """`presencePenalty: 0` is a value the user sent, not absent."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"presencePenalty": 0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["presence_penalty"] == 0
+
+    def test_presence_penalty_none_is_omitted(self):
+        """A present-but-null value is omitted; no `presence_penalty` invented."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"presencePenalty": None},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "presence_penalty" not in cc
+
+    def test_presence_penalty_bool_is_omitted(self):
+        """`isinstance(True, (int, float)) is True` (bool is int subclass),
+        but the bool-trap excludes both `True` and `False`. Mirrors the
+        harness reader's `_typed_leaf` discipline
+        (`reader_gemini.py:953-955`).
+        """
+        for boolean in (True, False):
+            t = GeminiTranslator()
+            gemini_req = {
+                "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+                "generationConfig": {"presencePenalty": boolean},
+            }
+            cc = t.translate_request(gemini_req)
+            assert "presence_penalty" not in cc, f"boolean={boolean!r} leaked"
+
+    def test_presence_penalty_string_is_omitted(self):
+        """A wrong-typed string is omitted."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"presencePenalty": "0.3"},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "presence_penalty" not in cc
+
+    # ── frequencyPenalty → frequency_penalty (same discipline as presence) ─
+
+    def test_frequency_penalty_float_lands_on_frequency_penalty(self):
+        """KBR-301: Gemini `frequencyPenalty` becomes CC `frequency_penalty`."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"frequencyPenalty": -0.5},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["frequency_penalty"] == -0.5
+
+    def test_frequency_penalty_int_lands_on_frequency_penalty(self):
+        """An integer value also lands — `isinstance(-1, (int, float))` is
+        True and the value is not a bool. Mirror of the presencePenalty
+        int-arm pin.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"frequencyPenalty": -1},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["frequency_penalty"] == -1
+
+    def test_frequency_penalty_zero_lands_on_frequency_penalty(self):
+        """`frequencyPenalty: 0` is a value, not absent."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"frequencyPenalty": 0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["frequency_penalty"] == 0
+
+    def test_frequency_penalty_none_is_omitted(self):
+        """A present-but-null value is omitted."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"frequencyPenalty": None},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "frequency_penalty" not in cc
+
+    def test_frequency_penalty_bool_is_omitted(self):
+        """Booleans are excluded by the bool-trap; mirror `_typed_leaf`."""
+        for boolean in (True, False):
+            t = GeminiTranslator()
+            gemini_req = {
+                "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+                "generationConfig": {"frequencyPenalty": boolean},
+            }
+            cc = t.translate_request(gemini_req)
+            assert "frequency_penalty" not in cc, f"boolean={boolean!r} leaked"
+
+    def test_frequency_penalty_string_is_omitted(self):
+        """A wrong-typed string is omitted."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"frequencyPenalty": "0.3"},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "frequency_penalty" not in cc
+
+    # ── seed → seed (int, not bool) ───────────────────────────────────────
+
+    def test_seed_int_lands_on_seed(self):
+        """KBR-301: Gemini `seed` becomes CC `seed`."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"seed": 42},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["seed"] == 42
+
+    def test_seed_zero_lands_on_seed(self):
+        """`seed: 0` is a value, not absent — the int-not-bool guard
+        lets the integer through.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"seed": 0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["seed"] == 0
+
+    def test_seed_none_is_omitted(self):
+        """A present-but-null value is omitted."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"seed": None},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "seed" not in cc
+
+    def test_seed_bool_is_omitted(self):
+        """`isinstance(True, int) is True` — booleans must be excluded by
+        the bool-trap so a wire `true` does not project `seed: 1`.
+        """
+        for boolean in (True, False):
+            t = GeminiTranslator()
+            gemini_req = {
+                "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+                "generationConfig": {"seed": boolean},
+            }
+            cc = t.translate_request(gemini_req)
+            assert "seed" not in cc, f"boolean={boolean!r} leaked"
+
+    def test_seed_float_is_omitted(self):
+        """A non-int value is wrong-typed."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"seed": 42.0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "seed" not in cc
+
+    # ── logprobs → top_logprobs (int) — the collision's integer half ──────
+
+    def test_logprobs_int_lands_on_top_logprobs(self):
+        """KBR-301: Gemini `logprobs` (integer count) becomes CC
+        `top_logprobs`. Mapping onto its own Gemini spelling (`logprobs`)
+        would silently break every request that asks for logprobs on a
+        Gemini route — the CC wire would interpret the integer as the
+        *boolean flag* `logprobs`, the wrong shape entirely. Asserts both
+        the positive landing AND the absence of the wrong address.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"logprobs": 10},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["top_logprobs"] == 10
+        assert "logprobs" not in cc
+
+    def test_logprobs_zero_lands_on_top_logprobs(self):
+        """`logprobs: 0` is a value — zero top-logprobs is a real request."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"logprobs": 0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["top_logprobs"] == 0
+
+    def test_logprobs_none_is_omitted(self):
+        """A present-but-null value is omitted."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"logprobs": None},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "top_logprobs" not in cc
+
+    def test_logprobs_bool_is_omitted(self):
+        """Booleans must not project as `top_logprobs: 1`. `True is int`,
+        but the bool-trap excludes both `True` and `False`.
+        """
+        for boolean in (True, False):
+            t = GeminiTranslator()
+            gemini_req = {
+                "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+                "generationConfig": {"logprobs": boolean},
+            }
+            cc = t.translate_request(gemini_req)
+            assert "top_logprobs" not in cc, f"boolean={boolean!r} leaked"
+
+    def test_logprobs_float_is_omitted(self):
+        """A non-int value is wrong-typed."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"logprobs": 10.0},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "top_logprobs" not in cc
+
+    # ── responseLogprobs → logprobs (bool) — the collision's boolean half ──
+
+    def test_response_logprobs_true_lands_on_logprobs(self):
+        """KBR-301: Gemini `responseLogprobs` (boolean flag) becomes CC
+        `logprobs`. Mapping onto its own Gemini spelling (`top_logprobs`)
+        would put a boolean at the *count* address — the wrong shape
+        entirely. Asserts both the positive landing AND the absence of
+        the wrong address.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"responseLogprobs": True},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["logprobs"] is True
+        assert "top_logprobs" not in cc
+
+    def test_response_logprobs_false_lands_on_logprobs(self):
+        """A `false` flag is also a value — carries `logprobs: false`,
+        which CC interprets as "do not return logprobs".
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"responseLogprobs": False},
+        }
+        cc = t.translate_request(gemini_req)
+        assert cc["logprobs"] is False
+
+    def test_response_logprobs_none_is_omitted(self):
+        """A present-but-null value is omitted — `isinstance(None, bool)`
+        is False, so the guard skips it.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"responseLogprobs": None},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "logprobs" not in cc
+
+    def test_response_logprobs_int_one_is_omitted(self):
+        """`responseLogprobs: 1` is NOT a legal wire value (Gemini v1beta
+        types the field as `boolean`), and accepting it would silently
+        coerce `1` → `True`. The `(bool,)` guard rejects the int, mirroring
+        the harness reader's strict typing at `reader_gemini.py:148`.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"responseLogprobs": 1},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "logprobs" not in cc
+
+    def test_response_logprobs_string_is_omitted(self):
+        """A wrong-typed string is omitted."""
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {"responseLogprobs": "true"},
+        }
+        cc = t.translate_request(gemini_req)
+        assert "logprobs" not in cc
+
+    # ── The five format-specific control fields stay dropped ───────────────
+
+    def test_format_specific_control_fields_are_not_forwarded(self):
+        """KBR-301: the five named control fields stay dropped on the
+        Gemini ingress — no mapping onto `response_format` or any other
+        CC key. The harness reader deliberately carries them to
+        `envelope.extra[<wire key>]` because folding any of them onto
+        the CC union would put a claim into the projection that the
+        wire does not make (`reader_gemini.py:152-162`). A future mapper
+        that "helpfully" folds them onto `response_format` would silently
+        break every structured-output request on a Gemini route and turn
+        this test red — the `response_format` absence assertion below is
+        what makes that claim falsifiable (the key-absence checks alone
+        miss a fold that consumes the wire key and rewrites the value;
+        proven by mutation during the KBR-301 review).
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                },
+                "thinkingConfig": {"thinkingBudget": 1024},
+                "mediaResolution": "MEDIA_RESOLUTION_HIGH",
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {"voiceName": "Kore"},
+                    },
+                },
+            },
+        }
+        cc = t.translate_request(gemini_req)
+        # None of these wire keys land on the outbound CC dict.
+        assert "responseMimeType" not in cc
+        assert "responseSchema" not in cc
+        assert "thinkingConfig" not in cc
+        assert "mediaResolution" not in cc
+        assert "speechConfig" not in cc
+        # And the fold target the docstring names is absent too — a
+        # mutant that rewrites `responseMimeType` onto `response_format`
+        # passes every key-absence check above and is caught only here.
+        assert "response_format" not in cc
+        # And the values themselves are dropped too — a 100-field schema
+        # dies in the first hop the same way.
+        assert "application/json" not in str(cc)
+        assert "voiceConfig" not in str(cc)
+        assert "MEDIA_RESOLUTION_HIGH" not in str(cc)
+
+    # ── Combined: all 11 sampling fields together (KBR-301 reproduction) ───
+
+    def test_all_eleven_generation_config_fields_together(self):
+        """KBR-301 reproduction: every one of the 11 published Gemini
+        `generationConfig` sampling fields carries together on one body
+        — the case the ticket reproduces, and the existing KBR-213
+        mappings (`temperature`, `top_p`, `max_tokens`, `stop`, `_top_k`)
+        must not regress. Also asserts none of the Gemini wire spellings
+        leak through to the outbound CC dict.
+        """
+        t = GeminiTranslator()
+        gemini_req = {
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+            "generationConfig": {
+                "temperature": 0.5,
+                "topP": 0.9,
+                "maxOutputTokens": 64,
+                "stopSequences": ["END"],
+                "topK": 40,
+                "candidateCount": 2,
+                "presencePenalty": 0.3,
+                "frequencyPenalty": -0.5,
+                "seed": 12345,
+                "responseLogprobs": True,
+                "logprobs": 10,
+            },
+        }
+        cc = t.translate_request(gemini_req)
+        # KBR-213 mappings — regression net.
+        assert cc["temperature"] == 0.5
+        assert cc["top_p"] == 0.9
+        assert cc["max_tokens"] == 64
+        assert cc["stop"] == ["END"]
+        assert cc["_top_k"] == 40
+        # KBR-301 mappings.
+        assert cc["n"] == 2
+        assert cc["presence_penalty"] == 0.3
+        assert cc["frequency_penalty"] == -0.5
+        assert cc["seed"] == 12345
+        assert cc["logprobs"] is True
+        assert cc["top_logprobs"] == 10
+        # None of the **wire-only** Gemini spellings leak to the outbound
+        # CC dict. Three names are intentionally absent from this list:
+        # `seed` (the one sampling key whose Gemini wire spelling and CC
+        # canonical spelling are identical) and the collision pair — the
+        # request's `responseLogprobs` legitimately writes CC `logprobs`,
+        # and Gemini's `logprobs` writes CC `top_logprobs`. The three
+        # names here are Gemini-only; seeing any of them on the CC body
+        # would mean a production-side mapping bug. The collision swap
+        # detection lives in the per-field tests, which send only one
+        # member of the pair and assert the wrong address is absent.
+        for wire in (
+            "candidateCount",
+            "presencePenalty",
+            "frequencyPenalty",
+        ):
+            assert wire not in cc, f"{wire} leaked to the CC body"
+
 
 class TestTranslateRequestFunctionCall:
     """functionCall parts in model messages → tool_calls."""
