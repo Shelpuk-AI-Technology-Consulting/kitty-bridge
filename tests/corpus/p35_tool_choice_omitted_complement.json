@@ -25,7 +25,7 @@
     ]
   ],
   "body_file": "p35_tool_choice_omitted_complement.body",
-  "body_sha256": "f2925f0e56154b1e2d7d208f943f1a647a07a61b716214cc94ed123eed68909b",
+  "body_sha256": "486ad6be084eb05f1858fd77f7f87aba0d83be4d884ec5ce399a91999e08357f",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [],

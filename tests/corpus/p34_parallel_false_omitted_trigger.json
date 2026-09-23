@@ -25,7 +25,7 @@
     ]
   ],
   "body_file": "p34_parallel_false_omitted_trigger.body",
-  "body_sha256": "62b05ca76ef1336242abd3f5b68ebeb45c6dcce270a18e597c426544f466b002",
+  "body_sha256": "23b5dea250d3a26c4840e08699f42d90044e7f07d13184b9ed98ab94aee35547",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [

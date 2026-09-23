@@ -295,9 +295,18 @@ file, mirroring `kbr139_register_scope.md`'s convention.
 
 ## Status
 
-Implemented (2026-09-23); PR not yet opened. Three commits on
-`feat/kbr-55-t-d5-curl-cffi-oracle-slice`:
-`6b3dcf2` (register rows), `9e8f537` (six corpus entries),
-Phase-3 slice commit pending. Requirements doc and step file
-have been through one system-design-reviewer round (9 BLOCKING +
-7 MUST-FIX findings, all applied).
+Implemented (2026-09-23); PR not yet opened. Four commits on
+`feat/kbr-55-t-d5-curl-cffi-oracle-slice`, rebased onto current
+`origin/main` at `5f59da3`:
+
+| SHA | Title |
+|---|---|
+| `a6c5be8` | register rows M27 / M28 / M29 closing G28 / G29 / G30 |
+| `200aeba` | six corpus entries — P34 trigger + complement, two P35 triggers + complement, P33 complement |
+| `5bbcefa` | driven curl_cffi oracle slice — 7 tests, harness TLS, 3 happy + 4 falsification |
+| `5e61121` | post-rebase ruff fixes (F541 + E501) — applied at the reviewer's suggestion 1; suggestion 2 (corpus body trailing `\n`) applied in a follow-up commit; suggestion 3 (stale line citations in M27/M28 row comments) applied together with the SHA refresh in a follow-up commit. |
+
+The requirements doc and step file have been through one
+system-design-reviewer round (9 BLOCKING + 7 MUST-FIX findings, all
+applied), then one code-reviewer round (APPROVE, with three
+SUGGESTIONs applied pre-PR).

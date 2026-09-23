@@ -1169,7 +1169,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         id="M27",
         # KBR-55 / G28 — ``top_k`` dropped on the non-Anthropic-family
         # routes. KBR-178's carry mints the agent's value on the internal
-        # ``_top_k`` (translator.py:417-418) and only AnthropicAdapter and
+        # ``_top_k`` (translator.py:439-440) and only AnthropicAdapter and
         # its two Messages-routed delegates — ``minimax_token`` (whose
         # native flag defaults off) and ``opencode_go`` (Messages models
         # only) — restore it. The other 18 adapters drop it by design.
@@ -1217,7 +1217,7 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         id="M28",
         # KBR-55 / G29 — empty ``stop_sequences`` omitted rather than
         # forwarded. The Messages-→-CC carry's truthy-only guard at
-        # translator.py:409-411 (``if stop_sequences: result["stop"] =
+        # translator.py:431-433 (``if stop_sequences: result["stop"] =
         # stop_sequences``) skips an empty list deliberately, because
         # OpenAI's ``StopConfiguration`` declares ``minItems: 1`` and
         # ``stop: []`` is a schema-invalid Chat Completions body. The

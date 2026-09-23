@@ -25,7 +25,7 @@
     ]
   ],
   "body_file": "p35_tool_choice_omitted_forcing_anthropic_tool_trigger.body",
-  "body_sha256": "1754e65542cefa652591ece07b64c42c3aea1f48230be604bd4335e6f320ef20",
+  "body_sha256": "e191bf84529dcf1465f5e709d4c671cb86241f6bc3e57b4d52aa52046c9f566f",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [

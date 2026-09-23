@@ -25,7 +25,7 @@
     ]
   ],
   "body_file": "p33_bedrock_auto_tool_choice_complement.body",
-  "body_sha256": "6775cb5ac7181d9971a03653736f62ab35664e0f257ae42270f113c2f2c1b1d7",
+  "body_sha256": "b938e31bbe20940ff02bbada5e971a71622b3af526b9451a9b50de19a44ce4a8",
   "wire_format": "chat_completions",
   "known_non_secrets": [],
   "triggers_met": [],

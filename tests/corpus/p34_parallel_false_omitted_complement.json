@@ -25,7 +25,7 @@
     ]
   ],
   "body_file": "p34_parallel_false_omitted_complement.body",
-  "body_sha256": "ddbed5774b03903ec728ae52bd2a4195a252af94a5e556427e8bb6fc5cd03c74",
+  "body_sha256": "883b804f2143d14f38a703023cf7de837f0e392e42f6d64d2a8b6d7e2e5360dd",
   "wire_format": "anthropic_messages",
   "known_non_secrets": [],
   "triggers_met": [],
