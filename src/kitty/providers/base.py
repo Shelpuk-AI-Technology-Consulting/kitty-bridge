@@ -118,6 +118,14 @@ class ProviderAdapter(ABC):
             # onto the rebuilt declarations. Stripping it here keeps it off
             # the wire of every other provider's.
             "_tool_cache_controls",
+            # KBR-296: dual-registered like `_thinking_blocks` above — it
+            # rides *message* dicts (assistant messages, index-keyed by
+            # position in `tool_calls`), so `_INTERNAL_MESSAGE_KEYS` is what
+            # the real message-level strip reads; the top-level entry here
+            # keeps the key off every wire if it ever rides the request
+            # itself (the internal-key regression guards drive discovered
+            # keys at top level).
+            "_tool_call_cache_controls",
             "base_url",  # F15 defense-in-depth — URL override goes through build_base_url(),
             # not the CC request body.  Stripping it here protects
             # adapters that rely on the default translate_to_upstream().

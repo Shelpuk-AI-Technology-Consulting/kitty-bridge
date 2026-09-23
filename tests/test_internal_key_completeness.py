@@ -92,6 +92,13 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # KBR-222: `_convert_native_to_cc_format` collects the agent's
         # `document` blocks on the retry, the same key the translator mints.
         "_documents",
+        # KBR-296: the M9 fallback's cache_control carriages — the top-level
+        # automatic-caching form, per-tool breakpoints (name-keyed), and the
+        # message-level carriages for the assistant joined text / tool_result
+        # block and the per-tool_use breakpoints.
+        "_cache_control",
+        "_tool_cache_controls",
+        "_tool_call_cache_controls",
         "_native_messages_request",
         "_original_body",
         "_provider_config",
