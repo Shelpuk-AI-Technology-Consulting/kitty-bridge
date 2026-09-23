@@ -541,3 +541,62 @@ def test_runner_handles_platforms_without_os_getloadavg(
     assert summary["load_avg_5m"] is None
     assert summary["load_avg_15m"] is None
     assert summary["cpu_count"] is not None  # cpu_count exists on Windows
+
+
+def test_post_image_commit_handles_two_and_three_dot_ranges(mcm: ModuleType) -> None:
+    """``A..B`` and ``A...B`` both resolve the post-image to ``B``.
+
+    Round 4 review: the three-dot form broke under ``split("..")[-1]``,
+    which yields ``'.B'`` because ``"..."`` = ``".."`` + ``"."``. The
+    regex ``r"\\.{2,3}"`` handles both forms uniformly. The KBR-285
+    fixture uses ``30a91a0^1..30a91a0`` (two-dot); this test pins the
+    three-dot form explicitly.
+    """
+    assert mcm._post_image_commit("30a91a0^1..30a91a0") == "30a91a0"
+    assert mcm._post_image_commit("30a91a0^1...30a91a0") == "30a91a0"
+    # Degenerate inputs still degrade sanely.
+    assert mcm._post_image_commit("B") == "B"
+    assert mcm._post_image_commit("A..B") == "B"
+
+
+def test_runner_kills_alive_child_in_finally_on_caller_interrupt(
+    mcm: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller interrupt (Ctrl+C / SIGTERM) must not orphan the mutmut
+    child.
+
+    ``_default_runner`` spawns the child with ``start_new_session=True``,
+    so the user's Ctrl+C never reaches the child — only the runner. The
+    runner's ``finally`` therefore must signal the child group when an
+    exception (here, a simulated ``KeyboardInterrupt``) escapes the loop
+    while the child is still alive. Without this, a long ``mutmut run``
+    keeps running and holds sockets / log file locks after the user
+    gave up.
+    """
+    proc = _FakeProc(returncode=None, hang=True)
+
+    def fake_runner(command: list[str], **kwargs: Any) -> _FakeProc:
+        return proc
+
+    # Simulate the user pressing Ctrl+C while the runner is between polls.
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise KeyboardInterrupt("simulated Ctrl+C")
+
+    monkeypatch.setattr(mcm.time, "sleep", fake_sleep)
+
+    with pytest.raises(KeyboardInterrupt):
+        mcm.run_mutmut(
+            mcm.build_command(["kitty.bridge.server.x__f__mutmut_*"]),
+            repo_root=str(tmp_path),
+            log_path=tmp_path / "logs" / "run.log",
+            runner=fake_runner,
+        )
+
+    # The child was alive at the time of the interrupt; the finally must
+    # have sent the kill signal — proving the safety net runs for the
+    # KeyboardInterrupt path, not just the budget-exceeded path.
+    assert _KILL_SIGNAL in proc.signals

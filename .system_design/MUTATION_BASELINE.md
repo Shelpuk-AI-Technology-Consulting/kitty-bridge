@@ -242,8 +242,7 @@ rule: (a) a survivor revealing a missing assertion → strengthen the test;
 suppress at the site with `# pragma: no mutate` **and a comment saying
 why**. Never dismiss a survivor silently.
 
-## 2026-09-22 — KBR-92 (T-H4): the changed-code run, measured, and why
-this file is calling Q11 answered in the conservative direction
+## 2026-09-22 — KBR-92 (T-H4): changed-code run measured, Q11 answered conservatively
 
 [KBR-92](https://shelpuk.atlassian.net/browse/KBR-92) resolves Q11 by
 measurement, not assertion. The question is whether `mutmut run` scoped to

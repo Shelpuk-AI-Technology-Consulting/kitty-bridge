@@ -205,8 +205,13 @@ def _hunk_post_lines(rev_range: str, path: str, repo_root: str) -> set[int]:
         capture_output=True,
         text=True,
         encoding="utf-8",  # cp1252 (Windows default) mojibakes non-ASCII
-        check=True,
     )
+    if proc.returncode != 0:
+        # Soft-fail for this one file (e.g. a pathspec typo would fail
+        # every file, but a single weird path failing must not sink the
+        # whole diff): the caller sees "no touched lines", which maps to
+        # "no defs" for the module — the conservative outcome.
+        return set()
     lines: set[int] = set()
     for ln in proc.stdout.splitlines():
         if not ln.startswith("@@"):
@@ -221,8 +226,48 @@ def _hunk_post_lines(rev_range: str, path: str, repo_root: str) -> set[int]:
     return lines
 
 
+class GitCommandError(RuntimeError):
+    """A git invocation failed; the message includes the actionable stderr.
+
+    The default ``subprocess.CalledProcessError`` str() hides ``stderr``
+    in an attribute — a caller seeing only the exception message gets
+    ``Command '['git', 'diff', ...']' returned non-zero exit status 128``
+    with no hint WHY (the exact shape that tripped up the KBR-92 round-1
+    CI debug, where the real cause — a shallow checkout missing the
+    commit — was invisible). This exception puts the first stderr line
+    in the message.
+    """
+
+    def __init__(self, cmd: list[str], returncode: int, stderr: str) -> None:
+        first = (stderr or "").strip().splitlines()[:1]
+        tail = first[0] if first else "<no stderr>"
+        super().__init__(f"{' '.join(cmd[:3])} … returned {returncode}: {tail}")
+        self.cmd = cmd
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def _post_image_commit(rev_range: str) -> str:
+    """Resolve the right-hand revision of ``A..B`` or ``A...B``.
+
+    Both ``A..B`` (two-dot) and ``A...B`` (three-dot, merge-base form)
+    are valid git rev-ranges; ``str.split("..")[-1]`` returns ``'.B'``
+    for the three-dot form (``split("..")`` on ``"A...B"`` yields
+    ``['A', '.B']``). The regex handles the run of 2–3 dots uniformly.
+    """
+    return re.split(r"\.{2,3}", rev_range)[-1]
+
+
 def _post_blob(rev: str, path: str, repo_root: str) -> str | None:
-    """Return the post-image blob for ``path`` at ``rev``, or None if deleted."""
+    """Return the post-image blob for ``path`` at ``rev``, or ``None``.
+
+    Returns ``None`` when the blob cannot be read — either because the
+    file was deleted in the range (``git show`` exits non-zero) or
+    because the subprocess reader thread died during decode (Windows
+    cp1252 raises a ``UnicodeDecodeError`` for non-ANSI bytes; the
+    stdout comes back ``None`` in that case). Either way the caller
+    treats the result as "no source available".
+    """
     proc = subprocess.run(
         ["git", "show", f"{rev}:{path}"],
         cwd=repo_root,
@@ -254,18 +299,17 @@ def diff_meta_from_git_range(rev_range: str, repo_root: str) -> DiffMeta:
         recorded in ``touched_modules`` but contributes nothing to
         ``touched_defs``, and therefore emits zero mutation patterns.
     """
+    cmd = ["git", "diff", "--name-only", rev_range, "--", "src/kitty/"]
     proc = subprocess.run(
-        ["git", "diff", "--name-only", rev_range, "--", "src/kitty/"],
+        cmd,
         cwd=repo_root,
         capture_output=True,
         text=True,
         encoding="utf-8",  # cp1252 (Windows default) mojibakes server.py
-        check=True,
     )
-    # "A..B" splits on ".." to ['A', 'B']; "A...B" splits to ['A', '.B']
-    # (because "..." = ".." + "."). Split on the run of 2–3 dots so both
-    # forms resolve to the post-image revision correctly.
-    post = re.split(r"\.{2,3}", rev_range)[-1]
+    if proc.returncode != 0:
+        raise GitCommandError(cmd, proc.returncode, proc.stderr or "")
+    post = _post_image_commit(rev_range)
     modules: set[str] = set()
     defs: dict[str, set[tuple[str | None, str]]] = {}
     for path in (ln.strip() for ln in proc.stdout.splitlines()):
@@ -652,6 +696,20 @@ def run_mutmut(
     finally:
         wall = time.monotonic() - start
         if proc is not None:
+            # The child runs in its own process group (started via
+            # ``start_new_session=True``) so terminal ``Ctrl+C`` does NOT
+            # reach it — only the runner. When the runner exits via a
+            # caller interruption (KeyboardInterrupt, SIGTERM, or any
+            # other exception) we MUST tear the child group down here,
+            # otherwise an orphaned ``mutmut run`` keeps running and
+            # holds whatever sockets it opened. The budget loop's
+            # SIGTERM-then-SIGKILL path runs before this point on the
+            # over-budget branch; this is the safety net for every other
+            # exit. Skip the kill when ``poll()`` already returned a code
+            # — the process is gone, nothing to signal.
+            if proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    proc.send_signal(_KILL_SIGNAL)
             close = getattr(proc, "close_log", None)
             if callable(close):
                 close()
