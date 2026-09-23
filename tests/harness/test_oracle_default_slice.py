@@ -281,8 +281,14 @@ class TestRoutingFalsification:
 
     async def test_routing_mismatch_raises_on_wrong_expected_path(self) -> None:
         """Drive a small clean body; reroute to a sentinel path; oracle fails on routing."""
-        # format_example is the smallest clean entry (241 B) — fastest drive.
-        clean = next(e for e in _size_ordered_am_entries() if e.id == "format_example")
+        # The smallest clean entry — the first not in the skip table — drives the
+        # falsification. Selecting by "not skipped" rather than by id keeps the
+        # body-obligations-pass-first ordering intact if a corpus entry is renamed,
+        # removed, or moved into the skip table: the choice is recomputed from the
+        # same table the driven slice consults, so the two can never disagree.
+        clean = next(
+            e for e in _size_ordered_am_entries() if e.id not in _CORPUS_SKIP_TABLE
+        )
 
         async with BridgeFixture(transport("aiohttp", WireFormat.CHAT_COMPLETIONS)) as fixture:
             rec = urlsplit(fixture.transport.recorder.base_url)
@@ -429,8 +435,10 @@ class TestCorpusDrivenDefaultSlice:
                     f"(M1's PROFILE_SETS_MODEL rewrite); got {report.deltas[0]!r}"
                 )
                 assert len(report.deltas) >= 200, (
-                    f"compaction_budget_over must exercise M5 (>=200 turn deltas "
-                    f"from the empirical pass); got {len(report.deltas)}"
+                    f"compaction_budget_over must exercise M5 (>=200 turn deltas; "
+                    f"empirical baseline 383 on 2026-09-23, threshold halved for "
+                    f"margin against profile-driven variation while still catching "
+                    f"the M5-stopped-firing regression); got {len(report.deltas)}"
                 )
             else:
                 # Clean entries: the only delta is M1's PROFILE_SETS_MODEL rewrite.

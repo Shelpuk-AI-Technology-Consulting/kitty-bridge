@@ -103,13 +103,16 @@ extends them across all 20 default adapters.
 
 Two falsifications ship with the slice, both running in the suite:
 
-1. **`TestRoutingFalsification`** (F6.b) — drives `plain_turn`'s body once through the
-   bridge, takes the captured request, runs the oracle with the expected path rewritten to
-   a sentinel wrong path. The oracle must raise `RoutingMismatchError` naming `route.path`.
-   The body obligations pass first by ordering (§3.3.5: routing runs last so the louder
-   body diagnosis surfaces first), so the routing error is the only thing that can fire —
-   the byte-only oracle cannot see a path mismatch, but the driven slice with
-   `expected_route` active must, and this case proves it.
+1. **`TestRoutingFalsification`** (F6.b) — drives the smallest **clean** corpus entry
+   once through the bridge, takes the captured request, runs the oracle with the expected
+   path rewritten to a sentinel wrong path. The oracle must raise `RoutingMismatchError`
+   naming `route.path`. The body obligations pass first by ordering (§3.3.5: routing
+   runs last so the louder body diagnosis surfaces first), so the routing error is the
+   only thing that can fire — the byte-only oracle cannot see a path mismatch, but the
+   driven slice with `expected_route` active must, and this case proves it. The "clean
+   entry" selection iterates the corpus and picks the first one not in
+   `_CORPUS_SKIP_TABLE`, so a future corpus entry rename or skip-table move does not
+   silently break the falsification's body-obligations-pass-first ordering.
 2. **`TestExpectedRoutePathIsLiteralAndPinned`** (F6.a) — asserts
    `_SENTINEL_ROUTE_PATH == CustomOpenAIAdapter().get_upstream_path("harness-model")`.
    A future adapter rename (or a derivation that drifts to a hardcoded wrong path) fails
@@ -119,7 +122,10 @@ The skip-table's first row (`plain_turn` with the F3 findings) is also a falsifi
 the §1.4 sense: a known defect the oracle **catches and names**, the gap and its marker
 recorded, the test green because the catch is the proof. A slice that silently passed on
 `plain_turn` would be the §1.4 shape — a green test proving nothing — and is the bug the
-skip-with-named-marker pattern rules out.
+skip-with-named-marker pattern rules out. (That is distinct from `TestRoutingFalsification`
+above: the routing falsification drives a **clean** entry so the body obligations pass
+first; the skip-table's first row is the *body* falsification — the catch on `plain_turn`
+*is* the proof — and the two must not be conflated.)
 
 ## Status
 
@@ -144,9 +150,13 @@ Linux 3.13. Awaiting human review; not merged.
   `CustomOpenAIAdapter().get_upstream_path("harness-model")` (the model arg is for
   signature parity; the adapter's base implementation ignores it). A future adapter
   that honours the model arg in the path would surface immediately.
-- The skip table's first row is `plain_turn`; it is the §1.4 falsification's load-
-  bearing entry — a known gap the oracle catches and names, the test green because the
-  catch is the proof (the same shape T-D2's "reroute with byte-identical body" follows).
+- The skip table's first row is `plain_turn`; it is the §1.4 **body** falsification's
+  load-bearing entry — a known gap the oracle catches and names, the test green because
+  the catch is the proof (the same shape T-D2's "reroute with byte-identical body"
+  follows). `TestRoutingFalsification` is a separate §1.4 case: it drives a **clean**
+  entry (`format_example`, the smallest non-skipped one — selection iterates rather than
+  hardcoding the id) so the routing assertion's "body obligations pass first" ordering
+  has a body that actually passes them.
 - Empirical baseline: `.scratch/probe_corpus.py` (corrected version, 2026-09-23). Six
   clean entries pass with `report.deltas == ("envelope.model",)` (the M1
   PROFILE_SETS_MODEL rewrite); `compaction_budget_over` produces 383 deltas, first
