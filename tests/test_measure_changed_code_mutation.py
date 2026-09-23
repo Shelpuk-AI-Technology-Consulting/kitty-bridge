@@ -34,6 +34,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "measure_changed_code_mutation.py"
 _FIXTURE = _REPO_ROOT / "tests" / "data" / "kbr285_diff_snapshot.json"
 
+# Windows' signal module lacks SIGKILL (Windows processes don't expose
+# it); POSIX SIGKILL is signal 9. Mirrors the script's `_KILL_SIGNAL`
+# fallback so the test fakes are importable on Windows.
+_KILL_SIGNAL = getattr(signal, "SIGKILL", 9)
+
 
 def _load_script() -> ModuleType:
     """Import the script by filesystem path, the KBR-88 aggregator precedent.
@@ -373,7 +378,7 @@ class _FakeProc:
         if self._sigkill_at is not None:
             elapsed = time.monotonic() - self._sigkill_at
             if elapsed >= self._reap_delay:
-                self.returncode = -signal.SIGKILL
+                self.returncode = -_KILL_SIGNAL
                 self._hang = False
                 return self.returncode
         return None
@@ -383,7 +388,7 @@ class _FakeProc:
         if sig == signal.SIGTERM and self._dies_on_sigterm:
             self._hang = False
             self.returncode = -sig
-        elif sig == signal.SIGKILL:
+        elif sig == _KILL_SIGNAL:
             self._sigkill_at = time.monotonic()
 
 
@@ -411,7 +416,13 @@ def test_runner_builds_the_positional_pattern_command_and_records_load(
     assert summary["exit_code"] == 0
     assert isinstance(summary["wall_clock_seconds"], float)
     assert summary["wall_clock_seconds"] >= 0.0
-    assert isinstance(summary["load_avg_1m"], float)
+    # Load values are ``float`` on POSIX (where ``os.getloadavg`` exists)
+    # and ``None`` on Windows. Either is fine for this test — the
+    # platform-portability contract is pinned by
+    # ``test_runner_handles_platforms_without_os_getloadavg``.
+    assert summary["load_avg_1m"] is None or isinstance(
+        summary["load_avg_1m"], float
+    )
     assert isinstance(summary["cpu_count"], int)
 
 
@@ -440,11 +451,11 @@ def test_runner_wall_clock_cap_sends_sigterm_and_classifies_over_budget(
         grace_seconds=0.5,
     )
     assert proc.signals[:1] == [signal.SIGTERM]
-    assert signal.SIGKILL in proc.signals
+    assert _KILL_SIGNAL in proc.signals
     assert summary["status"] == "over_budget"
     # After the bounded reap wait the kernel has (per the fake) delivered
     # the signal, so the summary carries the real -SIGKILL marker, not null.
-    assert summary["exit_code"] == -signal.SIGKILL
+    assert summary["exit_code"] == -_KILL_SIGNAL
     assert summary["wall_clock_seconds"] >= 0.05
 
 
@@ -471,7 +482,7 @@ def test_runner_sigterm_within_grace_skips_sigkill(
         grace_seconds=0.2,
     )
     assert proc.signals == [signal.SIGTERM]
-    assert signal.SIGKILL not in proc.signals
+    assert _KILL_SIGNAL not in proc.signals
     assert summary["status"] == "over_budget"
     assert summary["exit_code"] == -signal.SIGTERM
 

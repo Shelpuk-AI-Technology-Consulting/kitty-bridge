@@ -65,6 +65,13 @@ _DEFAULT_GRACE_SECONDS = 10.0
 # `poll()` calls (negligible overhead).
 _POLL_SECONDS = 0.1
 
+# `signal.SIGKILL` is missing from Python's `signal` module on Windows
+# (Windows processes don't expose it). The script is documented as
+# Linux/WSL-only (mutmut itself is Linux), but a numeric fallback keeps
+# importing the module — and the test fakes — portable. POSIX SIGKILL
+# is signal 9.
+_KILL_SIGNAL: int = getattr(signal, "SIGKILL", 9)
+
 # Default wall-clock cap for one L1 `pytest` invocation, used by the
 # separately-timed clean-test command in the MUTATION_BASELINE.md breakdown.
 _DEFAULT_CLEAN_TEST_SECONDS = 1500.0
@@ -629,7 +636,7 @@ def run_mutmut(
                 while proc.poll() is None and time.monotonic() < grace_deadline:
                     time.sleep(_POLL_SECONDS)
                 if proc.poll() is None:
-                    proc.send_signal(signal.SIGKILL)
+                    proc.send_signal(_KILL_SIGNAL)
                     # Bounded reap wait — the kernel sets `returncode` only
                     # after the child is reaped, so reading it immediately
                     # after SIGKILL would emit `null` in the JSON summary and
