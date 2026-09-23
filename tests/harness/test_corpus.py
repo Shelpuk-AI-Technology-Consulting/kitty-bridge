@@ -1902,12 +1902,14 @@ class TestTheKbr55Td5CorpusEntries:
         without = k.entries_without(self.entries, Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED)
 
         assert len(met) >= 1, (
-            f"P34 trigger case is missing from the corpus: "
-            f"entries with triggers_absent={Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED.name!r} = {[e.id for e in without]}"
+            "P34 trigger case is missing from the corpus: "
+            f"entries with triggers_absent={Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED.name!r} = "
+            f"{[e.id for e in without]}"
         )
         assert len(without) >= 1, (
-            f"P34 complement is missing from the corpus: "
-            f"entries with triggers_met={Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED.name!r} = {[e.id for e in met]}"
+            "P34 complement is missing from the corpus: "
+            f"entries with triggers_met={Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED.name!r} = "
+            f"{[e.id for e in met]}"
         )
 
     def test_p35_has_two_triggers_and_one_complement(self) -> None:
@@ -1939,10 +1941,10 @@ class TestTheKbr55Td5CorpusEntries:
         without = k.entries_without(self.entries, Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE)
 
         assert met == (), (
-            f"P33 trigger case is T-D6's deliverable, not T-D5's; "
+            "P33 trigger case is T-D6's deliverable, not T-D5's; "
             f"trigger cases found = {[e.id for e in met]}"
         )
         assert len(without) >= 1, (
-            f"P33 complement is missing from the corpus: "
-            f"no entry declares triggers_absent=bedrock_forces_auto_tool_choice"
+            "P33 complement is missing from the corpus: "
+            "no entry declares triggers_absent=bedrock_forces_auto_tool_choice"
         )
