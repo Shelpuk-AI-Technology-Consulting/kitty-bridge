@@ -275,7 +275,8 @@ kitty.bridge.server.xǁBridgeServerǁ_is_empty_cc_response__mutmut_*
 
 The mapping (rev-range → §6.1-scope function patterns, with the registry's
 `mangled_patterns` semantics reproduced per-def) lives in
-`scripts/measure_changed_code_mutation.py` and is pinned by 19 L1 unit
+`scripts/measure_changed_code_mutation.py` and is pinned by 23 L1 unit
+tests (the authoritative count is `grep -c '^def test_' tests/test_measure_changed_code_mutation.py` — this prose count has drifted four times across rounds 2–6; the grep is the source of truth)
 tests in `tests/test_measure_changed_code_mutation.py`; the KBR-285
 fixture in `tests/data/kbr285_diff_snapshot.json` is the analyzer's
 verified output for `30a91a0^1..30a91a0` (generated once by a throwaway,

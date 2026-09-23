@@ -56,14 +56,20 @@ decision.
    and monotonic-clock wall time. An empty intersection refuses
    `--run` so zero positional patterns can never silently fall through
    to the full `only_mutate` scope.
-2. **`tests/test_measure_changed_code_mutation.py`** (L1, 19 tests) —
-   the pure mapping, the runner contract through an injected fake, the
-   empty-intersection refusal, the Windows portability of `os.getloadavg`,
-   and the KBR-285 ground truth pinned by `tests/data/kbr285_diff_snapshot.json`
-   (a committed snapshot of the analyzer's verified output for
-   `30a91a0^1..30a91a0`, generated once by a throwaway and hand-verified
-   against the actual diff — the oracle is the real diff, not a free-form
-   list).
+2. **`tests/test_measure_changed_code_mutation.py`** (L1, 23 tests —
+   the authoritative count is `grep -c '^def test_'
+   tests/test_measure_changed_code_mutation.py`; this prose count has
+   drifted four times across rounds 2–6, the grep is the source of
+   truth) — the pure mapping, the runner contract through an injected
+   fake, the empty-intersection refusal, the Windows portability of
+   `os.getloadavg`, the KBR-285 ground truth pinned by
+   `tests/data/kbr285_diff_snapshot.json` (a committed snapshot of the
+   analyzer's verified output for `30a91a0^1..30a91a0`, generated once
+   by a throwaway and hand-verified against the actual diff — the oracle
+   is the real diff, not a free-form list), the platform-portable
+   `_KILL_SIGNAL` constant, the three-dot rev-range regression, the
+   `GitCommandError` and `_hunk_post_lines` soft-fail paths, and the
+   `KeyboardInterrupt`-driven child teardown.
 3. **The measurement** (see `MUTATION_BASELINE.md`'s KBR-92 section):
    representative PR KBR-285 (`30a91a0`); 10 §6.1-scope functions
    covered, 1864 mutants matched; generation 112 s; the clean test
