@@ -552,6 +552,32 @@ class TestToolChoice:
         with pytest.raises(c.UnreadableBodyError):
             _read(_minimal(tool_choice={"type": "function", "function": {}}))
 
+    # --- KBR-303 selection-side raise tests -----------------------------------
+    # The empty-string shape raises (below); absent / non-string still raise
+    # via the existing `isinstance(name, str)` check at line 1370, so they are
+    # already covered by `test_a_named_form_without_a_name_raises` above.
+
+    @pytest.mark.parametrize(
+        ("choice", "path_regex"),
+        [
+            ({"type": "function", "function": {"name": ""}}, r"tool_choice\.function\.name"),
+            ({"type": "custom", "custom": {"name": ""}}, r"tool_choice\.custom\.name"),
+        ],
+    )
+    def test_an_empty_name_on_a_by_name_selector_raises(
+        self, choice: dict[str, Any], path_regex: str
+    ) -> None:
+        """``{"type": "function", "function": {"name": ""}}`` → ``"tool:"``
+        silently is a defect.
+
+        Empty ``name`` passes ``isinstance(name, str)`` and produces the
+        never-corresponds-to-anything selection string. KBR-303 closes this
+        path with a raise; the existing non-string raise at line 1370
+        already covers the absent and non-string shapes.
+        """
+        with pytest.raises(c.UnreadableBodyError, match=path_regex):
+            _read(_minimal(tool_choice=choice))
+
 
 # --------------------------------------------------------------------------
 # R3 — messages

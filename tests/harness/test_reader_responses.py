@@ -312,6 +312,166 @@ class TestToolChoiceNormalisation:
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
 
+    # --- KBR-303 selection-side posture controls -----------------------------
+    # The empty-string shape raises (separate class, below); the absent /
+    # non-string shapes keep today's residualise / narrow-to-server posture
+    # and these controls pin them so a future widening of the empty-only
+    # guard fails loudly.
+
+    @pytest.mark.parametrize("kind", ["function", "custom"])
+    def test_an_absent_name_residualises_with_no_projection(self, kind: str) -> None:
+        """An absent ``name`` is the "unrecognised selector" shape — residualise.
+
+        The reader returns ``None`` and the caller writes the raw value into
+        ``residual``. ``verify_total`` then raises on the non-empty residual,
+        which is the §3.3.1 "named, honest failure" posture for unreadable
+        values.
+        """
+        projected = r.ResponsesProjection().read_request(
+            captured({"input": "hi", "tool_choice": {"type": kind}})
+        )
+
+        assert projected.envelope.extra.get(c.TOOL_CHOICE_KEY) is None
+        assert projected.residual == {"tool_choice": {"type": kind}}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    @pytest.mark.parametrize("kind", ["function", "custom"])
+    def test_a_non_string_name_residualises_with_no_projection(self, kind: str) -> None:
+        """A non-string ``name`` is the same "unrecognised selector" shape.
+
+        Same posture as absent: residualise at ``tool_choice``, no projection.
+        """
+        projected = r.ResponsesProjection().read_request(
+            captured({"input": "hi", "tool_choice": {"type": kind, "name": 42}})
+        )
+
+        assert projected.envelope.extra.get(c.TOOL_CHOICE_KEY) is None
+        assert projected.residual == {"tool_choice": {"type": kind, "name": 42}}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    @pytest.mark.parametrize("name", [None, 42])
+    def test_mcp_name_absent_or_non_string_keeps_the_narrow_to_server_projection(
+        self, name: Any
+    ) -> None:
+        """An absent / non-string ``name`` on an mcp selector projects the
+        server-only form, ``tool:mcp:<label>``.
+
+        That is the deliberate "narrow to server" posture, distinct from
+        residualise — the selector *does* name a tool (the whole server),
+        just not a specific tool within it. Empty ``name`` is different
+        (separate class, below).
+        """
+        choice: dict[str, Any] = {"type": "mcp", "server_label": "docs"}
+        if name is not None:
+            choice["name"] = name
+
+        projected = project({"input": "hi", "tool_choice": choice})
+
+        assert projected.envelope.extra[c.TOOL_CHOICE_KEY] == "tool:mcp:docs"
+
+    @pytest.mark.parametrize("label", [None, 42])
+    def test_mcp_server_label_absent_or_non_string_residualises(self, label: Any) -> None:
+        """An absent / non-string ``server_label`` is the residualise posture
+        (the mcp selector has no identity to address).
+
+        Distinct from the narrow-to-server ``name`` posture above: a missing
+        label means the selector names nothing — the "unrecognised selector"
+        shape. Empty ``server_label`` is different (separate class, below).
+        """
+        choice: dict[str, Any] = {"type": "mcp"}
+        if label is not None:
+            choice["server_label"] = label
+
+        projected = r.ResponsesProjection().read_request(
+            captured({"input": "hi", "tool_choice": choice})
+        )
+
+        assert projected.envelope.extra.get(c.TOOL_CHOICE_KEY) is None
+        assert projected.residual == {"tool_choice": choice}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+
+class TestToolChoiceEmptySelectorRaises:
+    """An empty-string ``name`` / ``server_label`` on a selector raises.
+
+    ``contract.decode_arguments`` is explicit: ``""`` for a name is **not**
+    lossless — a selection string ``"tool:"`` corresponds to no tool,
+    exactly the defect family KBR-281 + KBR-292 + KBR-295 + KBR-299
+    closed on the *invocation* and *declaration* surfaces. KBR-303 closes
+    the *selection* surface for the same five readers; this class pins
+    the Responses reader's half. The absent / non-string postures stay
+    permissive (sister controls in :class:`TestToolChoiceNormalisation`).
+    """
+
+    @staticmethod
+    def _body_with_tool_choice(choice: Any) -> dict[str, Any]:
+        """Return a Responses body whose ``tool_choice`` carries ``choice``.
+
+        ``choice`` is spliced in verbatim, so ``None`` means the key is
+        absent rather than an explicit ``null``.
+        """
+        return {"input": "hi", "tool_choice": choice}
+
+    @pytest.mark.parametrize(
+        "choice",
+        [
+            {"type": "function", "name": ""},
+            {"type": "custom", "name": ""},
+        ],
+    )
+    def test_an_empty_name_on_a_by_name_selector_raises(self, choice: Any) -> None:
+        """``{"type": "function", "name": ""}`` → ``"tool:"`` silently is a defect.
+
+        Empty ``name`` passes ``isinstance(name, str)`` and produces the
+        never-corresponds-to-anything selection string. KBR-303 closes
+        this path with a raise at ``tool_choice.name``.
+        """
+        with pytest.raises(c.UnreadableBodyError, match=r"tool_choice\.name"):
+            project(self._body_with_tool_choice(choice))
+
+    def test_an_empty_name_on_an_mcp_selector_raises(self) -> None:
+        """``{"type": "mcp", "server_label": "docs", "name": ""}`` →
+        ``"tool:mcp:docs:"`` (trailing colon) silently is a defect.
+
+        Same losslessness argument: a trailing-colon selection string
+        corresponds to nothing. KBR-303 closes with a raise at
+        ``tool_choice.name``.
+        """
+        with pytest.raises(c.UnreadableBodyError, match=r"tool_choice\.name"):
+            project(
+                self._body_with_tool_choice(
+                    {"type": "mcp", "server_label": "docs", "name": ""}
+                )
+            )
+
+    def test_an_empty_server_label_on_an_mcp_selector_raises(self) -> None:
+        """``{"type": "mcp", "server_label": ""}`` → ``"tool:mcp:"``
+        silently is a defect.
+
+        Empty ``server_label`` passes ``isinstance(label, str)`` and
+        ``_mcp_tool_name("")`` returns ``"mcp:"``, so the selection string
+        claims a server nobody named. KBR-303 closes with a raise at
+        ``tool_choice.server_label``.
+        """
+        with pytest.raises(c.UnreadableBodyError, match=r"tool_choice\.server_label"):
+            project(self._body_with_tool_choice({"type": "mcp", "server_label": ""}))
+
+    def test_an_empty_server_label_takes_precedence_over_an_empty_name(self) -> None:
+        """Both empty at once → the ``server_label`` raise fires first.
+
+        The reader evaluates ``server_label`` before ``name`` on the mcp
+        branch. Pinning the order so a future re-ordering breaks loudly.
+        """
+        with pytest.raises(c.UnreadableBodyError, match=r"tool_choice\.server_label"):
+            project(
+                self._body_with_tool_choice(
+                    {"type": "mcp", "server_label": "", "name": ""}
+                )
+            )
+
 
 # --------------------------------------------------------------------------
 # R3 — sampling
@@ -1925,6 +2085,41 @@ class TestToolDeclarations:
 
         assert projected.conversation.tools[0].name == "file_search"
         assert projected.conversation.tools[0].schema == declaration
+
+    # --- KBR-303 declaration-side posture pins --------------------------------
+    # An empty ``server_label`` raises (below); the absent / non-string shapes
+    # keep KBR-299's deliberate ``"mcp"`` fallback posture and these controls
+    # pin it so a future widening of the empty-only guard fails loudly.
+
+    @pytest.mark.parametrize("label", [None, 42])
+    def test_mcp_server_label_absent_or_non_string_keeps_the_mcp_fallback(self, label: Any) -> None:
+        """An absent / non-string ``server_label`` projects ``ToolDecl(name="mcp")``.
+
+        The absent shape is the kind-derived-label posture KBR-299 recorded
+        as deliberate: the label is *identified* as "this whole server,
+        unnamed", distinct from the silent empty-string slip. Empty
+        ``server_label`` is the never-legal shape and raises (next test).
+        """
+        tool: dict[str, Any] = {"type": "mcp"}
+        if label is not None:
+            tool["server_label"] = label
+
+        projected = project({"input": "hi", "tools": [tool]})
+
+        assert projected.conversation.tools == (c.ToolDecl(name="mcp", schema=tool),)
+
+    def test_an_empty_server_label_on_an_mcp_declaration_raises(self) -> None:
+        """``{"type": "mcp", "server_label": ""}`` projects ``ToolDecl(name="mcp:")``
+        silently is a defect.
+
+        Empty ``server_label`` passes ``isinstance(label, str)`` and
+        ``_mcp_tool_name("")`` returns ``"mcp:"``, claiming a server nobody
+        named — the same never-legal-empty-identity family KBR-299 closed
+        one field over, on the declaration's ``name``. KBR-303 closes with
+        a raise at ``tools[<i>].server_label``.
+        """
+        with pytest.raises(c.UnreadableBodyError, match=r"tools\[0\]\.server_label"):
+            project({"input": "hi", "tools": [{"type": "mcp", "server_label": ""}]})
 
 
 # --------------------------------------------------------------------------
