@@ -998,6 +998,19 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # part, and `conversation.tools[*]` a deleted tool description -- two of
         # §3.3.1's five oracle falsification cases. That is §3.3.1a's P15 lesson
         # applied to a second row.
+        #
+        # KBR-308 amendment: the translator now writes every carrier the rebuild
+        # can express — top-level on ``_cache_control``, tools name-keyed on
+        # ``_tool_cache_controls``, parts on the CC part (hop 1 ``carry_cache_control=True``),
+        # assistant joined text last-marked-wins on message-level ``_cache_control``,
+        # per-``tool_use`` index-keyed on ``_tool_call_cache_controls``, tool_result
+        # message-level ``_cache_control`` — and the KBR-296 restore side picks them
+        # up. The row stays as documentation-of-record for the KBR-199/KBR-258
+        # measurement; the claim is dormant on any route where the carry runs
+        # (system continues to ride ``_anthropic_system`` verbatim per KBR-228 part B,
+        # document on ``_documents`` per KBR-222, and the nested-``tool_result``
+        # content is forwarded verbatim per KBR-198). The user-message-object
+        # case is the deliberate OD1 deferral (PO 2026-09-24).
         paths=(
             c.system_path(c.WILDCARD, "cache_control"),
             c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
@@ -1920,6 +1933,13 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # moment the reader grows the slot (the G38 precedent on the Messages
         # twin). Today such a body residualises, which is the honest named
         # failure: the field is present, nobody claims it.
+        #
+        # KBR-308 amendment: the adapter now reads a raw CC body's
+        # `cache_control` as a fallback when the KBR-296 carriage is absent
+        # (DQ-B: carriage wins, raw shape is fallback) and restores it onto
+        # the wire's top-level slot — the KBR-199 drop is closed on the
+        # CC-origin path too; this row stays as the measurement-of-record
+        # and the claim is dormant where the carry runs.
         site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
         # Keyed literal — no wildcard, so the `_SHAPES` test excludes it by
@@ -1943,6 +1963,17 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `_anthropic_system` is a Messages-ingress concern, set by
         # `MessagesTranslator`, stripped on the CC route by P1 — the join
         # stands.
+        #
+        # KBR-308 amendment: the rebuild now emits a blocks-form ``system``
+        # (each text block carrying its marker) when any system part carries a
+        # marker AND ``self.forwards_thinking_signature`` is True — the same
+        # gate the ``_anthropic_system`` restore uses. On ``minimax_token`` and
+        # ``opencode_go``'s Messages-routed models (``forwards_thinking_signature=False``;
+        # MiniMax rejects ``cache_control`` on system blocks outright,
+        # ``minimax_token.py:29-30``) the join stands and the G43 scope-out is
+        # preserved on the CC-origin path too; the new CB-2 pin asserts it.
+        # The row stays as the measurement-of-record; the claim is dormant
+        # where the carve runs.
         site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
         paths=(c.system_path(c.WILDCARD, "cache_control"),),
@@ -1971,6 +2002,17 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # cache key), so such a body fails the run on residual first — the
         # honest named failure. The row lands now, before the reader grows
         # the slot, on the G38 precedent.
+        #
+        # KBR-308 amendment (tool-message-object half): `_tool_result_block`
+        # now reads a raw `messages[*].cache_control` as a fallback when the
+        # message-level `_cache_control` carriage is absent (DQ-B) and
+        # attaches it onto the rebuilt Anthropic `tool_result` block — the
+        # KBR-199 tool-message drop is closed on the CC-origin path too. The
+        # row stays live for the **user-message-object** half, deliberately
+        # deferred (OD1, PO 2026-09-24 — Anthropic's wire has no message-level
+        # slot, no published CC dialect defines the shape, and any placement
+        # would invent a block choice with no fidelity basis); the CB-2 case
+        # `user-message-object-deferred-dropped` pins the deferral.
         #
         # Anchor contingency: the §3.3.1a path vocabulary names
         # `conversation.turns[*].parts[*].cache_control` (the field-level
@@ -2003,6 +2045,14 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `cache_control` (`_read_tool_calls`'s `_residualise` set names no
         # cache key), so such a body fails the run on residual first, the
         # G38 precedent.
+        #
+        # KBR-308 amendment: `_translate_assistant_msg` now reads a raw
+        # `tool_calls[i].cache_control` and an assistant-message-object
+        # `messages[i].cache_control` as fallbacks when the index-keyed /
+        # message-level carriages are absent (DQ-B) — the KBR-199
+        # tool-call and assistant-message-object drops are closed on the
+        # CC-origin path. The row stays as the measurement-of-record; the
+        # claims are dormant where the fallback reads run.
         site=("kitty/providers/anthropic.py:AnthropicAdapter._translate_assistant_msg",),
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),),
@@ -2019,6 +2069,14 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `conversation.tools[<name>].cache_control` today, so this row is
         # **claimable now** — like P27, not anticipatory. The Messages-route
         # twin of this drop is M16's tool-decl path.
+        #
+        # KBR-308 amendment: `_translate_tools` now reads a raw
+        # `tools[i].cache_control` as a fallback when the name-keyed
+        # `_tool_cache_controls` carriage lacks the entry (DQ-B) and
+        # attaches it onto the rebuilt Anthropic tool declaration — the
+        # KBR-199 tool-declaration drop is closed on the CC-origin path.
+        # The row stays as the measurement-of-record; the claim is dormant
+        # where the fallback read runs.
         site=("kitty/providers/anthropic.py:AnthropicAdapter._translate_tools",),
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
         paths=(c.tool_path(c.WILDCARD, "cache_control"),),

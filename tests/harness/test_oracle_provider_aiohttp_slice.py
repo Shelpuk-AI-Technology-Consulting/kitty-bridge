@@ -192,6 +192,70 @@ _CORPUS_SKIP_TABLE: dict[str, str] = {
         "(M5's anchor is a proper prefix of M3's, so M5 does not specifically "
         "claim for M3) — assertion 2 flags M3; same shape as T-D4's"
     ),
+    # KBR-315 / T-D4 F3.e: the typed-tool `type` drop. The Messages body carries
+    # an Anthropic-defined (typed) tool declaration (`web_search_20250305`),
+    # the CC→Ollama translation drops the `type` member (the Ollama
+    # ChatRequest declares `function` only on the tool sub-shape), no register
+    # row claims this drop on the `ollama_cloud` route. A register row for
+    # the typed-tool `type` drop is the F3.e sibling ticket — same root cause
+    # KBR-55 surfaced on the T-D4 judge, scoped to this route's adapter.
+    "p35_tool_choice_omitted_forcing_anthropic_tool_trigger": (
+        "F3.e conversation.tools[web_search].type dropped on the ollama_cloud "
+        "route from a body carrying an Anthropic-defined (typed) tool "
+        "declaration; no register row claims the typed-tool `type` drop — "
+        "KBR-315 scope addition"
+    ),
+}
+
+
+#: Per-entry expected-delta tuples for entries whose triggers legitimately
+#: fire on the `ollama_cloud` route. Clean entries (everything not named
+#: here) produce only M1's `PROFILE_SETS_MODEL` rewrite at `envelope.model`.
+#: KBR-315 / KBR-55 scope addition: the same three entries T-D4 fixed
+#: (`a8f8ca3`) — M28's empty-stop omission, P35's tool_choice omission —
+#: plus P34's `parallel_tool_calls` omission on the complement body — all
+#: fire here too because the bridge-level carry in
+#: `MessagesTranslator.translate_request` + `carry_tool_choice_and_metadata`
+#: runs on every translated adapter. The tuples below are the empirical
+#: probe output from the merge of the KBR-55 entries + the `ollama_cloud`
+#: transport binding on 2026-09-24 (the test failure surface); the
+#: comment in `test_drive_entry_through_ollama_cloud` records the probe.
+_EXPECTED_DELTAS: dict[str, tuple[str, ...]] = {
+    # M28: empty `stop_sequences` omitted — `bridge/messages/translator.py`
+    # joins them into nothing (no empty list reaches the CC wire).
+    "m28_empty_stop_sequences_trigger": (
+        "envelope.model",
+        "conversation.sampling[stop]",
+    ),
+    # P35: `tool_choice` omitted when no tools are declared — the
+    # `carry_tool_choice_and_metadata` early-return drops it (CC rejects
+    # tool_choice beside no tools; the carry is intentionally silent).
+    "p35_tool_choice_omitted_no_tools_trigger": (
+        "envelope.model",
+        "envelope.extra[tool_choice]",
+    ),
+    # P35 complement: same omission on a body that DOES declare tools
+    # (the trigger fires when `tool_choice: false` is absent — a legal
+    # Anthropic body, omitted per the legal-but-unsupported posture).
+    "p35_tool_choice_omitted_complement": (
+        "envelope.model",
+        "envelope.extra[tool_choice]",
+    ),
+    # P34 trigger: this entry's body does NOT have `disable_parallel_tool_use`
+    # set to `False` (the trigger for P34), so P34 is dormant here — only P35
+    # fires (the body has tools + no tool_choice → P35 omits it).
+    "p34_parallel_false_omitted_trigger": (
+        "envelope.model",
+        "envelope.extra[tool_choice]",
+    ),
+    # P34 complement: body has `disable_parallel_tool_use: false`, so the
+    # carry omits `parallel_tool_calls: False` AND the tool_choice omission
+    # fires — both deltas legitimately claimed.
+    "p34_parallel_false_omitted_complement": (
+        "envelope.model",
+        "envelope.extra[parallel_tool_calls]",
+        "envelope.extra[tool_choice]",
+    ),
 }
 
 
@@ -426,9 +490,12 @@ class TestCorpusDrivenProviderAiohttpSlice:
                 expected_route=_expected_route(fixture),
                 provider_key=provider_key,
             )
-            assert report.deltas == ("envelope.model",), (
-                f"clean entry {entry.id!r}: expected (envelope.model,) from "
-                f"M1; got {report.deltas!r}"
+            assert report.deltas == _EXPECTED_DELTAS.get(
+                entry.id, ("envelope.model",)
+            ), (
+                f"entry {entry.id!r}: expected the per-entry map's tuple "
+                f"(KBR-315 scope addition) or M1's (envelope.model,) only; "
+                f"got {report.deltas!r}"
             )
 
 

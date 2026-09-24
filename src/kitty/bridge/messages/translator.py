@@ -135,27 +135,40 @@ def build_user_content_message(
     """Build one CC user message from non-``tool_result`` Messages blocks.
 
     The shared body of the two Messages→CC converters (:meth:`MessagesTranslator.
-    translate_request` and ``server._convert_native_to_cc_format``) — a second
-    copy of the value table is the drift that lost KBR-178's field on the
-    fallback's retry path. Text-only input keeps the pre-KBR-222 output — a
-    joined string — so the common turn's CC body does not change shape. Any
-    ``image`` block switches the message to a content-parts list (``text``
-    plus ``image_url`` parts), because a string would lose the image again one
-    hop later. ``document`` blocks go to *documents_out*, never into the CC
-    content.
+    translate_request` — hop-1, see KBR-308; and ``server._convert_native_to_cc_format``
+    — M9 fallback, see KBR-296) — a second copy of the value table is the
+    drift that lost KBR-178's field on the fallback's retry path. Text-only
+    input keeps the pre-KBR-222 output — a joined string — so unmarked turns
+    stay byte-identical across both call sites. Any ``image`` block switches
+    the message to a content-parts list (``text`` plus ``image_url`` parts),
+    because a string would lose the image again one hop later. ``document``
+    blocks go to *documents_out*, never into the CC content.
 
     Args:
         blocks: The user message's non-``tool_result`` content blocks.
         documents_out: Collector for ``document`` blocks; each entry is
             addressed to the message dict this function builds.
-        carry_cache_control: KBR-296 — opt-in, M9 fallback path only. When
+        carry_cache_control: ``True`` on both call sites that ship today —
+            the M9 fallback (KBR-296) and the hop-1 translator (KBR-308). When
             true, a block's ``cache_control`` breakpoint is re-attached to
-            the CC part the adapter restores it from, and a turn whose text
-            carries a breakpoint keeps the parts-list form (a joined string
-            would lose the breakpoint). Default off keeps hop 1
-            byte-identical: hop 1's drops stay M16-claimed until the KBR-258/
-            KBR-263 product halves land, and this ticket's scope binds the
-            carry to the M9 site.
+            the CC part the adapter restores it from — **the marker value
+            itself rides verbatim** (the same dict object, not a copy; the
+            adapter's part-level restore forwards the reference straight
+            onto the rebuilt Anthropic block, and the full-value
+            ``{"type": "ephemeral", "ttl": "1h"}`` assertion in
+            ``test_anthropic_cache_breakpoints.py`` pins it) — and a turn
+            whose text carries a breakpoint keeps the parts-list form
+            (a joined string would lose the breakpoint). Unmarked turns
+            stay the joined string byte-for-byte (attempt-0 parity); the
+            carve is conditional on a marked text block. Default off is a
+            defensive default the no-current-caller case wants, not a
+            behaviour the production path relies on.
+
+            **Caveat (KBR-200):** part-level ``cache_control`` is honoured
+            natively by OpenRouter's CC dialect and restored onto the
+            rebuilt Anthropic block by the family adapter; other CC
+            dialects' behaviour is unknown and recorded deliberately
+            rather than silently.
 
     Returns:
         The CC user message dict.
@@ -401,6 +414,13 @@ class MessagesTranslator:
         if carried_system:
             result["_anthropic_system"] = carried_system
 
+        # KBR-308: the top-level automatic-caching form rides the KBR-296
+        # carriage; ``AnthropicAdapter.translate_to_upstream`` restores it
+        # verbatim onto the rebuilt Anthropic body. ``_INTERNAL_KEYS`` keeps
+        # it off every wire that does not consume it.
+        if messages_request.get("cache_control") is not None:
+            result["_cache_control"] = messages_request["cache_control"]
+
         if "max_tokens" in messages_request:
             result["max_tokens"] = messages_request["max_tokens"]
 
@@ -417,6 +437,19 @@ class MessagesTranslator:
                 }
                 for t in messages_request["tools"]
             ]
+            # KBR-308: per-tool ``cache_control`` markers ride the KBR-296
+            # name-keyed carriage (``P30`` vocabulary). The Anthropic
+            # adapter's ``_translate_tools`` restores by
+            # ``func.get("name")``; the underscore key keeps the value off
+            # every wire that does not consume it (``_INTERNAL_KEYS``).
+            tool_cache_controls: dict[str, dict] = {}
+            for t in messages_request["tools"]:
+                if isinstance(t, dict) and t.get("cache_control") is not None:
+                    name = t.get("name")
+                    if isinstance(name, str) and name:
+                        tool_cache_controls[name] = t["cache_control"]
+            if tool_cache_controls:
+                result["_tool_cache_controls"] = tool_cache_controls
 
         # Pass through supported kwargs
         for key in ("temperature", "top_p"):
@@ -557,11 +590,21 @@ class MessagesTranslator:
             tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
             others = [b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_result")]
             if tool_results:
+                # KBR-308: a tool_result block's own ``cache_control`` marker
+                # rides the message-level ``_cache_control`` carriage so the
+                # Anthropic adapter's ``_tool_result_block`` can restore it
+                # onto the rebuilt Anthropic ``tool_result`` block (the same
+                # carriage the M9 rebuilder writes — KBR-296).
                 tool_msgs = [
                     {
                         "role": "tool",
                         "tool_call_id": tr.get("tool_use_id", ""),
                         "content": tr.get("content", ""),
+                        **(
+                            {"_cache_control": tr["cache_control"]}
+                            if tr.get("cache_control") is not None
+                            else {}
+                        ),
                     }
                     for tr in tool_results
                 ]
@@ -570,13 +613,15 @@ class MessagesTranslator:
                 # KBR-222: the sibling blocks used to die here. They become a
                 # trailing user message; a text-first turn is reordered after
                 # the tool results, which only the register prose claims.
-                return [*tool_msgs, self._user_content_message(others, documents_out)]
+                return [*tool_msgs, self._user_content_message(others, documents_out, carry_cache_control=True)]
 
-            return self._user_content_message(others, documents_out)
+            return self._user_content_message(others, documents_out, carry_cache_control=True)
 
         return {"role": "user", "content": str(content) if content else ""}
 
-    def _user_content_message(self, blocks: list, documents_out: list[dict]) -> dict:
+    def _user_content_message(
+        self, blocks: list, documents_out: list[dict], *, carry_cache_control: bool = False
+    ) -> dict:
         """Build one CC user message from non-``tool_result`` blocks.
 
         Delegates to :func:`build_user_content_message` — the shared body of
@@ -587,11 +632,14 @@ class MessagesTranslator:
             blocks: The user message's non-``tool_result`` content blocks.
             documents_out: Collector for ``document`` blocks; each entry is
                 addressed to the message dict this call builds.
+            carry_cache_control: KBR-308 — on at hop 1 so a block's
+                ``cache_control`` rides the CC part the adapter restores it
+                from; the M9 fallback passes the same flag (KBR-296).
 
         Returns:
             The CC user message dict.
         """
-        return build_user_content_message(blocks, documents_out)
+        return build_user_content_message(blocks, documents_out, carry_cache_control=carry_cache_control)
 
     def _translate_assistant_message(self, content) -> dict:
         """Translate an assistant message, handling tool_use and thinking content blocks."""
@@ -602,6 +650,14 @@ class MessagesTranslator:
             text_parts = []
             tool_calls = []
             thinking_parts = []
+            # KBR-308: assistant-side carriage collectors, mirroring the M9
+            # rebuilder's shapes (KBR-296) so hop 1 and the fallback feed
+            # the identical restore. The joined text's marker is
+            # last-marked-wins — the latest breakpoint is the effective
+            # cache write, and Claude Code marks one breakpoint per text
+            # run today, so the common case is a strict superset.
+            text_cache_control: dict | None = None
+            tool_call_cache_controls: dict[int, dict] = {}
             # KBR-228 part B: the signed originals ride the message verbatim —
             # signatures and redacted_thinking included, wire order preserved —
             # so the Anthropic adapters can restore what their upstream
@@ -616,6 +672,8 @@ class MessagesTranslator:
                     continue
                 if block.get("type") == "text":
                     text_parts.append(block.get("text", ""))
+                    if block.get("cache_control") is not None:
+                        text_cache_control = block["cache_control"]
                 elif block.get("type") == "tool_use":
                     tool_calls.append(
                         {
@@ -627,6 +685,10 @@ class MessagesTranslator:
                             },
                         }
                     )
+                    if block.get("cache_control") is not None:
+                        # Index-keyed by position in ``tool_calls`` — the
+                        # restore side iterates the same positions.
+                        tool_call_cache_controls[len(tool_calls) - 1] = block["cache_control"]
                 elif block.get("type") == "thinking":
                     thinking_text = block.get("thinking", "")
                     if thinking_text:
@@ -642,6 +704,10 @@ class MessagesTranslator:
                 result["_thinking_blocks"] = thinking_blocks
             if tool_calls:
                 result["tool_calls"] = tool_calls
+            if text_cache_control is not None:
+                result["_cache_control"] = text_cache_control
+            if tool_call_cache_controls:
+                result["_tool_call_cache_controls"] = tool_call_cache_controls
             return result
 
         return {"role": "assistant", "content": str(content) if content else None}
