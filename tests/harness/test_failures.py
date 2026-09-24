@@ -615,6 +615,32 @@ class TestEmptyResponse:
         ]
         assert text_events == [], text_events
 
+    def test_gemini_non_streaming_empty_body_is_one_candidate_with_no_parts(self) -> None:
+        """KBR-302 — the Gemini non-streaming empty body (recorder path not used)."""
+        body = failures_module._gemini_empty_success_body()
+        assert body["candidates"][0]["content"]["parts"] == []
+        assert body["candidates"][0]["finishReason"] == "STOP"
+
+    def test_openai_responses_non_streaming_empty_body_is_completed_with_empty_output(self) -> None:
+        """KBR-302 — the Responses non-streaming empty body (recorder path not used)."""
+        body = failures_module._responses_empty_success_body()
+        assert body["status"] == "completed"
+        assert body["output"] == []
+
+    def test_gemini_non_streaming_success_body_carries_text_and_stop(self) -> None:
+        """KBR-302 — the Gemini non-streaming minimal success (recorder path not used)."""
+        body = failures_module._gemini_content_success_body()
+        parts = body["candidates"][0]["content"]["parts"]
+        assert parts == [{"text": "kbr-tb4"}]
+        assert body["candidates"][0]["finishReason"] == "STOP"
+
+    def test_openai_responses_non_streaming_success_body_carries_one_message_output(self) -> None:
+        """KBR-302 — the Responses non-streaming minimal success (recorder path not used)."""
+        body = failures_module._responses_content_success_body()
+        assert body["status"] == "completed"
+        assert body["output"][0]["type"] == "message"
+        assert body["output"][0]["content"][0]["text"] == "kbr-tb4"
+
 
 class TestDropAt:
     """AC-10..14 — `drop_at` writes the frames its injection point names, then aborts."""
@@ -747,6 +773,98 @@ class TestDropAt:
             assert len(chunks) == 3
             assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
             assert not has_done
+
+    @pytest.mark.parametrize("point", list(failures_module.InjectionPoint))
+    def test_gemini_frames_match_the_point(
+        self, point: failures_module.InjectionPoint
+    ) -> None:
+        """KBR-302 — `drop_at(GEMINI, ...)` writes in the Gemini grammar.
+
+        The recorder only serves two formats (ANTHROPIC_MESSAGES,
+        CHAT_COMPLETIONS); Gemini bytes can be inspected through the public
+        :func:`frames_for` only — the F10/AC-18 falsification pattern
+        (replay the same writes through a deliberately-broken responder
+        without introspecting the library's closures). Data-only frames
+        (no ``event:`` line), payload key ``candidates``.
+        """
+        frames = failures_module.frames_for(WireFormat.GEMINI, point)
+        payloads = [
+            json.loads(line[len(b"data: "):])
+            for frame in frames
+            for line in frame.split(b"\n\n")
+            if line.startswith(b"data: ")
+        ]
+        for f_bytes in frames:
+            assert b"event:" not in f_bytes, f"an `event:` line reached the Gemini wire: {f_bytes!r}"
+        if point is failures_module.InjectionPoint.BEFORE_FIRST_BYTE:
+            assert frames == ()
+            return
+        assert all("candidates" in p or "error" in p for p in payloads)
+        if point is failures_module.InjectionPoint.AFTER_TEXT:
+            texts = [
+                part["text"]
+                for p in payloads
+                for cand in p.get("candidates", [])
+                for part in cand.get("content", {}).get("parts", [])
+                if "text" in part
+            ]
+            assert texts == ["kbr-tb4"], texts
+            # No finishReason yet — the drop fired before the terminal.
+            assert not any("finishReason" in p["candidates"][0] for p in payloads)
+        elif point is failures_module.InjectionPoint.MID_TOOL_ARGUMENTS:
+            calls = [
+                part["functionCall"]
+                for p in payloads
+                for cand in p.get("candidates", [])
+                for part in cand.get("content", {}).get("parts", [])
+                if "functionCall" in part
+            ]
+            assert calls, "the mid-tool-arguments drop carries no functionCall part"
+            assert calls[0]["args"] == {"arg1": "v"}
+        elif point is failures_module.InjectionPoint.BEFORE_TERMINAL:
+            # The terminal chunk carries STOP — the bridge's truncation reader keys on it.
+            assert any(
+                "finishReason" in cand
+                for p in payloads
+                for cand in p.get("candidates", [])
+            )
+
+    @pytest.mark.parametrize("point", list(failures_module.InjectionPoint))
+    def test_openai_responses_frames_match_the_point(
+        self, point: failures_module.InjectionPoint
+    ) -> None:
+        """KBR-302 — `drop_at(OPENAI_RESPONSES, ...)` writes in the Responses grammar.
+
+        Event-framed SSE with the ``type`` key inside the payload. See the
+        Gemini twin's comment for why the recorder path is not used.
+        """
+        frames = failures_module.frames_for(WireFormat.OPENAI_RESPONSES, point)
+        if point is failures_module.InjectionPoint.BEFORE_FIRST_BYTE:
+            assert frames == ()
+            return
+        events = [
+            (name, data)
+            for frame in frames
+            for name, data in _sse_events(frame)
+        ]
+        names = [name for name, _ in events]
+        assert names[0] == "response.created", names
+        if point is failures_module.InjectionPoint.AFTER_TEXT:
+            assert names == ["response.created", "response.output_text.delta"]
+            assert events[1][1]["delta"] == "kbr-tb4"
+        elif point is failures_module.InjectionPoint.MID_TOOL_ARGUMENTS:
+            assert names == [
+                "response.created",
+                "response.function_call_arguments.delta",
+            ]
+            assert events[1][1]["delta"] == '{"arg1":"v'
+        elif point is failures_module.InjectionPoint.BEFORE_TERMINAL:
+            assert names == [
+                "response.created",
+                "response.output_text.delta",
+                "response.completed",
+            ]
+            assert events[-1][1]["response"]["status"] == "completed"
 
 
 class TestScripted:

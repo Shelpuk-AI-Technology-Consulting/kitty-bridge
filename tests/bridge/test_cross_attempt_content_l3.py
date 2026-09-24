@@ -89,7 +89,6 @@ from kitty.types import BridgeProtocol
 from .test_client_disconnect_health import (
     _StubLauncher,
     _StubProvider,
-    short_grace,  # noqa: F401 — pytest fixture, used by name
 )
 from .test_streaming_recovery_content import _GeminiLauncher
 
@@ -1222,175 +1221,24 @@ async def _drive_inbound(port: int, path: str, payload: dict) -> tuple[int, byte
         return resp.status, await resp.read()
 
 
-#: (i) — byte-identical repeat oracle on a `_CapturingUpstream` capture list.
-def _assert_byte_identical_repeat_captured(
-    captures: list[tuple[bytes, list[tuple[str, str]]]], *, expected_count: int
-) -> None:
-    """Bridge `_assert_byte_identical_repeat` to `_CapturingUpstream`'s capture shape.
+def _captures_as_requests(
+    captures: list[tuple[bytes, list[tuple[str, str]]]],
+) -> list[CapturedRequest]:
+    """Convert `_CapturingUpstream.captures` to `CapturedRequest` instances.
+
+    Lets the KBR-100 byte-identity oracle (`_assert_byte_identical_repeat`,
+    which also owns the correlation-vocabulary scan) apply unchanged —
+    duplicating that oracle for a different capture shape would have been
+    a maintenance hazard the moment either helper changed (review-bot
+    note, KBR-302 round 2).
 
     Args:
         captures: The `_CapturingUpstream.captures` list.
-        expected_count: The number of upstream requests the scripted ladder
-            fires (load-bearing: a ladder that walked further than scripted
-            raises `ScriptExhausted` upstream and arrives with a different
-            count; this guard is the non-vacuous claim, §3.3.1).
+
+    Returns:
+        One `CapturedRequest` per capture, ready for the KBR-100 oracle.
     """
-    assert len(captures) == expected_count, (
-        f"expected {expected_count} upstream requests, got {len(captures)}; "
-        f"the scripted ladder walked a different shape and byte-identity "
-        f"cannot be assessed"
-    )
-    first_body, first_headers = captures[0]
-    second_body, second_headers = captures[1]
-    assert second_body == first_body, (
-        f"the second upstream body differs from the first; (i) requires a "
-        f"byte-identical repeat. first={first_body[:120]!r} second={second_body[:120]!r}"
-    )
-    assert second_headers == first_headers, (
-        f"the header tuple changed between attempts; (i) requires identical "
-        f"headers (names, values, order). "
-        f"first={first_headers!r} second={second_headers!r}"
-    )
-    # Correlation-vocabulary scan — same forbidden tokens as KBR-100's helper.
-    forbidden = (
-        "retry", "attempt", "correlation", "trace",
-        "request_id", "request-id", "call_id", "call-id",
-        "session_id", "session-id",
-    )
-    for _body, headers in captures:
-        for name, _ in headers:
-            lower = name.lower()
-            for token in forbidden:
-                assert token not in lower, (
-                    f"capture carries a {token}-named header {name!r}; (i) "
-                    f"forbids the retry from adding a retry-count or "
-                    f"correlation header"
-                )
-
-
-# ---------------------------------------------------------------------------
-# (i) — byte-identical repeats on the Responses + Gemini inbound routes.
-# ---------------------------------------------------------------------------
-
-
-class TestByteIdenticalRepeatsOnResponsesAndGemini:
-    """(i) re-driven on the Responses and Gemini inbound routes.
-
-    The bridge receives inbound `/v1/responses` or
-    `/v1beta/...:streamGenerateContent`, translates to Chat Completions,
-    hands off to `_StubProvider(native=True).translate_to_upstream` which
-    writes a native Anthropic-Messages body, and POSTs that body to the
-    upstream at `/messages`. The upstream answers with whatever the script
-    says in ANTHROPIC_MESSAGES wire grammar.
-
-    The two repeat families:
-    - transport-blip: BEFORE_FIRST_BYTE → grace retry on the same backend.
-    - empty-response: contentless stream → empty ladder on the same backend.
-    """
-
-    @pytest.mark.asyncio
-    async def test_responses_transport_drop_repeats_byte_identically(self) -> None:
-        """`/v1/responses` + transport-blip → byte-identical grace retry.
-
-        Attempt 1 aborts before any byte; attempt 2 carries the upstream's
-        content-bearing reply. Same backend, same body bytes, same headers.
-        """
-        scripted = (
-            failures_drop_at(InjectionPoint.BEFORE_FIRST_BYTE),
-            failures_success_stream(),
-        )
-        upstream = _CapturingUpstream("/v1/messages").script(*scripted)
-        async with upstream as base_url:
-            server = _single_backend_protocol_server(base_url, _ResponsesLauncher())
-            port = await server.start_async()
-            try:
-                status, _body = await _drive_inbound(
-                    port,
-                    "/v1/responses",
-                    {
-                        "model": "test-model",
-                        "input": [{"type": "message", "role": "user", "content": "hi"}],
-                        "stream": True,
-                    },
-                )
-            finally:
-                await server.stop_async()
-
-        assert status == 200, "the grace retry's second attempt must serve the client"
-        _assert_byte_identical_repeat_captured(upstream.captures, expected_count=2)
-
-    @pytest.mark.asyncio
-    async def test_responses_empty_response_repeats_byte_identically(self) -> None:
-        """`/v1/responses` + empty-response → byte-identical empty-ladder retry."""
-        scripted = (
-            failures_empty_response_stream(),
-            failures_success_stream(),
-        )
-        upstream = _CapturingUpstream("/v1/messages").script(*scripted)
-        async with upstream as base_url:
-            server = _single_backend_protocol_server(base_url, _ResponsesLauncher())
-            port = await server.start_async()
-            try:
-                status, _body = await _drive_inbound(
-                    port,
-                    "/v1/responses",
-                    {
-                        "model": "test-model",
-                        "input": [{"type": "message", "role": "user", "content": "hi"}],
-                        "stream": True,
-                    },
-                )
-            finally:
-                await server.stop_async()
-
-        assert status == 200
-        _assert_byte_identical_repeat_captured(upstream.captures, expected_count=2)
-
-    @pytest.mark.asyncio
-    async def test_gemini_transport_drop_repeats_byte_identically(self) -> None:
-        """`/v1beta/...:streamGenerateContent` + transport-blip → byte-identical."""
-        scripted = (
-            failures_drop_at(InjectionPoint.BEFORE_FIRST_BYTE),
-            failures_success_stream(),
-        )
-        upstream = _CapturingUpstream("/v1/messages").script(*scripted)
-        async with upstream as base_url:
-            server = _single_backend_protocol_server(base_url, _GeminiLauncher())
-            port = await server.start_async()
-            try:
-                status, _body = await _drive_inbound(
-                    port,
-                    "/v1beta/models/test-model:streamGenerateContent",
-                    {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
-                )
-            finally:
-                await server.stop_async()
-
-        assert status == 200
-        _assert_byte_identical_repeat_captured(upstream.captures, expected_count=2)
-
-    @pytest.mark.asyncio
-    async def test_gemini_empty_response_repeats_byte_identically(self) -> None:
-        """`/v1beta/...:streamGenerateContent` + empty-response → byte-identical."""
-        scripted = (
-            failures_empty_response_stream(),
-            failures_success_stream(),
-        )
-        upstream = _CapturingUpstream("/v1/messages").script(*scripted)
-        async with upstream as base_url:
-            server = _single_backend_protocol_server(base_url, _GeminiLauncher())
-            port = await server.start_async()
-            try:
-                status, _body = await _drive_inbound(
-                    port,
-                    "/v1beta/models/test-model:streamGenerateContent",
-                    {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
-                )
-            finally:
-                await server.stop_async()
-
-        assert status == 200
-        _assert_byte_identical_repeat_captured(upstream.captures, expected_count=2)
+    return [_to_captured_request(c) for c in captures]
 
 
 # ---------------------------------------------------------------------------
@@ -1465,42 +1313,134 @@ def failures_unrelated_error() -> Callable[[CapturedRequest, Reply], Awaitable[N
     )
 
 
+# (i) — byte-identical repeats on the Responses + Gemini inbound routes.
+# ---------------------------------------------------------------------------
+
+
+class TestByteIdenticalRepeatsOnResponsesAndGemini:
+    """(i) re-driven on the Responses and Gemini inbound routes.
+
+    The bridge receives inbound `/v1/responses` or
+    `/v1beta/...:streamGenerateContent`, translates to Chat Completions,
+    hands off to `_StubProvider(native=True).translate_to_upstream` which
+    writes a native Anthropic-Messages body, and POSTs that body to the
+    upstream at `/messages`. The upstream answers with whatever the script
+    says in ANTHROPIC_MESSAGES wire grammar.
+
+    The two repeat families:
+    - transport-blip: BEFORE_FIRST_BYTE → grace retry on the same backend.
+    - empty-response: contentless stream → empty ladder on the same backend.
+    """
+
+    @pytest.mark.asyncio
+    async def test_responses_transport_drop_repeats_byte_identically(self) -> None:
+        """`/v1/responses` + transport-blip → byte-identical grace retry.
+
+        Attempt 1 aborts before any byte; attempt 2 carries the upstream's
+        content-bearing reply. Same backend, same body bytes, same headers.
+        """
+        scripted = (
+            failures_drop_at(InjectionPoint.BEFORE_FIRST_BYTE),
+            failures_success_stream(),
+        )
+        upstream = _CapturingUpstream("/v1/messages").script(*scripted)
+        async with upstream as base_url:
+            server = _single_backend_protocol_server(base_url, _ResponsesLauncher())
+            port = await server.start_async()
+            try:
+                status, _body = await _drive_inbound(
+                    port,
+                    "/v1/responses",
+                    {
+                        "model": "test-model",
+                        "input": [{"type": "message", "role": "user", "content": "hi"}],
+                        "stream": True,
+                    },
+                )
+            finally:
+                await server.stop_async()
+
+        assert status == 200, "the grace retry's second attempt must serve the client"
+        _assert_byte_identical_repeat(_captures_as_requests(upstream.captures), expected_count=2)
+
+    @pytest.mark.asyncio
+    async def test_responses_empty_response_repeats_byte_identically(self) -> None:
+        """`/v1/responses` + empty-response → byte-identical empty-ladder retry."""
+        scripted = (
+            failures_empty_response_stream(),
+            failures_success_stream(),
+        )
+        upstream = _CapturingUpstream("/v1/messages").script(*scripted)
+        async with upstream as base_url:
+            server = _single_backend_protocol_server(base_url, _ResponsesLauncher())
+            port = await server.start_async()
+            try:
+                status, _body = await _drive_inbound(
+                    port,
+                    "/v1/responses",
+                    {
+                        "model": "test-model",
+                        "input": [{"type": "message", "role": "user", "content": "hi"}],
+                        "stream": True,
+                    },
+                )
+            finally:
+                await server.stop_async()
+
+        assert status == 200
+        _assert_byte_identical_repeat(_captures_as_requests(upstream.captures), expected_count=2)
+
+    @pytest.mark.asyncio
+    async def test_gemini_transport_drop_repeats_byte_identically(self) -> None:
+        """`/v1beta/...:streamGenerateContent` + transport-blip → byte-identical."""
+        scripted = (
+            failures_drop_at(InjectionPoint.BEFORE_FIRST_BYTE),
+            failures_success_stream(),
+        )
+        upstream = _CapturingUpstream("/v1/messages").script(*scripted)
+        async with upstream as base_url:
+            server = _single_backend_protocol_server(base_url, _GeminiLauncher())
+            port = await server.start_async()
+            try:
+                status, _body = await _drive_inbound(
+                    port,
+                    "/v1beta/models/test-model:streamGenerateContent",
+                    {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+                )
+            finally:
+                await server.stop_async()
+
+        assert status == 200
+        _assert_byte_identical_repeat(_captures_as_requests(upstream.captures), expected_count=2)
+
+    @pytest.mark.asyncio
+    async def test_gemini_empty_response_repeats_byte_identically(self) -> None:
+        """`/v1beta/...:streamGenerateContent` + empty-response → byte-identical."""
+        scripted = (
+            failures_empty_response_stream(),
+            failures_success_stream(),
+        )
+        upstream = _CapturingUpstream("/v1/messages").script(*scripted)
+        async with upstream as base_url:
+            server = _single_backend_protocol_server(base_url, _GeminiLauncher())
+            port = await server.start_async()
+            try:
+                status, _body = await _drive_inbound(
+                    port,
+                    "/v1beta/models/test-model:streamGenerateContent",
+                    {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+                )
+            finally:
+                await server.stop_async()
+
+        assert status == 200
+        _assert_byte_identical_repeat(_captures_as_requests(upstream.captures), expected_count=2)
+
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # (ii) — M9 (native→CC conversion) on Responses + Gemini.
 # ---------------------------------------------------------------------------
-
-
-def _unused_module_body() -> dict[str, Any]:
-    """Placeholder kept for import-clarity; the M9 cells use inline payloads.
-
-    KBR-302's M9 cells build their Responses / Gemini payloads inline because
-    the per-route shape differs in the wire dialect the inbound carries
-    (``input`` for Responses, ``contents`` for Gemini). The shared helper
-    from KBR-100 above (`_native_messages_body_with_tool_use(marker)`) is
-    the right call for the Messages-inbound twin, which the KBR-100 cells
-    still cover.
-    """
-    return {"unused": True}
-    return {
-        "model": "test-model",
-        "max_tokens": 32,
-        "stream": True,
-        "messages": [
-            {"role": "user", "content": "hi"},
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "calling read"},
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_kbr302",
-                        "name": "Read",
-                        "input": {"path": "/tmp/probe"},
-                    },
-                ],
-            },
-        ],
-    }
 
 
 class TestM9TriggerDisciplineOnResponsesAndGemini:
@@ -1549,7 +1489,7 @@ class TestM9TriggerDisciplineOnResponsesAndGemini:
             server = _single_backend_protocol_server(base_url, _ResponsesLauncher())
             port = await server.start_async()
             try:
-                with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+                with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
                     _status, _body = await _drive_inbound(
                         port,
                         "/v1/responses",
@@ -1593,7 +1533,7 @@ class TestM9TriggerDisciplineOnResponsesAndGemini:
             server = _single_backend_protocol_server(base_url, _GeminiLauncher())
             port = await server.start_async()
             try:
-                with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+                with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
                     _status, _body = await _drive_inbound(
                         port,
                         "/v1beta/models/test-model:streamGenerateContent",
@@ -1693,7 +1633,7 @@ class TestM17TriggerDisciplineOnResponsesAndGemini:
             server = _single_backend_protocol_server(base_url, _ResponsesLauncher())
             port = await server.start_async()
             try:
-                with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+                with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
                     status, _body = await _drive_inbound(
                         port,
                         "/v1/responses",
@@ -1705,16 +1645,19 @@ class TestM17TriggerDisciplineOnResponsesAndGemini:
         log_blob = "\n".join(record.getMessage() for record in caplog.records)
         strip_armed = "rejected a thinking signature" in log_blob
         if not strip_armed:
-            # Translation-chain precondition did not carry thinking through:
-            # the strip arm had nothing to strip and the ladder fell through.
-            # Document the gap rather than pretend it fires.
-            assert len(upstream.captures) == 1, (
-                "M17 precondition gap: translation chain did not carry thinking "
-                "through, so the strip arm had nothing to strip. One capture "
-                "means the upstream saw one request and the 400 surfaced. "
-                "Marked as a residual on KBR-302's implementation notes."
+            # Not a pass: the translation-chain precondition did not carry
+            # thinking through to the outbound Messages body, so the strip
+            # arm had nothing to strip and the ladder fell through. `xfail`
+            # (not a silent return) makes the precondition gap visible in
+            # the suite — the design claim is not yet pinned on this route
+            # (review-bot note, KBR-302 round 2).
+            pytest.xfail(
+                "M17 trigger unreachable on the Responses route: the "
+                "Responses->CC->Messages translation chain does not carry "
+                "thinking through to the outbound body, so `_strip_thinking_"
+                "blocks` has nothing to remove. Pin when the chain carries "
+                "thinking (KBR-302 implementation notes)."
             )
-            return
         assert status == 200
         assert len(upstream.captures) == 2, (
             "the M17 arm retries the same backend; a single capture means the arm never fired"
@@ -1733,7 +1676,7 @@ class TestM17TriggerDisciplineOnResponsesAndGemini:
             server = _single_backend_protocol_server(base_url, _ResponsesLauncher())
             port = await server.start_async()
             try:
-                with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+                with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
                     _status, _body = await _drive_inbound(
                         port,
                         "/v1/responses",
@@ -1764,7 +1707,7 @@ class TestM17TriggerDisciplineOnResponsesAndGemini:
             server = _single_backend_protocol_server(base_url, _GeminiLauncher())
             port = await server.start_async()
             try:
-                with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+                with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
                     status, _body = await _drive_inbound(
                         port,
                         "/v1beta/models/test-model:streamGenerateContent",
@@ -1776,10 +1719,13 @@ class TestM17TriggerDisciplineOnResponsesAndGemini:
         log_blob = "\n".join(record.getMessage() for record in caplog.records)
         strip_armed = "rejected a thinking signature" in log_blob
         if not strip_armed:
-            assert len(upstream.captures) == 1, (
-                "M17 precondition gap (Gemini): see the Responses twin."
+            # Not a pass: see the Responses twin's comment.
+            pytest.xfail(
+                "M17 trigger unreachable on the Gemini route: the "
+                "Gemini->CC->Messages translation chain does not carry "
+                "thinking through to the outbound body. See the Responses "
+                "twin for the same precondition gap."
             )
-            return
         assert status == 200
         assert len(upstream.captures) == 2
 
@@ -1796,7 +1742,7 @@ class TestM17TriggerDisciplineOnResponsesAndGemini:
             server = _single_backend_protocol_server(base_url, _GeminiLauncher())
             port = await server.start_async()
             try:
-                with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+                with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
                     _status, _body = await _drive_inbound(
                         port,
                         "/v1beta/models/test-model:streamGenerateContent",
