@@ -125,37 +125,51 @@ _SHAPES: tuple[tuple[str, str], ...] = (
         c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),
         c.part_path(2, 0, "display_name"),
     ),
+    # KBR-59 (T-D10) — M27's anchor (Gemini response-direction functionCall-id
+    # echo from KBR-257). The reply-side twin of M18/M19 — same field name,
+    # response direction. ``_SHAPES`` carries both the request-side
+    # ``part_path(WILDCARD, WILDCARD, "id")`` (M18's anchor) and the
+    # reply-side ``reply_part_path(WILDCARD, "id")`` (M27's anchor); the
+    # row text in ``register.py`` keeps the two paths distinct so
+    # ``test_no_two_rows_are_indistinguishable`` does not collapse them.
+    (c.reply_part_path(c.WILDCARD, "id"), c.reply_part_path(2, "id")),
+    # KBR-59 (T-D10) — M29's anchor (Ollama-vs-CC part ordering on rare
+    # Thinking+ToolUse replies).
+    (c.reply_part_path(c.WILDCARD), c.reply_part_path(2)),
 )
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 80 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 83 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """27 bridge-level rows less the withdrawn M13, plus 53 provider-level.
+        """27 bridge-level rows less the withdrawn M13, plus 56 provider-level.
 
-        The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
-        KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
-        (KBR-44). The +5 over the pre-KBR-258 count is P26..P30, the five
-        Chat Completions cache-breakpoint drops the Anthropic adapter family
-        performs on the translated route. The +7 over the pre-KBR-184 count is
-        KBR-184: M26 (G31 metadata drop on the Anthropic family), P24 (G26
-        CC-origin twin of P23), P31/P32 (G32 ollama + bedrock route drops),
-        P33 (G33 Bedrock auto-toolChoice rewrite), P34 (G34 Anthropic
-        parallel-false omission), P35 (G35 omitted legal tool_choice). The +4
-        over the pre-KBR-137 count is P36/P37/P38/P42, the OpenCode Go
-        Responses-route mutations (whole-body translate, eight CC-only drops,
-        the max_tokens rename, the reasoning injection). The +2 over the
-        pre-KBR-271 count is M9a/M9b, the two cache-breakpoint drops the M9
-        fallback converter performs (KBR-271). The +1 over the pre-KBR-305
-        count is P43, the six KBR-301 sampling keys dropped on the rebuild
-        trio (Anthropic family + Bedrock + Ollama Cloud for ``n``; the
-        other five carried on Ollama Cloud, the row's claims dormant on
-        that route). All literals are the no-reflow damage test — a future
+        The +3 over the pre-KBR-59 count is the three response-direction
+        rows KBR-59 adds (M27, M28, M29). The +8 over the pre-KBR-195 count
+        is the eight Gemini inbound rows KBR-195 added (M18..M25). The
+        +1 over the pre-KBR-44 count is P5f (KBR-44). The +5 over the
+        pre-KBR-258 count is P26..P30, the five Chat Completions
+        cache-breakpoint drops the Anthropic adapter family performs on
+        the translated route. The +7 over the pre-KBR-184 count is
+        KBR-184: M26 (G31 metadata drop on the Anthropic family), P24
+        (G26 CC-origin twin of P23), P31/P32 (G32 ollama + bedrock route
+        drops), P33 (G33 Bedrock auto-toolChoice rewrite), P34 (G34
+        Anthropic parallel-false omission), P35 (G35 omitted legal
+        tool_choice). The +4 over the pre-KBR-137 count is P36/P37/P38/P42,
+        the OpenCode Go Responses-route mutations (whole-body translate,
+        eight CC-only drops, the max_tokens rename, the reasoning
+        injection). The +2 over the pre-KBR-271 count is M9a/M9b, the two
+        cache-breakpoint drops the M9 fallback converter performs
+        (KBR-271). The +1 over the pre-KBR-305 count is P43, the six
+        KBR-301 sampling keys dropped on the rebuild trio (Anthropic
+        family + Bedrock + Ollama Cloud for ``n``; the other five
+        carried on Ollama Cloud, the row's claims dormant on that
+        route). All literals are the no-reflow damage test — a future
         change that drops a row or adds one without updating the guard
         fails loudly.
         """
-        assert len(r.REGISTER) == 80
+        assert len(r.REGISTER) == 83
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -687,6 +701,15 @@ class TestTheTriggerArrangingBy:
             r.Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE: r.ArrangingBy.REQUEST,
             r.Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED: r.ArrangingBy.REQUEST,
             r.Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED: r.ArrangingBy.REQUEST,
+            # KBR-59 (T-D10) — three new response-direction triggers,
+            # all RESPONSE per the row text in ``register.py``. The
+            # classification matches the ArrangingBy.RESPONSE
+            # enumeration update; KBR-59 spec documents why each is a
+            # property of the captured reply rather than a corpus
+            # entry.
+            r.Trigger.CAPTURED_TOOL_CALL_ID_PRESENT: r.ArrangingBy.RESPONSE,
+            r.Trigger.OLLAMA_CANONICAL_TOOL_CALLING_REPLY: r.ArrangingBy.RESPONSE,
+            r.Trigger.REPLY_CONTAINS_THINKING_AND_TOOL_USE: r.ArrangingBy.RESPONSE,
         }
 
         assert set(expected) == set(r.Trigger) - {r.Trigger.ALWAYS}, (
