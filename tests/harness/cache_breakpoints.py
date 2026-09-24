@@ -79,16 +79,19 @@ _KITTY_CARRIAGE_KEYS = frozenset(
     {
         "_anthropic_system",
         "_thinking_blocks",
-        # KBR-296 — top-level carriage (request-level). Written by the
-        # M9 fallback AND by ``MessagesTranslator.translate_request``
-        # (KBR-308 hop-1 carry), so both routes use the same vocabulary.
+        # KBR-296 + KBR-308 — top-level carriage (request-level). Written by
+        # the M9 fallback (KBR-296) AND by
+        # ``MessagesTranslator.translate_request`` (KBR-308 hop-1 carry), so
+        # both routes use the same vocabulary.
         "_cache_control",
         "_tool_cache_controls",
-        # KBR-296 — message-level carriage (assistant / tool messages).
-        # Listed here even though they live in ``_INTERNAL_MESSAGE_KEYS``:
-        # ``find_breakpoints`` walks message dicts by recursion, so a
-        # message-level key containing ``cache_control`` is matched unless
-        # the mirror covers it. Same dual-writer provenance as above.
+        # KBR-296 + KBR-308 — message-level carriage (assistant / tool
+        # messages). Listed here even though they live in
+        # ``_INTERNAL_MESSAGE_KEYS``: ``find_breakpoints`` walks message
+        # dicts by recursion, so a message-level key containing
+        # ``cache_control`` is matched unless the mirror covers it. Same
+        # dual-writer provenance as above (KBR-296's M9 fallback and
+        # KBR-308's hop-1 translator are both writers).
         "_tool_call_cache_controls",
     }
 )

@@ -477,7 +477,7 @@ class AnthropicAdapter(ProviderAdapter):
         # models (forwards_thinking_signature=False) the endpoint rejects
         # markers on system blocks, so the join stands and the G43 scope-out
         # is preserved on this route.
-        elif any("cache_control" in block for block in system_blocks) and self.forwards_thinking_signature:
+        elif any(b.get("cache_control") is not None for b in system_blocks) and self.forwards_thinking_signature:
             anthropic["system"] = system_blocks
         # Joined-string form for everything else: unmarked system, or any
         # system on an unverified upstream.

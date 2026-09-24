@@ -151,13 +151,18 @@ def build_user_content_message(
         carry_cache_control: ``True`` on both call sites that ship today —
             the M9 fallback (KBR-296) and the hop-1 translator (KBR-308). When
             true, a block's ``cache_control`` breakpoint is re-attached to
-            the CC part the adapter restores it from, and a turn whose text
-            carries a breakpoint keeps the parts-list form (a joined string
-            would lose the breakpoint). Unmarked turns stay the joined
-            string byte-for-byte (attempt-0 parity); the carve is
-            conditional on a marked text block. Default off is a defensive
-            default the no-current-caller case wants, not a behaviour the
-            production path relies on.
+            the CC part the adapter restores it from — **the marker value
+            itself rides verbatim** (the same dict object, not a copy; the
+            adapter's part-level restore forwards the reference straight
+            onto the rebuilt Anthropic block, and the full-value
+            ``{"type": "ephemeral", "ttl": "1h"}`` assertion in
+            ``test_anthropic_cache_breakpoints.py`` pins it) — and a turn
+            whose text carries a breakpoint keeps the parts-list form
+            (a joined string would lose the breakpoint). Unmarked turns
+            stay the joined string byte-for-byte (attempt-0 parity); the
+            carve is conditional on a marked text block. Default off is a
+            defensive default the no-current-caller case wants, not a
+            behaviour the production path relies on.
 
             **Caveat (KBR-200):** part-level ``cache_control`` is honoured
             natively by OpenRouter's CC dialect and restored onto the
