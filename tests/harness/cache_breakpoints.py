@@ -63,24 +63,32 @@ _MAX_BREAKPOINTS = 4
 #: ``src/kitty/providers/base.py``. After KBR-228 the Messages -> CC
 #: intermediate carries the agent's verbatim system blocks and thinking
 #: blocks under these keys as *cargo*; KBR-296 added three more carriage
-#: keys at the M9 site (``_cache_control`` and ``_tool_cache_controls`` at
-#: request level, ``_cache_control`` and ``_tool_call_cache_controls`` at
-#: message level). They are not the wire this detector measures, so their
-#: breakpoints are not findings. If kitty ever mints a carriage key this
-#: list misses, the KBR-198/KBR-199 characterisations fail loudly and force
-#: the update — the drift corrects itself in the red.
+#: keys at the M9 fallback site (``_cache_control`` and
+#: ``_tool_cache_controls`` at request level, ``_cache_control`` and
+#: ``_tool_call_cache_controls`` at message level); **KBR-308 added the
+#: same writers at hop 1** — ``MessagesTranslator.translate_request``
+#: populates these identical keys, so the M9 path and hop 1 share the
+#: vocabulary and the drift-correction force stays load-bearing (mirror
+#: check ``test_the_carriage_mirror_covers_every_registry_cache_key``,
+#: ``tests/providers/test_native_passthrough_cache_breaks.py``). The
+#: detector skips them; they are not the wire this measures, so their
+#: breakpoints are not findings. If kitty ever mints a carriage key
+#: either writer forgets, the mirror's documented drift-correction
+#: mechanism fails the suite and forces the update.
 _KITTY_CARRIAGE_KEYS = frozenset(
     {
         "_anthropic_system",
         "_thinking_blocks",
-        # KBR-296 — top-level carriage (request-level).
+        # KBR-296 — top-level carriage (request-level). Written by the
+        # M9 fallback AND by ``MessagesTranslator.translate_request``
+        # (KBR-308 hop-1 carry), so both routes use the same vocabulary.
         "_cache_control",
         "_tool_cache_controls",
         # KBR-296 — message-level carriage (assistant / tool messages).
         # Listed here even though they live in ``_INTERNAL_MESSAGE_KEYS``:
         # ``find_breakpoints`` walks message dicts by recursion, so a
         # message-level key containing ``cache_control`` is matched unless
-        # the mirror covers it.
+        # the mirror covers it. Same dual-writer provenance as above.
         "_tool_call_cache_controls",
     }
 )

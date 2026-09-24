@@ -279,23 +279,31 @@ def test_the_default_anthropic_provider_takes_the_translated_route() -> None:
     assert (type(provider), provider.use_native_messages) == (AnthropicAdapter, False)
 
 
-def test_the_default_anthropic_route_delivers_only_the_restored_system_carrier() -> None:
-    """Messages → Chat Completions → Messages ships one of the fixture's seven breakpoints.
+def test_the_default_anthropic_route_delivers_every_breakpoint_the_rebuild_can_express() -> None:
+    """Messages → Chat Completions → Messages ships all seven of the fixture's breakpoints, at full value.
 
-    Since KBR-228 part B the adapter restores the agent's ``system`` value
-    verbatim from the internal carriage, breakpoints included, so the marked
-    system block's 1-hour breakpoint reaches the wire again. The other six —
-    the tool, the message blocks and the top-level form — are still lost, and
-    that loss is what remains of the original headline: the stable history
-    prefix and the tool definitions are still re-billed at no less than ten
-    times their cached rate on every turn. (Restoring the rest is epic
-    KBR-197's.)
+    KBR-308 (with KBR-228 part B's system carriage and KBR-296's restore
+    side beneath it) carries every site the rebuild can express: the tool
+    declaration, both message blocks (text part and image part), the
+    ``tool_use``, the ``tool_result``, the system block, and the top-level
+    automatic-caching form. Each arrives at the value the agent chose — the
+    one-hour and five-minute TTLs land exactly where they were placed — so
+    the agent's stable prefix re-bills at the cached rate on every
+    translated turn.
     """
     intermediate = MessagesTranslator().translate_request(_claude_code_body(breakpoints=True))
 
     wire = AnthropicAdapter().translate_to_upstream(intermediate)
 
-    assert _breakpoints(wire) == {"$.system[1].cache_control": _ONE_HOUR}
+    assert _breakpoints(wire) == {
+        "$.system[1].cache_control": _ONE_HOUR,
+        "$.tools[1].cache_control": _FIVE_MINUTES,
+        "$.messages[0].content[0].cache_control": _FIVE_MINUTES,
+        "$.messages[0].content[1].cache_control": _FIVE_MINUTES,
+        "$.messages[1].content[2].cache_control": _FIVE_MINUTES,
+        "$.messages[2].content[0].cache_control": _ONE_HOUR,
+        "$.cache_control": _FIVE_MINUTES,
+    }
 
 
 def _tool_result(tool_use_id: str, *, marked: bool) -> dict:
@@ -373,49 +381,92 @@ def test_a_breakpoint_nested_in_tool_result_list_content_passes_through_both_hop
 # ── Where the loss happens: before the adapter runs ─────────────────────────
 
 
-def test_the_intermediate_handed_to_the_adapter_carries_cache_control_only_in_the_carriage() -> None:
-    """The intermediate's only ``cache_control`` keys sit under ``_anthropic_system``.
+def test_the_intermediate_handed_to_the_adapter_carries_cache_control_only_in_cargo() -> None:
+    """The intermediate carries every agent marker under cargo — carriages, or directly on user content parts.
 
-    Since KBR-228 part B the agent's verbatim system blocks ride the internal
-    carriage, breakpoints included, for the adapter to restore. This is the
-    only test here that catches the translator emitting a breakpoint of its
-    own, one the agent never set, anywhere else — at a site the adapter drops,
-    where the round trip would not show it. Commercial consequence of such a
-    change: cache writes nobody asked for, at a TTL nobody chose, on every
-    route that forwards the key.
+    The local ``_breakpoints`` walker matches keys whose name contains the
+    substring ``"cache_control"``, so it sees:
+      * ``_anthropic_system[1].cache_control`` (the system carriage —
+        KBR-228 part B;
+        ``_anthropic_system`` is not in its own substring, so the OUTER
+        name does not match, but the INNER ``cache_control`` does);
+      * ``messages[1].content[0].cache_control`` and ``...content[1].cache_control``
+        (KBR-308: user text and image parts carry the marker directly —
+        parts-form via ``carry_cache_control=True`` at hop 1; the adapter's
+        existing part-level restore at ``anthropic.py:740, 744-745`` reads
+        them).
+
+    Markers that ride the KBR-296 carriages (``_cache_control``,
+    ``_tool_cache_controls``, ``_tool_call_cache_controls``, and
+    message-level ``_cache_control``) are invisible to this walker because
+    their parent key does not contain ``"cache_control"`` as a substring —
+    that is the walker's blind spot, not a claim about cargo absentness.
+    The harness detector at ``tests/harness/cache_breakpoints.py`` overrides
+    this with a ``_KITTY_CARRIAGE_KEYS`` skip; this walker stays simple to
+    keep its claim falsifiable from the source alone.
+
+    The claim this assertion DOES pin: the agent's marker set reaches the
+    intermediate only in cargo (carriage or part-level) — never as a
+    synthesised new marker the translator invented. A regression here
+    would surface as cache writes nobody asked for, at a TTL nobody chose.
     """
     intermediate = MessagesTranslator().translate_request(_claude_code_body(breakpoints=True))
 
     assert _breakpoints(intermediate) == {
         "$._anthropic_system[1].cache_control": _ONE_HOUR,
+        "$.messages[1].content[0].cache_control": _FIVE_MINUTES,
+        "$.messages[1].content[1].cache_control": _FIVE_MINUTES,
     }
 
 
-def test_the_intermediate_tells_marked_from_unmarked_only_through_the_carriage() -> None:
-    """The intermediates differ only where KBR-228's carriage says they may.
+def test_the_intermediate_tells_marked_from_unmarked_only_through_cargo() -> None:
+    """The intermediates differ only in cargo (carriages + part-level markers).
 
-    The marked and unmarked intermediates are equal once the internal carriage
-    keys (``_anthropic_system``, ``_thinking_blocks``) are removed — so no
-    field under any *other* name carries the agent's breakpoints. This is the
-    red the module's docstring said the carriage fix would turn: the adapter
-    now recovers the system blocks from what it is handed, and this test pins
-    that it recovers them from the carriage and nowhere else.
+    The marked and unmarked intermediates are equal once every cargo — the
+    KBR-228 carriages (``_anthropic_system``, ``_thinking_blocks``), the
+    KBR-296 carriages (``_cache_control``, ``_tool_cache_controls``,
+    ``_tool_call_cache_controls``, message-level ``_cache_control``), and
+    the KBR-308 part-level ``cache_control`` on user content parts — is
+    stripped. The pin: no field under any *other* name carries the agent's
+    breakpoints. The adapter recovers them from the cargo and nowhere else.
 
-    This compares the translator with itself, which §3.3.1 forbids as an oracle
-    for fidelity. It is sound here because the claim is not "the output is
-    faithful" but "the breakpoints move only through the carriage".
+    This compares the translator with itself, which §3.3.1 forbids as an
+    oracle for fidelity. It is sound here because the claim is not "the
+    output is faithful" but "the breakpoints move only through cargo".
     """
     translator = MessagesTranslator()
+    cargo = {
+        "_anthropic_system",
+        "_thinking_blocks",
+        # KBR-296 carriages.
+        "_cache_control",
+        "_tool_cache_controls",
+        "_tool_call_cache_controls",
+    }
 
-    def _without_carriage(body: dict) -> dict:
-        stripped = {k: v for k, v in body.items() if k not in ("_anthropic_system", "_thinking_blocks")}
-        stripped["messages"] = [
-            {k: v for k, v in message.items() if k != "_thinking_blocks"} for message in stripped["messages"]
-        ]
+    def _without_cargo(body: dict) -> dict:
+        stripped = {k: v for k, v in body.items() if k not in cargo}
+        messages: list = []
+        for message in stripped["messages"]:
+            # Strip message-level carriages AND any ``cache_control`` on
+            # user content parts — both are cargo, not agent-visible
+            # differentiation outside the breaker.
+            stripped_message = {k: v for k, v in message.items() if k not in cargo}
+            content = stripped_message.get("content")
+            if isinstance(content, list):
+                cleaned: list = []
+                for part in content:
+                    if isinstance(part, dict) and "cache_control" in part:
+                        cleaned.append({k: v for k, v in part.items() if k != "cache_control"})
+                    else:
+                        cleaned.append(part)
+                stripped_message["content"] = cleaned
+            messages.append(stripped_message)
+        stripped["messages"] = messages
         return stripped
 
-    marked = _without_carriage(translator.translate_request(_claude_code_body(breakpoints=True)))
-    unmarked = _without_carriage(translator.translate_request(_claude_code_body(breakpoints=False)))
+    marked = _without_cargo(translator.translate_request(_claude_code_body(breakpoints=True)))
+    unmarked = _without_cargo(translator.translate_request(_claude_code_body(breakpoints=False)))
 
     assert marked == unmarked
 
@@ -494,6 +545,40 @@ def test_the_adapter_adds_no_breakpoint_to_a_request_that_carries_none() -> None
     assert _breakpoints(wire) == {}
 
 
+# ── Criterion 1c: the R3 gate — markers on system blocks go only to verified upstreams ──
+
+
+def test_system_content_part_drop_is_preserved_on_minimax_token() -> None:
+    """On a ``forwards_thinking_signature=False`` adapter, a CC system content-part marker is dropped — joined string.
+
+    ``MiniMaxTokenAnthropicAdapter``'s endpoint rejects ``cache_control``
+    on system blocks outright (``minimax_token.py:29-30``), so the R3
+    carve stays closed there: a marked system part joins to a plain
+    string, the marker disappears, and the deliberate G43 scope-out is
+    preserved on the CC-origin path too — symmetric with the CB-3 row
+    that records the same shape at the wire.
+    """
+    from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
+
+    body = _cc_request(
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "sys", "cache_control": dict(_ONE_HOUR)},
+                ],
+            },
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    adapter = MiniMaxTokenAnthropicAdapter(native_messages=True)
+
+    wire = adapter.translate_to_upstream(body)
+
+    assert wire["system"] == "sys"
+    assert _breakpoints(wire) == {}
+
+
 # ── Criterion 1b: what the adapter does with a breakpoint it is given ───────
 
 # One case per object the adapter reads from a Chat Completions request as a
@@ -502,18 +587,24 @@ def test_the_adapter_adds_no_breakpoint_to_a_request_that_carries_none() -> None
 # survived. Kept cases mark the first of two parts, so a moved breakpoint fails.
 # Assistant list content is absent: the adapter nests that whole list inside a
 # `text` field, which is invalid whatever happens to the breakpoint (KBR-34).
+#
+# KBR-308 update: the six KBR-199-measured drops flip to kept at full value;
+# the user-message-object case is deferred (OD1) and renamed for the
+# reduction. Two new kept cases join (assistant-message-object,
+# tool-message-object — the same restore slots the KBR-296 M9 rebuilder
+# writes, now read on the CC-origin path too).
 _GIVEN_BREAKPOINT_CASES = [
     pytest.param(
         _cc_request([{"role": "user", "content": "hi"}], cache_control=dict(_ONE_HOUR)),
         "$.cache_control",
-        {},
-        id="top-level-dropped",
+        {"$.cache_control": _ONE_HOUR},
+        id="top-level-kept",
     ),
     pytest.param(
         _cc_request([{"role": "user", "content": "hi", "cache_control": dict(_ONE_HOUR)}]),
         "$.messages[0].cache_control",
         {},
-        id="message-object-dropped",
+        id="user-message-object-deferred-dropped",
     ),
     pytest.param(
         _cc_request(
@@ -523,8 +614,11 @@ _GIVEN_BREAKPOINT_CASES = [
             ]
         ),
         "$.messages[0].content[0].cache_control",
-        {},
-        id="system-content-part-dropped",
+        # KBR-308 carve emits a flat list of blocks on
+        # ``forwards_thinking_signature=True`` adapters; the marker lands
+        # at the block level, not nested one deeper in ``content``.
+        {"$.system[0].cache_control": _ONE_HOUR},
+        id="system-content-part-kept",
     ),
     pytest.param(
         _cc_request(
@@ -538,8 +632,8 @@ _GIVEN_BREAKPOINT_CASES = [
             ],
         ),
         "$.tools[0].cache_control",
-        {},
-        id="tool-declaration-dropped",
+        {"$.tools[0].cache_control": _ONE_HOUR},
+        id="tool-declaration-kept",
     ),
     pytest.param(
         _cc_request(
@@ -550,8 +644,10 @@ _GIVEN_BREAKPOINT_CASES = [
             ]
         ),
         "$.messages[1].tool_calls[0].cache_control",
-        {},
-        id="tool-call-dropped",
+        # No text block on this assistant turn, so the rebuilt ``tool_use``
+        # is ``content[0]``.
+        {"$.messages[1].content[0].cache_control": _ONE_HOUR},
+        id="tool-call-kept",
     ),
     pytest.param(
         _cc_request(
@@ -587,6 +683,49 @@ _GIVEN_BREAKPOINT_CASES = [
         "$.messages[2].content[0].cache_control",
         {"$.messages[2].content[0].content[0].cache_control": _ONE_HOUR},
         id="tool-message-content-part-relocated-into-tool-result",
+    ),
+    # KBR-308: the two NEW kept cases — assistant-message-object and
+    # tool-message-object ride the same restore slots KBR-296 created for
+    # the M9 rebuild (text-block restore / tool_result-block restore).
+    pytest.param(
+        _cc_request(
+            [
+                {"role": "user", "content": "ask"},
+                {
+                    "role": "assistant",
+                    "content": "reply",
+                    "cache_control": dict(_ONE_HOUR),
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "Read", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "file"},
+            ]
+        ),
+        "$.messages[1].cache_control",
+        {"$.messages[1].content[0].cache_control": _ONE_HOUR},
+        id="assistant-message-object-kept",
+    ),
+    pytest.param(
+        _cc_request(
+            [
+                {"role": "user", "content": "ask"},
+                _tool_call_turn(),
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "file",
+                    "cache_control": dict(_ONE_HOUR),
+                },
+            ]
+        ),
+        "$.messages[2].cache_control",
+        {"$.messages[2].content[0].cache_control": _ONE_HOUR},
+        id="tool-message-object-kept",
     ),
 ]
 

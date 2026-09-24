@@ -568,19 +568,30 @@ class TestToolChoiceAndMetadata:
 
 
 class TestTranslateRequestCacheBreakpoints:
-    """Characterise which prompt-cache breakpoints ``translate_request`` destroys, site by site.
+    """Pin which prompt-cache breakpoints ``translate_request`` carries, site by site.
 
-    KBR-198 (CB-1, epic KBR-197). Each body carries one one-hour breakpoint from
-    :func:`harness.cache_breakpoints.build_request`, whose own tests prove it is
-    really there. These tests pin today's behaviour, not the correct one: the
-    carry-through fix is expected to turn the nine absence tests red and invert
-    them.
+    KBR-198 (CB-1, epic KBR-197) originally characterised today's drops;
+    KBR-308 (the KBR-258/KBR-263 product halves) carried every site the
+    rebuild can express. Each body carries one one-hour breakpoint from
+    :func:`harness.cache_breakpoints.build_request`, whose own tests prove
+    it is really there.
+
+    The inversion is **partial** by construction: ``find_breakpoints``
+    skips ``_KITTY_CARRIAGE_KEYS``, so a carrier riding a carriage key
+    (``_cache_control``, ``_tool_cache_controls``,
+    ``_tool_call_cache_controls``, ``_anthropic_system``) is invisible to
+    the whole-body detector — those tests drill into the carriage (the
+    document-test pattern). The user_text and image carriers ride the CC
+    parts directly and drill into the part. The ``system`` carrier rides
+    ``_anthropic_system`` cargo (detector-skipped) and ``document`` rides
+    ``_documents`` (drill-in), both green since their original fixes.
 
     The cost stated in each docstring applies on upstreams that honour
-    ``cache_control`` — Anthropic-compatible providers, and OpenRouter's Chat
-    Completions API. Anthropic bills a cache read at 0.1x base input, so a lost
-    breakpoint re-bills its prefix at roughly 10x on every turn. Where caching is
-    implicit (OpenAI) the loss changes nothing billable.
+    ``cache_control`` — Anthropic-compatible providers, and OpenRouter's
+    Chat Completions API (KBR-200 caveat: other CC dialects' behaviour is
+    unknown). Anthropic bills a cache read at 0.1x base input, so a lost
+    breakpoint re-bills its prefix at roughly 10x on every turn. Where
+    caching is implicit (OpenAI) the loss changes nothing billable.
     """
 
     def setup_method(self):
@@ -598,25 +609,155 @@ class TestTranslateRequestCacheBreakpoints:
         """
         return self.t.translate_request(cb.build_request(site))
 
-    def test_tool_definition_breakpoint_is_destroyed(self):
-        """Tool definitions are re-billed uncached every turn: the tool is rebuilt as a bare function."""
-        assert cb.find_breakpoints(self._translate("tool")) == []
+    def test_tool_definition_breakpoint_is_carried_on_the_name_keyed_carriage(self):
+        """Tool definitions' breakpoints ride the name-keyed ``_tool_cache_controls`` carriage.
 
-    def test_system_block_breakpoint_is_destroyed(self):
-        """The system prompt is re-billed uncached every turn: its blocks are joined into one string."""
+        The Anthropic adapter's ``_translate_tools`` looks up by
+        ``func.get("name")`` and restores the carried value onto the
+        rebuilt Anthropic tool declaration — KBR-296's restore side,
+        P30 vocabulary, fed by KBR-308's name-keyed carry. The name key
+        survives any future normalisation that reorders the list.
+        """
+        result = self._translate("tool")
+
+        assert result.get("_tool_cache_controls") == {"read_file": cb.BREAKPOINT}
+
+    def test_system_block_breakpoint_survives_on_the_anthropic_system_carriage(self):
+        """The system prompt's blocks ride ``_anthropic_system`` verbatim; the detector skips that carriage.
+
+        KBR-228 part B carries the agent's system value — breakpoints
+        included — for the signature-binding adapters to restore
+        (``zai_anthropic`` / ``custom_anthropic``). The whole-body
+        ``find_breakpoints`` assertion still reads "no finding" because
+        ``_anthropic_system`` is in ``_KITTY_CARRIAGE_KEYS``: the marker
+        rides as cargo, not as a wire placement, and the adapter's restore
+        is where it becomes wire. Docstring-only update in KBR-308; the
+        assertion has been green since KBR-228.
+        """
         assert cb.find_breakpoints(self._translate("system")) == []
 
-    def test_user_text_block_breakpoint_is_destroyed(self):
-        """History up to a user turn is re-billed uncached: text blocks are joined into one string."""
-        assert cb.find_breakpoints(self._translate("user_text")) == []
+    def test_marked_text_only_user_turn_takes_the_parts_form(self):
+        """A text-only user turn whose sole text block carries a marker takes the parts form, not a joined string.
 
-    def test_assistant_text_block_breakpoint_is_destroyed(self):
-        """History up to an assistant turn is re-billed uncached: text blocks are joined into one string."""
-        assert cb.find_breakpoints(self._translate("assistant_text")) == []
+        The KBR-296 AC-8 sibling at hop 1: the join would lose the marker,
+        so the carve fires only when a text block carries one. Unmarked
+        text-only turns keep the joined string byte-for-byte (attempt-0
+        parity, pinned by ``test_native_format_fallback.py``).
+        """
+        body = {
+            "model": "claude-sonnet-5",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "only block", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+                    ],
+                },
+            ],
+        }
 
-    def test_image_block_breakpoint_is_destroyed(self):
-        """The image now ships as an ``image_url`` part (KBR-222), which carries no breakpoint."""
-        assert cb.find_breakpoints(self._translate("image")) == []
+        result = MessagesTranslator().translate_request(body)
+        user_message = next(m for m in result["messages"] if m.get("role") == "user")
+
+        assert isinstance(user_message["content"], list)
+        assert user_message["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+    def test_unmarked_text_only_user_turn_keeps_the_joined_string(self):
+        """An unmarked text-only user turn keeps the pre-KBR-296 joined-string form.
+
+        The carve is conditional on a marked text block; a turn without
+        markers changes shape for nobody (attempt-0 parity).
+        """
+        body = {
+            "model": "claude-sonnet-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "only block"}]}],
+        }
+
+        result = MessagesTranslator().translate_request(body)
+        user_message = next(m for m in result["messages"] if m.get("role") == "user")
+
+        assert user_message["content"] == "only block"
+
+    def test_user_text_block_breakpoint_survives_on_the_cc_part(self):
+        """A text block's ``cache_control`` rides the CC content part; the adapter's part-level restore forwards it.
+
+        The KBR-296 opt-in ``carry_cache_control`` flag is on at hop 1 now
+        (KBR-308): the part keeps the marker, and the text-only-turn carve
+        applies only when a text block carries one — unmarked turns stay
+        the joined string byte-for-byte (attempt-0 parity). OpenRouter's
+        CC dialect honours a part-level marker natively; the Anthropic
+        family restores it onto the rebuilt block (KBR-296); other CC
+        dialects are the recorded KBR-200 caveat. Drill-in assertion
+        (the whole-body form would double-count via ``_documents``'
+        identity-addressed re-reference of the user message).
+        """
+        result = self._translate("user_text")
+        user_message = next(m for m in result["messages"] if m.get("role") == "user")
+        parts = user_message["content"]
+
+        assert isinstance(parts, list)
+        text_part = next(p for p in parts if p.get("type") == "text")
+        assert text_part.get("cache_control") == cb.BREAKPOINT
+
+    def test_assistant_text_block_breakpoint_is_carried_on_the_assistant_message(self):
+        """A joined assistant text's ``cache_control`` rides the message-level carriage to the rebuilt text block.
+
+        Last-marked-wins (KBR-296's DQ3 rationale): the latest breakpoint
+        is the effective cache write; Claude Code marks one breakpoint per
+        text run today, so the common case is a strict superset. KBR-308
+        feeds the same carriage the M9 rebuilder writes.
+        """
+        result = self._translate("assistant_text")
+        assistant = next(m for m in result["messages"] if m.get("role") == "assistant")
+
+        assert assistant.get("_cache_control") == cb.BREAKPOINT
+
+    def test_assistant_two_marked_text_blocks_keep_last_marked_wins(self):
+        """Two assistant text blocks carrying different breakpoints keep the LAST value on the message-level carriage.
+
+        The KBR-296 AC-8 sibling, now at hop 1: the joined text is one
+        block on the wire, so any placement collapses to one value; the
+        last marker is the one that would have written cache last had the
+        blocks shipped unjoined.
+        """
+        body = {
+            "model": "claude-sonnet-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "first", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "second", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                    ],
+                },
+            ],
+        }
+
+        result = MessagesTranslator().translate_request(body)
+        assistant = next(m for m in result["messages"] if m.get("role") == "assistant")
+
+        assert assistant.get("_cache_control") == {"type": "ephemeral", "ttl": "1h"}
+
+    def test_image_block_breakpoint_survives_on_the_cc_part(self):
+        """An image block's ``cache_control`` rides the CC ``image_url`` part; the adapter's image restore forwards it.
+
+        Same KBR-296 restore as the text part: ``_translate_user_content``
+        copies a carried ``cache_control`` from the ``image_url`` part onto
+        the rebuilt Anthropic ``image`` block (``anthropic.py`` image
+        branch), so the marker reaches the wire at full value (KBR-308).
+        Drill-in assertion (the whole-body form double-counts via
+        ``_documents``' identity-addressed re-reference).
+        """
+        result = self._translate("image")
+        user_message = next(m for m in result["messages"] if m.get("role") == "user")
+        parts = user_message["content"]
+
+        image_part = next(p for p in parts if p.get("type") == "image_url")
+        assert image_part.get("cache_control") == cb.BREAKPOINT
 
     def test_document_block_breakpoint_survives_on_the_internal_key(self):
         """The document rides ``_documents`` verbatim, so its breakpoint rides with it (KBR-222).
@@ -631,23 +772,55 @@ class TestTranslateRequestCacheBreakpoints:
         assert len(cb.find_breakpoints(result)) == 1
         assert cb.find_breakpoints(result["_documents"][0]["blocks"][0]) != []
 
-    def test_tool_use_block_breakpoint_is_destroyed(self):
-        """History up to a tool call is re-billed uncached: the block is rebuilt as ``tool_calls``."""
-        assert cb.find_breakpoints(self._translate("tool_use")) == []
+    def test_tool_use_block_breakpoint_is_carried_on_the_index_keyed_carriage(self):
+        """A ``tool_use`` block's ``cache_control`` rides the index-keyed assistant carriage.
 
-    def test_tool_result_block_breakpoint_is_destroyed(self):
-        """History up to a tool result (Claude Code's usual last breakpoint) is re-billed uncached."""
-        assert cb.find_breakpoints(self._translate("tool_result")) == []
+        The index is the position in the CC ``tool_calls`` list — the same
+        keying KBR-296 chose for the M9 rebuilder, so hop 1 and the M9
+        fallback feed the identical restore.
+        """
+        result = self._translate("tool_use")
+        assistant = next(m for m in result["messages"] if m.get("role") == "assistant")
 
-    def test_top_level_automatic_caching_breakpoint_is_destroyed(self):
-        """Automatic caching is switched off entirely: the top-level breakpoint appears nowhere in the output."""
-        assert cb.find_breakpoints(self._translate("top_level")) == []
+        assert assistant.get("_tool_call_cache_controls") == {0: cb.BREAKPOINT}
+
+    def test_tool_result_block_breakpoint_is_carried_on_the_tool_message(self):
+        """A tool_result block's ``cache_control`` rides the message-level carriage to the rebuilt tool_result block.
+
+        ``AnthropicAdapter._tool_result_block`` reads the message-level
+        ``_cache_control`` and attaches it to the Anthropic ``tool_result``
+        block it builds — KBR-296's restore, fed here. Marker value flows
+        verbatim (the writer's `TTL` is the discriminating half).
+        """
+        result = self._translate("tool_result")
+        tool_messages = [m for m in result["messages"] if m.get("role") == "tool"]
+
+        assert len(tool_messages) == 1
+        assert tool_messages[0].get("_cache_control") == cb.BREAKPOINT
+
+    def test_top_level_automatic_caching_breakpoint_is_carried_on_the_internal_key(self):
+        """Automatic caching rides the internal ``_cache_control`` carriage; the Anthropic adapter restores it verbatim.
+
+        The marker travels on the KBR-296 underscore-prefixed carriage:
+        ``AnthropicAdapter.translate_to_upstream`` reads it and restores it
+        onto the rebuilt Anthropic body's top-level ``cache_control`` slot,
+        so a CC-dialect upstream that honours Anthropic's automatic-caching
+        form re-bills the agent's stable prefix at the cached rate on
+        every turn (KBR-308). The P1 internal-key strip keeps the
+        carriage off every wire that does not consume it.
+        """
+        result = self._translate("top_level")
+
+        assert result.get("_cache_control") == cb.BREAKPOINT
 
     def test_top_level_cache_control_is_not_a_re_emitted_key(self):
-        """Automatic caching is switched off entirely: ``cache_control`` is not among the keys re-emitted.
+        """Automatic caching rides the underscored ``_cache_control`` carriage; the plain key is not re-emitted.
 
-        The ticket asks for this key-set form explicitly; the case above is
-        strictly stronger, since it searches the whole body.
+        The translator never emits the plain key on the outbound CC body — it
+        sits on the internal carriage only, and the Anthropic adapter's
+        restore layer is what copies it onto the Anthropic wire. This is
+        the key-set shape requested explicitly; the carriage-drill-in test
+        above is the strong claim and this is the regression net.
         """
         result = self._translate("top_level")
 
