@@ -31,7 +31,7 @@ Their division of labour is the thing to hold when reviewing a change here:
   baseline (KBR-272, `TEST_SUITE.md` §8). `workflow_dispatch` with a scope-group
   input — a single `mutmut run` on `ubuntu-latest` that uploads the `mutants/`
   tree as an artifact. It is **not** a gate: nothing here calls it; the nightly
-  schedule and per-group thresholds are KBR-91's scope. Its 180-minute cap is
+  schedule and per-group thresholds are KBR-91's scope. Its 300-minute cap is
   sized against KBR-266's recorded numbers in the workflow's own comment.
   Adding it to `ci-required`'s `needs:` would make every pull request wait on a
   mutation run — flag such a move.

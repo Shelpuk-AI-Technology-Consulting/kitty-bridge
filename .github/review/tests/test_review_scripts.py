@@ -168,7 +168,7 @@ EXPECTED_JOBS = {
     ("tmux-disconnect.yml", "live"),
     # The mutation re-measure tool (KBR-272, TEST_SUITE.md §8): a manual,
     # dispatch-triggered `mutmut run` for one scope group, deliberately NOT a
-    # merge gate. Its 180-minute cap is sized in the workflow's own comment.
+    # merge gate. Its 300-minute cap is sized in the workflow's own comment.
     ("mutation-remeasure.yml", "remeasure"),
 }
 

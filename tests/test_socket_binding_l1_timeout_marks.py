@@ -63,6 +63,13 @@ def module_level_timeout(tree: ast.Module) -> tuple[int, int] | None:
         a per-test ``@pytest.mark.timeout`` decorator does not bound the
         hang-prone fixtures and teardowns this registry exists to bound.
     """
+    # Python semantics: when a module assigns `pytestmark` more than once,
+    # the LAST assignment wins -- so the helper tracks the latest match
+    # and returns only after the whole module is walked (reviewer
+    # finding, KBR-272 round 6). A single-assignment module -- the
+    # convention everywhere this registry applies -- behaves identically
+    # under either reading.
+    latest: tuple[int, int] | None = None
     for node in tree.body:
         if not isinstance(node, ast.Assign):
             continue
@@ -89,8 +96,8 @@ def module_level_timeout(tree: ast.Module) -> tuple[int, int] | None:
                 and isinstance(value.args[0], ast.Constant)
                 and isinstance(value.args[0].value, int)
             ):
-                return value.args[0].value, node.lineno
-    return None
+                latest = value.args[0].value, node.lineno
+    return latest
 
 
 @pytest.mark.parametrize("module_path", SOCKET_BINDING_L1_MODULES)
