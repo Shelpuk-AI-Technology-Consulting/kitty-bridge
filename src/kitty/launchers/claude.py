@@ -225,6 +225,7 @@ _SETTINGS_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "CLAUDE_CODE_TMPDIR",
     "ENABLE_CLAUDEAI_MCP_SERVERS",
 )
 
@@ -295,6 +296,7 @@ class ClaudeAdapter(LauncherAdapter):
             "ANTHROPIC_DEFAULT_OPUS_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": profile.model,
+            "CLAUDE_CODE_TMPDIR": tempfile.gettempdir(),
             "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         }
         if context_tokens is not None and context_tokens > 0:

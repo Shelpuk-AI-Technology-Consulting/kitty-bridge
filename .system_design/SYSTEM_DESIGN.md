@@ -150,7 +150,11 @@ shell ─► kitty.cli.main.main
   `--settings <tmpfile>` flag whose `env` block repeats them. The env block also carries
   `ENABLE_CLAUDEAI_MCP_SERVERS=false` (KBR-245): Claude Code's documented per-session
   opt-out from claude.ai MCP connectors, which suppresses the banner Claude Code prints when
-  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` shadow the user's claude.ai OAuth login.
+  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` shadow the user's claude.ai OAuth login, and
+  `CLAUDE_CODE_TMPDIR=tempfile.gettempdir()` (KBR-314): Claude Code's documented override for its
+  internal temp dir; without it Claude Code's cross-session messaging daemon falls back to `/` as
+  its socket dir, which fails its ownership check on boxes where `/` is neither user- nor root-owned
+  and surfaces a remediation hint at every launch.
 
 ### 2.1 Launcher lifecycle and crash recovery (KBR-93, KBR-268)
 
