@@ -837,6 +837,14 @@ def _read_one_message(
 ) -> c.Turn:
     """Read one ``user``, ``assistant`` or ``tool`` message into a turn.
 
+    ``assistant`` messages also recognise ``reasoning_content`` as a
+    ``Thinking`` part (empty string included — the absence-is-observable
+    rule the reply direction applies; P8's ``_inject_empty_reasoning_content``
+    writes ``""`` on every assistant message once thinking is active);
+    explicit ``null`` is consumed as absent (the ``parallel_tool_calls``
+    precedent at lines 638-654); a non-string value keeps the fail-closed
+    posture the unmodelled ``audio``/``function_call`` keys take.
+
     Args:
         message: The message object.
         index: The message's position, for residual keys.
@@ -903,8 +911,18 @@ def _read_one_message(
         # residualises on evidence, not in anticipation.
         reasoning_content = message.get("reasoning_content")
         mapped = {"role", "content", "tool_calls", "name", "refusal"}
-        if isinstance(reasoning_content, str):
+        # Three-way shape match: a string (incl. ``""`` — P8's exact
+        # injection shape) projects a ``Thinking`` part and is consumed;
+        # an explicit ``None`` is consumed as absent (the
+        # ``parallel_tool_calls`` precedent, lines 638-654: the key is
+        # present in the body but the value is null, and the reader
+        # names the intent to omit rather than inventing a part); a
+        # non-string, non-None value is not consumed, so the residual
+        # names the malformed shape (``audio``/``function_call``
+        # posture) and ``verify_total`` fails the run.
+        if reasoning_content is None or isinstance(reasoning_content, str):
             mapped.add("reasoning_content")
+        if isinstance(reasoning_content, str):
             parts.append(c.Thinking(text=reasoning_content))
 
         _residualise(

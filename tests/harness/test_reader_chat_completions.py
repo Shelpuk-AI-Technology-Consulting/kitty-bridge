@@ -973,6 +973,33 @@ class TestMessages:
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
 
+    def test_an_assistant_reasoning_content_null_is_consumed_as_absent(self) -> None:
+        """KBR-310 — ``reasoning_content: null`` is consumed, not residualised.
+
+        The ``parallel_tool_calls`` precedent at lines 638-654 — an
+        explicit ``None`` is present in the body, the reader treats it as
+        the intent to omit, the key is consumed for totality so the
+        run names no part. The reply direction's ``reasoning_content``
+        handler is the sibling precedent on the same field.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "hi",
+                        "reasoning_content": None,
+                    }
+                ],
+            }
+        )
+
+        assistant_turn = projected.conversation.turns[0]
+        assert [type(p) for p in assistant_turn.parts] == [c.Text]
+        assert projected.residual == {}
+        c.verify_total(projected)
+
     def test_a_cache_control_on_an_undecodable_image_residualises(self) -> None:
         """R6.3b — the image's ``cache_control`` survives the decode failure.
 

@@ -52,10 +52,12 @@ carries, mirroring the reply direction's established posture.
   .reasoning_content`, `verify_total` raises. The slot is assistant-only
   (P8 injects here; published request shapes place the field on assistant
   messages; a `user`/`tool`-turn carrier residualises on evidence).
-- **`tests/harness/test_reader_chat_completions.py`** — four TDD tests
-  (R1a-R1d): with-text, empty (P8's exact injection), non-string
-  residualise, user-turn residualise. R1a/R1b were RED before the fix;
-  R1c/R1d were already GREEN under the fail-closed posture.
+- **`tests/harness/test_reader_chat_completions.py`** — six TDD tests
+  (R1a–R1f): with-text, empty (P8's exact injection), non-string
+  residualise, user-turn residualise, tool-turn residualise, and
+  explicit-null consumed as absent (the `parallel_tool_calls` precedent
+  at lines 638-654). R1a/R1b were RED before the fix; R1c–R1f were
+  already GREEN under the fail-closed posture.
 - **`tests/corpus/tool_use_and_tool_result.json`** — `triggers_met` gains
   `"thinking_signalled_or_inferred"`. Body file untouched (byte-identical;
   `body_sha256` unchanged). The agent's `thinking: {"type": "adaptive"}` is
