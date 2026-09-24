@@ -86,20 +86,15 @@ _WRONG_ROUTE_PATH = "/_intentionally_wrong_path_for_falsification"
 #:
 #: Populated from the corrected `.scratch/probe_corpus.py` pass on `origin/main`
 #: (2026-09-23). See `REQUIREMENTS.md` §3 F3 and §3 F4 for the per-row rationale.
+#:
+#: KBR-309 removed `plain_turn` and `effort_configured`: both entries now pass the
+#: oracle with their full claimed-delta tuple pinned by
+#: :data:`_EXPECTED_CLAIMED_DELTAS` below. The four deltas they used to drop —
+#: `envelope.extra[context_management]`, `envelope.extra[metadata]`,
+#: `conversation.turns[0].parts[0].text`, `conversation.turns[0].parts[1]` — are
+#: claimed by M27, M26 (activated by `Trigger.ALWAYS` in `_triggers_met`),
+#: M28's text anchor, and M28's bare-part anchor respectively.
 _CORPUS_SKIP_TABLE: dict[str, str] = {
-    # F3.a + F3.b + two new findings: the CC adapter drops context_management and
-    # metadata on the Messages-→-CC translation; the user turn's second part and
-    # text are also dropped. No register row covers any of these on the CC adapter.
-    "plain_turn": (
-        "F3.a envelope.extra[context_management] + F3.b envelope.extra[metadata] + "
-        "conversation.turns[0].parts[0].text + conversation.turns[0].parts[1] "
-        "unclaimed on CC adapter; new findings, KBR-54 scope addition"
-    ),
-    "effort_configured": (
-        "F3.a envelope.extra[context_management] + F3.b envelope.extra[metadata] + "
-        "conversation.turns[0].parts[0].text + conversation.turns[0].parts[1] "
-        "unclaimed on CC adapter; new findings, KBR-54 scope addition"
-    ),
     # F3.d: the CC adapter drops the tool_result turn on a Messages body carrying a
     # 50 000-char tool_result (both under- and over-limit entries). Likely a pairing-
     # validation drop (M7 territory) but the trigger and claim are not in the register.
@@ -188,6 +183,43 @@ _EXPECTED_DELTAS: dict[str, tuple[str, ...]] = {
 }
 
 
+#: Per-entry expected claimed-delta tuple — KBR-309. Entries whose bodies carry
+#: Claude Code control fields (`output_config`, `thinking`, `context_management`,
+#: `metadata`, multi-part user turns, multiple system blocks) project those fields
+#: as deltas on the CC wire; the register rows P5b/P5d/P5f/M26/M30 claim
+#: them. This dict pins the exact set so a future drift — a new unclaimed field,
+#: a claim withdrawn, a delta appearing or vanishing — fails the slice loudly
+#: instead of passing silently. The walk order matches `_structural_diff`'s
+#: traversal (envelope → envelope.extra → conversation.system → conversation.turns).
+#:
+#: `plain_turn` and `effort_configured` produce the same ten-delta tuple: both
+#: bodies carry `model: "MiniMax-M3"` and the harness profile resolves to
+#: `"harness-model"`, so the model lands as a delta on both. The captured body's
+#: `MiniMax-M3`-shaped normalisation keeps them identical.
+_EXPECTED_CLAIMED_DELTAS: dict[str, tuple[str, ...]] = {
+    "plain_turn": (
+        "envelope.model",
+        "envelope.extra[context_management]",  # M30 (renamed from M27)
+        "envelope.extra[metadata]",            # M26 (activated by Trigger.ALWAYS)
+        "envelope.extra[output_config]",      # P5f
+        "envelope.extra[thinking]",           # P5d
+        "conversation.system[0].text",        # P5b
+        "conversation.system[1]",             # P5b
+        "conversation.system[2]",             # P5b
+    ),
+    "effort_configured": (  # same shape as plain_turn (8 deltas, same walk order)
+        "envelope.model",
+        "envelope.extra[context_management]",
+        "envelope.extra[metadata]",
+        "envelope.extra[output_config]",
+        "envelope.extra[thinking]",
+        "conversation.system[0].text",
+        "conversation.system[1]",
+        "conversation.system[2]",
+    ),
+}
+
+
 def _size_ordered_am_entries() -> list:
     """Return the inbound-Anthropic-Messages corpus entries, size-ordered.
 
@@ -258,9 +290,14 @@ def _triggers_met(entry) -> frozenset[r.Trigger]:
 
     Combines the entry's declared `triggers_met` (REQUEST-only triggers; the corpus
     loader refuses non-REQUEST triggers in both lists per KBR-186's classification)
-    with the route's `NON_NATIVE_UPSTREAM_WIRE` trigger and the profile's
+    with the route's `NON_NATIVE_UPSTREAM_WIRE` trigger, the profile's
     `PROFILE_SETS_MODEL` trigger (both declared at the call site per the corpus
-    README's PROFILE-decided-trigger rule, line 122). For entries whose body
+    README's PROFILE-decided-trigger rule, line 122), and `Trigger.ALWAYS` — the
+    KBR-307 precedent (`test_oracle_driven.py` includes it at its driven-slice
+    call site); `_claim_matching` keeps only rows whose trigger is in the set,
+    so the unconditional rows M14 and M26 stay inert without it (KBR-309: M26
+    is the row that now claims the previously-unclaimed `metadata` delta).
+    For entries whose body
     exceeds the default profile's derived budget, `OVER_COMPACTION_BUDGET` is added
     — M5's trigger is PROFILE-decided and declared at the call site that resolves
     the profile (corpus README, "Triggers have three states").
@@ -274,6 +311,7 @@ def _triggers_met(entry) -> frozenset[r.Trigger]:
     triggers = entry.triggers_met | {
         r.Trigger.NON_NATIVE_UPSTREAM_WIRE,
         r.Trigger.PROFILE_SETS_MODEL,
+        r.Trigger.ALWAYS,
     }
     # The bridge measures the CC-converted messages (`_safe_size` inside
     # `_compact_messages`), which differs from the committed Anthropic shape by a
@@ -482,6 +520,20 @@ class TestCorpusDrivenDefaultSlice:
                     f"empirical baseline 383 on 2026-09-23, threshold halved for "
                     f"margin against profile-driven variation while still catching "
                     f"the M5-stopped-firing regression); got {len(report.deltas)}"
+                )
+            elif entry.id in _EXPECTED_CLAIMED_DELTAS:
+                # KBR-309 — entries whose bodies carry Claude Code control fields
+                # produce claimed-delta tuples the register rows cover. The dict
+                # pins the exact set so a future drift (a new unclaimed field, a
+                # claim withdrawn, a delta appearing or vanishing) fails loudly
+                # instead of passing silently. Adding/removing register rows
+                # changes the tuple, so a row edit goes through this test on its
+                # way to merge.
+                expected = _EXPECTED_CLAIMED_DELTAS[entry.id]
+                assert report.deltas == expected, (
+                    f"{entry.id!r}: expected {expected!r}; got {report.deltas!r}. "
+                    f"If a register row was added or removed, update "
+                    f"_EXPECTED_CLAIMED_DELTAS to match."
                 )
             else:
                 # Per-entry expected deltas (KBR-55): two entries carry REQUEST
