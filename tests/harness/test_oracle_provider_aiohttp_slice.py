@@ -641,11 +641,13 @@ class TestOAuthLoginLegThroughTheSlice:
         """Drive the bridge, then the login leg; both captures arrive, teardown is clean.
 
         The bridge's capture must land at the adapter's endpoint; the leg's at
-        `OAUTH_TOKEN_SUFFIX`, form-encoded with the login grant type; the
-        transport's teardown check must pass over both — a token grant is
+        `OAUTH_TOKEN_SUFFIX`, form-encoded with the login grant type; and the
+        fixture's clean-path teardown (`__aexit__`'s
+        `assert_teardown_clean`) must pass over both — a token grant is
         answered before any format lookup and must not be reported as a
-        fallback (the carve-out `test_provider_aiohttp.py` pins; asserting it
-        here proves the shared-recorder drive did not break it).
+        fallback (the carve-out `test_provider_aiohttp.py` pins; the
+        shared-recorder drive reaching teardown clean is the proof it did
+        not break here).
         """
         subject = transport("provider_aiohttp", WireFormat.OLLAMA_CHAT)
         async with BridgeFixture(subject) as fixture:
@@ -688,7 +690,11 @@ class TestOAuthLoginLegThroughTheSlice:
             f"got {oauth_capture.body.decode()[:120]!r}"
         )
 
-        # The carve-out: the teardown check passes over both captures — the
-        # OAuth endpoint is outside the declared-format claim by name, and a
-        # shared-recorder drive must not have turned it into a fallback hit.
-        subject.assert_teardown_clean()
+        # The carve-out: the OAuth endpoint is outside the declared-format
+        # claim by name, and a shared-recorder drive must not turn it into
+        # a fallback hit. `BridgeFixture.__aexit__` runs the same check on
+        # the clean path (tests/harness/bridge.py:825), so reaching the
+        # post-block `assert [c.path ...]` line with the expected order is
+        # the load-bearing proof — a second teardown pass would be the
+        # unfalsifiable repeat §7.5.4 removed (and `provider_aiohttp.py`'s
+        # own docstring records).

@@ -93,10 +93,8 @@ docstring's bullet count, the guard test renamed to
 `test_registry_has_exactly_seventeen_entries` (count pin 17), the pyproject
 mutmut `--ignore` row in registry order, and the §8.2 bullet (T-D6's as the
 template) plus the §8.2 opening sentence's module count (Sixteen →
-Seventeen — the count the new entry makes stale). The pre-existing drift
-inside §8.2's enumeration sentence ("in thirteen bullets … seventeen in
-all" vs the live 16-bullet/17-entry arithmetic) is **not** this PR's to fix
-(surgical-changes rule) — recorded for a follow-up docs ticket.
+Seventeen) and three numbers in the §8.2 enumeration sentence — the new
+entry makes each stale; the sentence was internally consistent before.
 
 ## Status
 
