@@ -63,6 +63,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from harness import oracle
 from harness import register as r
 from harness.botocore import BotocoreTransport  # noqa: F401  -- registers the "botocore" transport
@@ -74,6 +76,9 @@ from harness.bridge import (
     transport,
 )
 from harness.contract import CapturedRequest, WireFormat
+
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
 
 #: The marker the oracle should find verbatim in the upstream body. A short
 #: string survives every layer of JSON encoding without quoting artifacts.

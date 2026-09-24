@@ -4967,8 +4967,9 @@ addition guessing which set it joins. T-W9 joins the **bulleted** set, not the p
   plain `LOCALAPPDATA` does not redirect Windows. A child reports where kitty will look, and the
   fixture refuses before writing anything unless that is the temporary directory. Its three cases
   take **~6.5 seconds** on Linux, measured. They passed unskipped on the Windows and macOS legs of
-  the first PR run (2026-09-13, run 34766656090), but the gate prints no per-test durations, so those
-  legs have a result and no figure yet. One cost to know about: a bridge that misses the 5 s window fails the case
+  the first PR run (2026-09-13, run 34766656090), which printed no per-test durations — the gate
+  gained `--durations=25` with KBR-272, so every leg now reports its slowest tests and that figure
+  can be filled in from any recent run. One cost to know about: a bridge that misses the 5 s window fails the case
   with *"did not report ready"* rather than slowing it, so a slow runner shows up as a red leg,
   never as a quiet delay.
 - **KBR-272 (egress + CONNECT proxy, T-W5):** `tests/test_egress_https_proxy.py` performs real
@@ -5065,6 +5066,13 @@ The arrangement, made explicit:
   scheduled nightly caller of the same reusable workflow gives early warning; it does not
   substitute for the release call, because a nightly result belongs to a different commit.
 - Nightly Deep, Agent-live and Eval workflows stand alone and gate nothing.
+- `mutation-remeasure.yml` — **manual tool**, not a gate (KBR-272). `workflow_dispatch` with a
+  scope-group input; runs `mutmut run` for that one group on a GitHub-hosted runner — the
+  idle-workstation guarantee the mutation baseline's recording needs (the shared dev workstation
+  is contended by sibling sessions, which is what hung KBR-266's run) — and uploads the `mutants/`
+  tree as an artifact for the recorded baseline. It invokes no pytest directly, so it claims no
+  layer. The nightly schedule and the per-group thresholds remain T-H3's (KBR-91) scope; this
+  file is the tool that job extends, not a second definition of it.
 
 That keeps the property the existing setup gets right — a release runs exactly the checks a PR
 ran, from one definition — while extending it to the one gate that runs only at release time.

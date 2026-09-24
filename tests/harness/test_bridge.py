@@ -6,7 +6,8 @@
 The deliberate defects this module's subject must catch live in
 ``test_bridge_falsification.py``; what is here is the fixture's own behaviour.
 
-**Layer.** No ``pytestmark``, so these take the ``l1`` path default, following
+**Layer.** The only ``pytestmark`` is the KBR-272 timeout bound (below); no
+layer marker, so these take the ``l1`` path default, following
 T-W4 and T-W5. The reason is §8.2's and only §8.2's: a test may not be moved to
 ``l3`` before the Subsystem job exists, and CI runs ``-m "l1 or l2"``, so an
 ``l3`` marker today would leave the fixture's own correctness checked by no job
@@ -58,6 +59,8 @@ from kitty.providers.base import ProviderAdapter
 from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
 from kitty.providers.vertex import VertexAIAdapter
 
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
 
 def _curl_cffi_setup(certs, tmp_path: Path) -> tuple[dict[str, Any], str]:
     """Return the curl_cffi transport's kwargs and OAuth key.

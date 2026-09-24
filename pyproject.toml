@@ -82,6 +82,12 @@ dev = [
     # Schemathesis drives the OpenAPI conformance run (T-G6 / KBR-82).
     # v4 supports OpenAPI 3.1 natively; <5 keeps a major bump a decision.
     "schemathesis>=4.9,<5",
+    # pytest-timeout bounds the socket-binding L1 modules (KBR-272): the
+    # per-test `timeout` marks fail a hung test instead of stalling mutmut's
+    # clean-test phase (and KBR-91's future nightly) indefinitely. Floor 2.3
+    # is the current major's session-timeout line; <3 keeps a major bump a
+    # decision.
+    "pytest-timeout>=2.3,<3",
     # tomllib landed in 3.11; tests/test_mutmut_scope.py and
     # tests/test_socket_binding_l1_mutation_exclusion.py read
     # pyproject.toml's [tool.mutmut] on every supported interpreter.
@@ -112,6 +118,12 @@ markers = [
     "agent_live: a real agent binary against live provider credentials",
     "eval: answer-quality evaluation -- nondeterministic, alerts and never gates",
     "load: load and endurance runs",
+    # KBR-272. Applied by `tests/test_socket_binding_l1_timeout_marks.py`'s
+    # registry to the socket-binding L1 modules TEST_SUITE.md section 8.2
+    # enumerates. POSIX runs the signal method: the test fails, the run
+    # continues. Windows/macOS fall back to the thread method, which
+    # terminates the process -- a hang signal, not a tuning signal.
+    "timeout: per-test wall-clock cap (pytest-timeout); bounds a hung test",
 ]
 
 # IMPORTANT: `-m` here is a DEFAULT, not a policy: a command-line `-m` replaces it
@@ -443,4 +455,13 @@ only_mutate = [
     "src/kitty/profiles/*",
     "src/kitty/validation.py",
 ]
+# `openapi` rides along for the same reason as `scripts`: inside the
+# generated tree, `tests/test_openapi_conformance.py` resolves its
+# schema relative to the test file (`mutants/openapi/kitty-bridge.yaml`),
+# and a missing file is a collection error that kills the clean-test
+# phase before it starts (found by the first CI-hosted mutmut run,
+# KBR-272; the entry itself landed on both main and this branch, which
+# is why the merge kept one copy of it). Directory form: mutmut 3.8.0's
+# file branch does not create the destination's parent directory; the
+# directory branch does.
 also_copy = ["README.md", "scripts", "openapi"]
