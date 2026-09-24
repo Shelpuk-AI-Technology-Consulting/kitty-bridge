@@ -86,8 +86,8 @@ oracle-driven shape requires:
 - **One slice file, seven tests, one helper.** The test file is
   `tests/harness/test_oracle_curl_cffi.py` — three driven happy-path
   cases (CC origin, Responses origin, routing) and four falsification
-  cases (P13 override, P17 override, §3.3.3, routing). One
-  `_run_through_curl_cffi(...)` helper deduplicates the
+  cases (P25 override, P17 override, §3.3.3, routing). One
+  `_post_one(...)` helper deduplicates the
   fixture/post/capture pattern across all seven (the reviewer's
   MUST-FIX-10 finding: the "single call site" premise was wrong, and
   seven repetitions of the same setup is the kind of drift T-W9's

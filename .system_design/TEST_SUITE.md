@@ -143,7 +143,7 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Twenty-five request-path rows — the original fourteen (M1–M11, M15, M16 and M17), two
+Twenty-eight request-path rows — the original fourteen (M1–M11, M15, M16 and M17), two
 id-synthesis rows added by KBR-195 (M18, M19), six KBR-194 Gemini-side slot drops on
 the Gemini inbound route (M20–M25), KBR-184's M26 (the Anthropic-family `metadata`
 drop, G31), and KBR-271's M9a and M9b (the M9 fallback converter's cache-breakpoint drops,
@@ -507,7 +507,7 @@ written when the body forces nothing), G34 (`disable_parallel_tool_use: false` o
 (a legal `tool_choice` omitted where carrying it would create a failure), G37 (the Anthropic
 family dropping a Chat Completions request's breakpoints), G38 (a top-level `cache_control`
 dropped on the translated route) and G43 (the M9 fallback converter's breakpoint drops —
-KBR-271). **None of the thirteen was found by a guard** (the thirteenth, G27, is KBR-149's `reasoning` injection) — the earlier ones by walking the
+KBR-271). **None of the thirteen was found by a guard** (the thirteenth, G27, is KBR-185's allowlisted-but-falsy drop — row P25, closed 2026-09-14) — the earlier ones by walking the
 subscription request path by hand, G28-G30 by the design and code reviews of
 KBR-178, G31-G35 by writing and reviewing KBR-214's requirements, G37 and G38 by probing inputs for
 KBR-199 and its design review, and G43 by KBR-200's CB-3 suite pinning the M9 fallback's wire
@@ -4172,6 +4172,13 @@ scope-addition comment for the owner to ticket:
   CC adapter from a Messages body carrying a ~50 000-char ``tool_result`` — both the
   under- and over-limit entries. Likely M7 pairing-validation territory; the trigger
   and claim are not in the register.
+- **F3.e (KBR-55)** — ``conversation.tools[<name>].type`` (the Anthropic-defined tool
+  discriminator) is dropped on the CC adapter from a Messages body carrying an
+  Anthropic-defined typed tool (e.g. ``web_search_20250305``); the CC builder writes
+  ``{name, description, parameters}`` only and the CC reader has no ``type`` slot.
+  Surfaced by KBR-55 / T-D5's ``p35_tool_choice_omitted_forcing_anthropic_tool_trigger``
+  entry driving the T-D4 judge; the entry joins the skip table on KBR-55 and the
+  register row is a sibling ticket.
 
 Two more entries are excluded for **framing**, not fidelity: ``tools_declared`` carries
 a ``role: "system"`` inside ``messages`` (forbidden by the Messages format — the

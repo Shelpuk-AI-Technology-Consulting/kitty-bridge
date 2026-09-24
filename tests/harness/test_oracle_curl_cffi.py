@@ -368,7 +368,7 @@ class TestCurlCffiOracleSlice:
             captured=captured,
             captured_format=WireFormat.OPENAI_RESPONSES,
             register=r.REGISTER,
-            triggers_met=frozenset(_CC_ORIGIN_TRIGGERS | _ROUTE_TRIGGERS),
+            triggers_met=_CC_ORIGIN_TRIGGERS | _ROUTE_TRIGGERS,
             expected_route=expected,
         )
 
@@ -412,7 +412,7 @@ class TestCurlCffiOracleSlice:
                 captured=rerouted,
                 captured_format=WireFormat.OPENAI_RESPONSES,
                 register=r.REGISTER,
-                triggers_met=frozenset(_CC_ORIGIN_TRIGGERS | _ROUTE_TRIGGERS),
+                triggers_met=_CC_ORIGIN_TRIGGERS | _ROUTE_TRIGGERS,
                 expected_route=expected,
             )
 
