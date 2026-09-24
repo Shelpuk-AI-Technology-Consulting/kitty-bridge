@@ -186,7 +186,7 @@ _EXPECTED_DELTAS: dict[str, tuple[str, ...]] = {
 #: Per-entry expected claimed-delta tuple — KBR-309. Entries whose bodies carry
 #: Claude Code control fields (`output_config`, `thinking`, `context_management`,
 #: `metadata`, multi-part user turns, multiple system blocks) project those fields
-#: as deltas on the CC wire; the register rows P5b/P5d/P5f/M26/M30/M31 claim
+#: as deltas on the CC wire; the register rows P5b/P5d/P5f/M26/M30 claim
 #: them. This dict pins the exact set so a future drift — a new unclaimed field,
 #: a claim withdrawn, a delta appearing or vanishing — fails the slice loudly
 #: instead of passing silently. The walk order matches `_structural_diff`'s

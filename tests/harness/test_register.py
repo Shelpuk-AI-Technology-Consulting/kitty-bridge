@@ -96,14 +96,6 @@ _SHAPES: tuple[tuple[str, str], ...] = (
         c.part_path(2, 0, "cache_control"),
     ),
     (c.tool_path(c.WILDCARD, "cache_control"), c.tool_path("Bash", "cache_control")),
-    # M28 (KBR-309) — the join collapses multi-text-part user turns into
-    # one string; the captured body's first text part differs from the
-    # inbound's first text part (``.text`` delta) and every subsequent part
-    # is dropped (the bare anchor above covers the whole-part delta).
-    (
-        c.part_path(c.WILDCARD, c.WILDCARD, "text"),
-        c.part_path(2, 0, "text"),
-    ),
     # KBR-195 — M18's anchor (functionCall id synth on the Gemini route).
     (c.part_path(c.WILDCARD, c.WILDCARD, "id"), c.part_path(2, 0, "id")),
     # KBR-195 — M19's anchor (functionResponse tool_use_id synth).
@@ -137,10 +129,10 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 85 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 84 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """32 bridge-level rows less the withdrawn M13, plus 53 provider-level.
+        """31 bridge-level rows less the withdrawn M13, plus 53 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
@@ -162,16 +154,21 @@ class TestTheRowsThemselves:
         that route). The +3 over the pre-KBR-55 count is KBR-55: M27 (G28
         top_k drop on the translated non-Anthropic routes), M28 (G29 empty
         stop_sequences omission), M29 (G30 string-form stop rewritten into
-        the list form). The +2 over the pre-KBR-309 count is KBR-309's M30
-        (translated-route ``context_management`` drop, beta-gated) and M31
-        (multi-text-part user-turn join collapse) — id-renumbered from
-        KBR-309's first-draft M27/M28 because KBR-55 took those ids on
-        `origin/main` before KBR-309 rebased (the KBR-271 "register-edit
-        companion sites" lesson). All literals are the no-reflow damage
-        test — a future change that drops a row or adds one without updating
-        the guard fails loudly.
+        the list form). The +1 over the pre-KBR-309 count is KBR-309's M30
+        (translated-route ``context_management`` drop, beta-gated) —
+        id-renumbered from KBR-309's first-draft M27 because KBR-55 took
+        that id on `origin/main` before KBR-309 rebased (the KBR-271
+        "register-edit companion sites" lesson). KBR-309's first-draft M28
+        (parts-join claim) was dropped entirely on the rebase: KBR-308
+        already expanded `carry_cache_control=True` to hop 1, closing the
+        join on every cache_control-bearing multi-part turn, and a
+        bare-`parts[*]` claim would mask §3.3.1's "deleted part"
+        falsification case — see `test_oracle_curl_cffi.py`'s
+        `test_inbound_content_survives_while_introduced_is_caught`. All
+        literals are the no-reflow damage test — a future change that
+        drops a row or adds one without updating the guard fails loudly.
         """
-        assert len(r.REGISTER) == 85
+        assert len(r.REGISTER) == 84
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
