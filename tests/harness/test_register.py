@@ -129,10 +129,10 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 80 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 83 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """27 bridge-level rows less the withdrawn M13, plus 53 provider-level.
+        """30 bridge-level rows less the withdrawn M13, plus 53 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
@@ -151,11 +151,14 @@ class TestTheRowsThemselves:
         count is P43, the six KBR-301 sampling keys dropped on the rebuild
         trio (Anthropic family + Bedrock + Ollama Cloud for ``n``; the
         other five carried on Ollama Cloud, the row's claims dormant on
-        that route). All literals are the no-reflow damage test — a future
+        that route). The +3 over the pre-KBR-55 count is KBR-55: M27 (G28
+        top_k drop on the translated non-Anthropic routes), M28 (G29 empty
+        stop_sequences omission), M29 (G30 string-form stop rewritten into
+        the list form). All literals are the no-reflow damage test — a future
         change that drops a row or adds one without updating the guard
         fails loudly.
         """
-        assert len(r.REGISTER) == 80
+        assert len(r.REGISTER) == 83
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -520,11 +523,16 @@ class TestThePathsEachRowTouches:
         invisible to a wire-independent projection for P16's reason.  P36
         (KBR-137) is the eighth: OpenAI Responses is a fifth wire format M2
         does not name, and the per-message / envelope-unwrap renames inside it
-        have no path vocabulary, for the same reason P11/P12 have none.
+        have no path vocabulary, for the same reason P11/P12 have none.  M29
+        (KBR-55 / G30) is the ninth: the ``stop: "END"`` and ``stop: ["END"]``
+        spellings are one Chat Completions request, the rewrite is invisible
+        to a wire-independent projection for M15's exact reason, and the
+        ``not_projectable_reason`` binds T-A2 / KBR-34 to read both forms
+        identically (the same clause M15 binds on T-A3).
         """
         escaped = {row.id for row in r.REGISTER if not row.is_projectable}
 
-        assert escaped == {"M2", "M9", "M15", "P1", "P11", "P12", "P16", "P36"}
+        assert escaped == {"M2", "M9", "M15", "M29", "P1", "P11", "P12", "P16", "P36"}
 
     def test_m15_still_binds_the_reader_its_escape_depends_on(self) -> None:
         """M15's escape is only sound while T-A3 reads both spellings alike.
@@ -536,6 +544,17 @@ class TestThePathsEachRowTouches:
         m15 = next(row for row in r.REGISTER if row.id == "M15")
 
         assert "T-A3" in (m15.not_projectable_reason or "")
+
+    def test_m29_binds_the_reader_its_escape_depends_on(self) -> None:
+        """M29's escape (KBR-55 / G30) is only sound while T-A2 reads both stop spellings alike.
+
+        Same posture as :meth:`test_m15_still_binds_the_reader_its_escape_depends_on`:
+        the binding lives in prose and a reword deletes it in silence, so the
+        one binding token (``T-A2`` / KBR-34) is pinned.
+        """
+        m29 = next(row for row in r.REGISTER if row.id == "M29")
+
+        assert "T-A2" in (m29.not_projectable_reason or "")
 
 
 class TestTheModuleStandsAlone:
@@ -687,6 +706,8 @@ class TestTheTriggerArrangingBy:
             r.Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE: r.ArrangingBy.REQUEST,
             r.Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED: r.ArrangingBy.REQUEST,
             r.Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED: r.ArrangingBy.REQUEST,
+            r.Trigger.ANTHROPIC_TOP_K_PRESENT: r.ArrangingBy.REQUEST,
+            r.Trigger.EMPTY_STOP_SEQUENCES: r.ArrangingBy.REQUEST,
         }
 
         assert set(expected) == set(r.Trigger) - {r.Trigger.ALWAYS}, (

@@ -128,6 +128,27 @@ TC3_ENTRY_IDS = (
     "compaction_budget_over",
 )
 
+#: KBR-55 / T-D5's eight entries: the P34 trigger + complement, the two
+#: P35 trigger shapes + complement, P33's complement (whose trigger
+#: case is T-D6's deliverable, per the P33 row's own comment), and the
+#: M28 trigger + complement (the review round's critical finding: M28
+#: is `conditional=True` per §3.3.2, so its trigger + complement
+#: obligation is not discharged by the P34 / P35 / P33 entries). Each
+#: is synthetic (no captured Claude Code body on the pinned client
+#: ships the trigger construct), with the construction reasons in each
+#: `origin_note`. Defined before :data:`OWNED_ENTRY_IDS` so that
+#: container can splat it during the constant's own evaluation.
+KBR55_TD5_ENTRY_IDS = {
+    "p34_parallel_false_omitted_trigger",
+    "p34_parallel_false_omitted_complement",
+    "p35_tool_choice_omitted_no_tools_trigger",
+    "p35_tool_choice_omitted_forcing_anthropic_tool_trigger",
+    "p35_tool_choice_omitted_complement",
+    "p33_bedrock_auto_tool_choice_complement",
+    "m28_empty_stop_sequences_trigger",
+    "m28_empty_stop_sequences_complement",
+}
+
 #: Every committed entry must be owned by a documented task. `format_example`
 #: is T-W6's worked example and stays (its own origin_note records why).
 #: When a new task adds entries, add its IDs here AND to its wiring/lint
@@ -139,6 +160,7 @@ OWNED_ENTRY_IDS = {
     *TC1_ENTRY_IDS,
     *P25_ENTRY_IDS,
     *TC3_ENTRY_IDS,
+    *KBR55_TD5_ENTRY_IDS,
 }
 
 

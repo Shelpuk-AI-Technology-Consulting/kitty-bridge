@@ -1,0 +1,37 @@
+{
+  "id": "p35_tool_choice_omitted_forcing_anthropic_tool_trigger",
+  "description": "P35 case (2) trigger - Anthropic Messages body carrying a web_search_20250305 (Anthropic-defined) tool with tool_choice forcing it. KBR-214 D10 omits the choice because Anthropic flattens such a forced call into a schema-less function nothing on the route can execute.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). Case (2) of P35 (G35); KBR-214 named this as the row's second case. The Anthropic reader carries ToolDecl.type (KBR-205), making the trigger authorable; no captured body exercises it (Claude Code's WebSearch forces web_search in a separate tool-use payload, not via tool_choice.disable_parallel_tool_use).",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.anthropic.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "p35_tool_choice_omitted_forcing_anthropic_tool_trigger.body",
+  "body_sha256": "97dd6632c47e1ab4f5993e597bdd5131d52bc27593e35052d7d00328c9058c00",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "tool_choice_omitted_as_legal_but_unsupported"
+  ],
+  "triggers_absent": [
+    "anthropic_parallel_false_omitted"
+  ]
+}

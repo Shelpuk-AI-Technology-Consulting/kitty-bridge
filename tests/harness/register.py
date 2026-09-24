@@ -288,6 +288,24 @@ class Trigger(Enum):
         "tool_choice_omitted_as_legal_but_unsupported",
         ArrangingBy.REQUEST,
     )
+    # KBR-55 (G28). Met when the inbound Anthropic body carries ``top_k`` —
+    # the only field Anthropic defines and Chat Completions does not, so
+    # KBR-178 carries it on the internal key ``_top_k`` and only the
+    # Anthropic-family adapters restore it. REQUEST, decided by the inbound
+    # body. Unconditional per §9.2 ("unconditional in P13's sense — fires
+    # wherever the field is present, so it owes no §3.3.2 assertion-2
+    # complement"): the off-state (no ``top_k`` on the inbound) is also the
+    # row-absent state, so no corpus complement can prove anything the
+    # trigger-absent case does not already prove.
+    ANTHROPIC_TOP_K_PRESENT = ("anthropic_top_k_present", ArrangingBy.REQUEST)
+    # KBR-55 (G29). Met when the inbound Anthropic body carries an empty
+    # ``stop_sequences`` list — omitted rather than forwarded, because
+    # ``StopConfiguration`` declares ``minItems: 1`` on Chat Completions and
+    # ``stop: []`` is a schema-invalid body. REQUEST, decided by the inbound
+    # body's value. Conditional: the non-empty case is the complement state —
+    # a non-empty list is carried as-is, so §3.3.2 assertion 2 owes a
+    # corpus entry that proves the omission's absence.
+    EMPTY_STOP_SEQUENCES = ("empty_stop_sequences", ArrangingBy.REQUEST)
 
 
 #: Docstrings on the two adapter-dispatch triggers — the asymmetry is
@@ -505,6 +523,30 @@ _ANTHROPIC_FAMILY: tuple[str, ...] = (
     "minimax_token",
     "zai_coding",
     "opencode_go",
+)
+
+#: The three Anthropic-family adapters that reach
+#: :meth:`MessagesTranslator.translate_request` on the ``/v1/messages``
+#: route and **restore** the agent's ``top_k`` (KBR-178's carry: the
+#: other two, ``custom_anthropic`` and ``zai_coding``, are hardcoded
+#: native and never run the translator). M27's scope is every translated
+#: adapter *minus* these three — **eighteen** adapters (§9.2's count;
+#: the naive arithmetic ``21 − 5`` is wrong because two of
+#: :data:`_ANTHROPIC_FAMILY`'s five are not in
+#: :data:`_TRANSLATED_MESSAGES_ADAPTERS` to begin with).
+_TOP_K_RESTORING_TRANSLATED: tuple[str, ...] = (
+    "anthropic",
+    "minimax_token",
+    "opencode_go",
+)
+
+#: M27 / M28's scope — every adapter whose ``/v1/messages`` route runs
+#: :meth:`MessagesTranslator.translate_request` and whose downstream
+#: adapter does not restore ``_top_k`` (M27) or non-empty ``stop``
+#: (M28). Deliberately **not** ``(ALL_PROVIDERS,)``: the two
+#: hardcoded-native adapters are unreachable by construction.
+_TOP_K_DROPPED_SCOPE: tuple[str, ...] = tuple(
+    key for key in _TRANSLATED_MESSAGES_ADAPTERS if key not in _TOP_K_RESTORING_TRANSLATED
 )
 
 _ALWAYS = Trigger.ALWAYS
@@ -1122,6 +1164,145 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         conditional=False,
         design_ref="§3.2.1 · §3.3.1b · §9.2 G31",
         scope=_TRANSLATED_MESSAGES_ADAPTERS,
+    ),
+    MutationRow(
+        id="M27",
+        # KBR-55 / G28 — ``top_k`` dropped on the non-Anthropic-family
+        # routes. KBR-178's carry mints the agent's value on the internal
+        # ``_top_k`` (translator.py:439-440) and only AnthropicAdapter and
+        # its two Messages-routed delegates — ``minimax_token`` (whose
+        # native flag defaults off) and ``opencode_go`` (Messages models
+        # only) — restore it. The other 18 adapters drop it by design.
+        #
+        # The ``_top_k`` itself rides on ``_INTERNAL_KEYS`` (P1 strips it
+        # before the wire), so the row's *delta* is at
+        # ``conversation.sampling[top_k]``: the Anthropic Messages
+        # reader (``reader_anthropic_messages`` ``_SAMPLING_KEYS`` at
+        # ``reader_anthropic_messages.py:84``) projects ``top_k`` onto
+        # the sampling address and the upstream projection lacks it.
+        # The address is keyed so the bare ``conversation.sampling``
+        # anchor P13 uses on ``openai_subscription``'s CC-origin path
+        # does not over-claim M27 there: the specificity rule in
+        # ``oracle._conditional_violations`` keys on the narrower
+        # anchor, and M27 is unconditional so assertion-2's
+        # attribution never fires on either row.
+        #
+        # Trigger ``ANTHROPIC_TOP_K_PRESENT`` decides it; the field's
+        # *presence* on the inbound is the condition, so
+        # ``ArrangingBy.REQUEST``. Conditional=False per §9.2
+        # ("unconditional in P13's sense — fires wherever the field
+        # is present, so it owes no §3.3.2 assertion-2 complement"):
+        # the off-state (no top_k on the inbound) is also the
+        # row-absent state, so no corpus complement can prove anything
+        # the trigger-absent case does not already prove.
+        #
+        # Scope is computed at module import:
+        # ``_TOP_K_DROPPED_SCOPE = _TRANSLATED_MESSAGES_ADAPTERS
+        # \ {anthropic, minimax_token, opencode_go}`` → **18** adapters
+        # (§9.2's count). The naive arithmetic ``21 − 5`` would land at
+        # 16 because two of :data:`_ANTHROPIC_FAMILY`'s five entries
+        # (``custom_anthropic``, ``zai_coding``) are hardcoded native
+        # and never reach the translator; the ``\`` operator above
+        # already excludes them.
+        site=(
+            "kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",
+        ),
+        trigger=Trigger.ANTHROPIC_TOP_K_PRESENT,
+        paths=(c.sampling_path("top_k"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G28",
+        scope=_TOP_K_DROPPED_SCOPE,
+    ),
+    MutationRow(
+        id="M28",
+        # KBR-55 / G29 — empty ``stop_sequences`` omitted rather than
+        # forwarded. The Messages-→-CC carry's truthy-only guard at
+        # translator.py:431-433 (``if stop_sequences: result["stop"] =
+        # stop_sequences``) skips an empty list deliberately, because
+        # OpenAI's ``StopConfiguration`` declares ``minItems: 1`` and
+        # ``stop: []`` is a schema-invalid Chat Completions body. The
+        # omission is correct and must not be "fixed" by forwarding
+        # ``[]``; the row is a register claim, not a fix.
+        #
+        # The Anthropic Messages reader projects ``stop_sequences``
+        # onto ``conversation.sampling[stop]`` (the
+        # ``stop_sequences → stop`` rename in
+        # ``reader_anthropic_messages.py:85``) with no emptiness guard
+        # (the reader "projects sampling by presence"), so an
+        # empty ``stop_sequences`` projects as
+        # ``conversation.sampling[stop] = []`` while the upstream
+        # projection has no ``stop`` key. That is the row's delta.
+        #
+        # Trigger ``EMPTY_STOP_SEQUENCES`` (new enum member, REQUEST,
+        # ``ArrangingBy.REQUEST``); ``conditional=True`` because the
+        # non-empty value is the complement state — a non-empty list
+        # is carried as-is, so §3.3.2 assertion 2 owes a corpus entry
+        # proving the omission's absence. The trigger case and the
+        # §3.3.2 complement arrive with T-D5 corpus entries.
+        #
+        # Scope mirrors M27: the same 18 adapters. The two
+        # hardcoded-native adapters (``custom_anthropic``,
+        # ``zai_coding``) never run the translator at all, and the
+        # three Anthropic-family adapters whose translator runs do
+        # carry the empty list as the array form (their downstream
+        # needs the array form for their own ingestion).
+        site=(
+            "kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",
+        ),
+        trigger=Trigger.EMPTY_STOP_SEQUENCES,
+        paths=(c.sampling_path("stop"),),
+        conditional=True,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G29",
+        scope=_TOP_K_DROPPED_SCOPE,
+    ),
+    MutationRow(
+        id="M29",
+        # KBR-55 / G30 — string-form ``stop`` rewritten into a list.
+        # ``server._normalize_cc_stop`` (``server.py:1054``) wraps a
+        # Chat Completions ``stop: "END"`` into ``stop: ["END"]`` at
+        # the ``/v1/chat/completions`` ingress before the body forks.
+        # OpenAI declares ``stop`` as ``oneOf`` a string or an array
+        # of one to four strings, and every wire kitty writes downstream
+        # takes only the array form.
+        #
+        # **Both forms project to one ``Conversation``**, so the row
+        # takes §3.3.1a's ``NOT_PROJECTABLE`` escape with M15's exact
+        # posture: a body already in the array form meets the row
+        # with a no-op, so there is no complement state for §3.3.2
+        # assertion 2 to arrange; ``conditional=False``. The
+        # ``not_projectable_reason`` clause also binds T-A2 / KBR-34
+        # — the future Chat Completions reader must read
+        # ``stop: "END"`` and ``stop: ["END"]`` into the identical
+        # ``Request`` (else the row's claim fails on the
+        # indistinguishable projection — same clause M15 carries).
+        #
+        # Scope = ``(ALL_PROVIDERS,)`` because the
+        # ``_normalize_cc_stop`` seam is on the Chat Completions
+        # ingress route, not an adapter — every adapter reachable
+        # through ``/v1/chat/completions`` runs it. KBR-139
+        # reachability of the site.
+        #
+        # §9.2's stale text names "Row **M17**" for this row; that
+        # id was reserved by KBR-232 for the thinking-strip row
+        # (which closed G40 and is the actual M17), so M29 is the
+        # landed id.
+        site=("kitty/bridge/server.py:_normalize_cc_stop",),
+        trigger=_ALWAYS,
+        paths=(c.NOT_PROJECTABLE,),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G30",
+        scope=(ALL_PROVIDERS,),
+        not_projectable_reason=(
+            "OpenAI's ``StopConfiguration`` declares ``stop`` as ``oneOf`` a string or an array "
+            "(G30's prose pin), and the Chat Completions and Anthropic readers both project the "
+            "two forms onto one ``Conversation``: a single user turn with the stop sequence. A "
+            "projection that told the two apart would be reading a vendor's spelling into a "
+            "wire-independent form — the same defect M15 records. This binds T-A2 / KBR-34: it "
+            "must read ``stop: \"END\"`` and ``stop: [\"END\"]`` into the identical ``Request``. "
+            "Naming only one of the two forms would let a reader satisfy this literally and still "
+            "project two equivalent bodies apart, which is the failure the escape is void on. If "
+            "it ever does, M29 needs a projectable anchor."
+        ),
     ),
 )
 

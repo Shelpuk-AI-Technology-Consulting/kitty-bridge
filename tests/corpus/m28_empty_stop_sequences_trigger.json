@@ -1,0 +1,39 @@
+{
+  "id": "m28_empty_stop_sequences_trigger",
+  "description": "M28 (G29) trigger - Anthropic Messages body carrying an empty stop_sequences list; the carry's truthy-only guard at translator.py:431-433 drops it because StopConfiguration.minItems: 1 makes `stop: []` a schema-invalid Chat Completions body.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). KBR-178 / KBR-55 G29 named the empty-list omission as a row but no Claude Code body on the pinned CC 2.1.238 client ships `stop_sequences: []` (the agent either carries a non-empty list or omits the field). The trigger is constructable because the Anthropic reader projects stop_sequences onto `conversation.sampling[stop]` with no emptiness guard, so the empty list is a present-inbound, absent-upstream delta.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.anthropic.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "m28_empty_stop_sequences_trigger.body",
+  "body_sha256": "f3dc57f677624783980be1006d15cb54fd21cac7260d4d95993975c3357960b2",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "empty_stop_sequences"
+  ],
+  "triggers_absent": [
+    "anthropic_parallel_false_omitted",
+    "anthropic_top_k_present",
+    "tool_choice_omitted_as_legal_but_unsupported"
+  ]
+}
