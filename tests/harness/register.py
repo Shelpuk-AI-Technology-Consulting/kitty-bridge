@@ -1347,22 +1347,31 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     MutationRow(
         id="M31",
         # KBR-309: drop the parts-join output on a multi-text-part user
-        # turn. ``build_user_content_message`` collapses multi-text-part
-        # user turns into a joined string by design (KBR-222's byte-identity
-        # decision): every part's text except the last is folded into the
-        # first, and every part after the first is dropped. The captured CC
-        # body carries one text part whose text differs from the inbound's
-        # first text part (``conversation.turns[*].parts[*].text`` delta) and
-        # whose collection is one shorter than the inbound (``conversation.
-        # turns[*].parts[*]`` whole-part drop). ``cache_control`` on the
-        # dropped parts is itself a loss — M16 claims the field-level drop;
-        # M31 claims the part-level collapse that consumes the field.
+        # turn *without* a ``cache_control`` breakpoint. ``build_user_content_message``
+        # collapses multi-text-part user turns into a joined string by
+        # design (KBR-222's byte-identity decision): every part's text except
+        # the last is folded into the first, and every part after the first
+        # is dropped. The captured CC body carries one text part whose text
+        # differs from the inbound's first text part
+        # (``conversation.turns[*].parts[*].text`` delta) and whose collection
+        # is one shorter than the inbound (``conversation.turns[*].parts[*]``
+        # whole-part drop). ``cache_control`` on the dropped parts is itself
+        # a loss — M16 claims the field-level drop; M31 claims the
+        # part-level collapse that consumes the field.
         #
-        # KBR-296 deliberately scoped ``carry_cache_control=True`` to the M9
-        # fallback path only; KBR-258 / KBR-263 closed the cache_control
-        # follow-ups as register rows rather than a ``carry_cache_control``
-        # expansion to hop 1, and KBR-309 closes the join's surface deltas
-        # the same way.
+        # **The join only fires when no part carries a ``cache_control``** —
+        # KBR-308 expanded ``carry_cache_control=True`` from the M9 fallback
+        # (KBR-296) to hop 1, which means a multi-text-part user turn with a
+        # breakpoint on any part keeps the parts as a list and skips the
+        # join entirely (the cache_control rides the CC part with it; M16
+        # claims the field-level path). On the corpus-driven slice's
+        # passing entries (plain_turn, effort_configured) every multi-text-part
+        # user turn already carries a breakpoint, so the join's surface
+        # deltas (``parts[*].text`` and ``parts[*]``) do not surface today.
+        # The row stays live as the register's record of the join's behavior
+        # for future corpus entries — the non-cache_control case is the
+        # KBR-222 / KBR-258 / KBR-263 product position (register rows, not a
+        # ``carry_cache_control`` expansion).
         #
         # ⚠️ The bare ``parts[*]`` anchor would also claim a *deleted* part
         # (§3.3.1's own falsification case — a row claiming the whole

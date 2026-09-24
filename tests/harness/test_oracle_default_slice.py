@@ -186,7 +186,7 @@ _EXPECTED_DELTAS: dict[str, tuple[str, ...]] = {
 #: Per-entry expected claimed-delta tuple — KBR-309. Entries whose bodies carry
 #: Claude Code control fields (`output_config`, `thinking`, `context_management`,
 #: `metadata`, multi-part user turns, multiple system blocks) project those fields
-#: as deltas on the CC wire; the register rows P5b/P5d/P5f/M26/M27/M28 claim
+#: as deltas on the CC wire; the register rows P5b/P5d/P5f/M26/M30/M31 claim
 #: them. This dict pins the exact set so a future drift — a new unclaimed field,
 #: a claim withdrawn, a delta appearing or vanishing — fails the slice loudly
 #: instead of passing silently. The walk order matches `_structural_diff`'s
@@ -199,17 +199,15 @@ _EXPECTED_DELTAS: dict[str, tuple[str, ...]] = {
 _EXPECTED_CLAIMED_DELTAS: dict[str, tuple[str, ...]] = {
     "plain_turn": (
         "envelope.model",
-        "envelope.extra[context_management]",  # M27
+        "envelope.extra[context_management]",  # M30 (renamed from M27)
         "envelope.extra[metadata]",            # M26 (activated by Trigger.ALWAYS)
         "envelope.extra[output_config]",      # P5f
         "envelope.extra[thinking]",           # P5d
         "conversation.system[0].text",        # P5b
         "conversation.system[1]",             # P5b
         "conversation.system[2]",             # P5b
-        "conversation.turns[0].parts[0].text",  # M28 (join)
-        "conversation.turns[0].parts[1]",     # M28 (join)
     ),
-    "effort_configured": (  # same shape as plain_turn (10 deltas, same walk order)
+    "effort_configured": (  # same shape as plain_turn (8 deltas, same walk order)
         "envelope.model",
         "envelope.extra[context_management]",
         "envelope.extra[metadata]",
@@ -218,8 +216,6 @@ _EXPECTED_CLAIMED_DELTAS: dict[str, tuple[str, ...]] = {
         "conversation.system[0].text",
         "conversation.system[1]",
         "conversation.system[2]",
-        "conversation.turns[0].parts[0].text",
-        "conversation.turns[0].parts[1]",
     ),
 }
 

@@ -316,7 +316,10 @@ class TestTheParserReadsTheDesignDocument:
         # after the KBR-55 rebase). The long-standing spot-checks
         # (M14/P20/P21, the KBR-184 KBR-258 KBR-137 KBR-271 families) all
         # still hold.
-        assert {"M14", "P20", "P21", "M26", "P24", "P31", "P32", "M27", "M29", "M30", "M31", "P43"} <= set(parsed.unconditional_ids)
+        assert {
+            "M14", "P20", "P21", "M26", "P24", "P31", "P32",
+            "M27", "M29", "M30", "M31", "P43",
+        } <= set(parsed.unconditional_ids)
 
     def test_a_document_with_no_register_tables_is_an_error_not_an_empty_result(self) -> None:
         """An empty parse is the failure mode §6.2 exists to prevent.
