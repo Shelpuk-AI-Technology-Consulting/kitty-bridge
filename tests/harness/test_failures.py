@@ -263,10 +263,22 @@ class TestErrorStatus:
     """AC-2, AC-3, AC-4 — `error_status` writes the format's native error body."""
 
     def test_an_unsupported_format_raises(self) -> None:
-        """The library supports only the two formats the primary recorder serves."""
-        with pytest.raises(ValueError):
+        """The library serves four formats — KBR-302 widened {GEMINI, OPENAI_RESPONSES} in —
+        and the remaining two (`BEDROCK_CONVERSE`, `OLLAMA_CHAT`) still raise.
+
+        The served set is not the recorder's two-format set since KBR-302:
+        `frames_for` and every builder name the four wire grammars the
+        library's own builders spell. The two formats that carry no inbound
+        route at all (§`InboundProtocol`'s gap) stay out of scope and the
+        served-set `ValueError` is the pin that keeps them out.
+        """
+        with pytest.raises(ValueError, match="bedrock_converse"):
             failures_module.error_status(
-                WireFormat.OPENAI_RESPONSES, 500, error_type="x", message="y"
+                WireFormat.BEDROCK_CONVERSE, 500, error_type="x", message="y"
+            )
+        with pytest.raises(ValueError, match="ollama_chat"):
+            failures_module.error_status(
+                WireFormat.OLLAMA_CHAT, 500, error_type="x", message="y"
             )
 
     async def test_anthropic_messages_writes_the_native_envelope(
@@ -311,6 +323,58 @@ class TestErrorStatus:
         body = json.loads(_body(reply))
         assert body == {
             "error": {"message": "oops", "type": "server_error", "code": "500"},
+        }
+
+    async def test_gemini_writes_the_native_envelope(
+        self, recorder: RecordingUpstream
+    ) -> None:
+        """KBR-302 — the Gemini error envelope carries code/message/status.
+
+        Google's documented error shape (and the bridge's Gemini reader)
+        carries a numeric ``code`` and a string ``status`` — the enum value
+        (``"INVALID_ARGUMENT"`` etc.), not a free-text message, is what
+        ``error_type`` carries for this format.
+        """
+        recorder.responder = failures_module.error_status(
+            WireFormat.GEMINI,
+            400,
+            error_type="INVALID_ARGUMENT",
+            message="prompt too long",
+        )
+        reply = await _exchange(
+            recorder,
+            b"POST /v1beta/models/m:generateContent HTTP/1.1\r\nHost: p\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        status, _ = _status_line(reply)
+        assert status == 400
+        body = json.loads(_body(reply))
+        assert body == {
+            "error": {"code": 400, "message": "prompt too long", "status": "INVALID_ARGUMENT"},
+        }
+
+    async def test_openai_responses_writes_the_native_envelope(
+        self, recorder: RecordingUpstream
+    ) -> None:
+        """KBR-302 — the Responses API's non-streaming error envelope.
+
+        The Responses API's non-streaming errors mirror Chat Completions'
+        ``{"error": {...}}`` triple; ``code`` stays the stringified status.
+        """
+        recorder.responder = failures_module.error_status(
+            WireFormat.OPENAI_RESPONSES,
+            429,
+            error_type="rate_limit_error",
+            message="slow down",
+        )
+        reply = await _exchange(
+            recorder,
+            b"POST /v1/responses HTTP/1.1\r\nHost: p\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        status, _ = _status_line(reply)
+        assert status == 429
+        body = json.loads(_body(reply))
+        assert body == {
+            "error": {"message": "slow down", "type": "rate_limit_error", "code": "429"},
         }
 
 
@@ -495,6 +559,88 @@ class TestEmptyResponse:
                     f"content_block_delta released the preamble hold: {payload!r}"
                 )
 
+    async def test_gemini_streaming_is_a_content_less_completion(
+        self, recorder: RecordingUpstream
+    ) -> None:
+        """KBR-302 — streaming Gemini: role chunk + STOP finish, no text part.
+
+        The Gemini content-less completion is what fires the empty ladder on
+        `_stream_gemini`: the role chunk carries no `text` part, the finish
+        chunk carries `finishReason: "STOP"`. The reader's `has_content` keys
+        on a non-empty `parts[*].text`; its absence is the trigger.
+        """
+        recorder.responder = failures_module.empty_response(
+            WireFormat.GEMINI, stream=True
+        )
+        reply = await _exchange(
+            recorder,
+            b"POST /v1beta/models/m:streamGenerateContent HTTP/1.1\r\nHost: p\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        body = _body(reply)
+        # Two data-only lines: the role chunk and the STOP finish chunk.
+        assert b"data: " in body
+        assert b"event:" not in body  # Gemini is data-only.
+        # No text part anywhere — the bridge's Gemini reader treats this as empty.
+        assert b'"text"' not in body
+        # The finish chunk carries STOP — the terminal reason.
+        assert b'"finishReason": "STOP"' in body
+
+    async def test_openai_responses_streaming_is_a_content_less_completion(
+        self, recorder: RecordingUpstream
+    ) -> None:
+        """KBR-302 — streaming Responses: created + completed, no output_text delta.
+
+        The Responses content-less completion is response.created followed by
+        response.completed — no response.output_text.delta event. The reader's
+        `has_content` keys on the presence of an output_text delta; its absence
+        is the empty-ladder trigger on `_stream_responses`.
+        """
+        recorder.responder = failures_module.empty_response(
+            WireFormat.OPENAI_RESPONSES, stream=True
+        )
+        reply = await _exchange(
+            recorder,
+            b"POST /v1/responses HTTP/1.1\r\nHost: p\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        events = _sse_events(_body(reply))
+        names = [name for name, _ in events]
+        assert names == ["response.created", "response.completed"], names
+        # The completion event carries status=completed — the success terminal.
+        completed = events[-1][1]["response"]
+        assert completed["status"] == "completed"
+        # No output_text delta between the two events — the whole shape is two.
+        text_events = [
+            name for name, _ in events
+            if name in ("response.output_text.delta", "response.output_text.done")
+        ]
+        assert text_events == [], text_events
+
+    def test_gemini_non_streaming_empty_body_is_one_candidate_with_no_parts(self) -> None:
+        """KBR-302 — the Gemini non-streaming empty body (recorder path not used)."""
+        body = failures_module._gemini_empty_success_body()
+        assert body["candidates"][0]["content"]["parts"] == []
+        assert body["candidates"][0]["finishReason"] == "STOP"
+
+    def test_openai_responses_non_streaming_empty_body_is_completed_with_empty_output(self) -> None:
+        """KBR-302 — the Responses non-streaming empty body (recorder path not used)."""
+        body = failures_module._responses_empty_success_body()
+        assert body["status"] == "completed"
+        assert body["output"] == []
+
+    def test_gemini_non_streaming_success_body_carries_text_and_stop(self) -> None:
+        """KBR-302 — the Gemini non-streaming minimal success (recorder path not used)."""
+        body = failures_module._gemini_content_success_body()
+        parts = body["candidates"][0]["content"]["parts"]
+        assert parts == [{"text": "kbr-tb4"}]
+        assert body["candidates"][0]["finishReason"] == "STOP"
+
+    def test_openai_responses_non_streaming_success_body_carries_one_message_output(self) -> None:
+        """KBR-302 — the Responses non-streaming minimal success (recorder path not used)."""
+        body = failures_module._responses_content_success_body()
+        assert body["status"] == "completed"
+        assert body["output"][0]["type"] == "message"
+        assert body["output"][0]["content"][0]["text"] == "kbr-tb4"
+
 
 class TestDropAt:
     """AC-10..14 — `drop_at` writes the frames its injection point names, then aborts."""
@@ -628,6 +774,98 @@ class TestDropAt:
             assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
             assert not has_done
 
+    @pytest.mark.parametrize("point", list(failures_module.InjectionPoint))
+    def test_gemini_frames_match_the_point(
+        self, point: failures_module.InjectionPoint
+    ) -> None:
+        """KBR-302 — `drop_at(GEMINI, ...)` writes in the Gemini grammar.
+
+        The recorder only serves two formats (ANTHROPIC_MESSAGES,
+        CHAT_COMPLETIONS); Gemini bytes can be inspected through the public
+        :func:`frames_for` only — the F10/AC-18 falsification pattern
+        (replay the same writes through a deliberately-broken responder
+        without introspecting the library's closures). Data-only frames
+        (no ``event:`` line), payload key ``candidates``.
+        """
+        frames = failures_module.frames_for(WireFormat.GEMINI, point)
+        payloads = [
+            json.loads(line[len(b"data: "):])
+            for frame in frames
+            for line in frame.split(b"\n\n")
+            if line.startswith(b"data: ")
+        ]
+        for f_bytes in frames:
+            assert b"event:" not in f_bytes, f"an `event:` line reached the Gemini wire: {f_bytes!r}"
+        if point is failures_module.InjectionPoint.BEFORE_FIRST_BYTE:
+            assert frames == ()
+            return
+        assert all("candidates" in p or "error" in p for p in payloads)
+        if point is failures_module.InjectionPoint.AFTER_TEXT:
+            texts = [
+                part["text"]
+                for p in payloads
+                for cand in p.get("candidates", [])
+                for part in cand.get("content", {}).get("parts", [])
+                if "text" in part
+            ]
+            assert texts == ["kbr-tb4"], texts
+            # No finishReason yet — the drop fired before the terminal.
+            assert not any("finishReason" in p["candidates"][0] for p in payloads)
+        elif point is failures_module.InjectionPoint.MID_TOOL_ARGUMENTS:
+            calls = [
+                part["functionCall"]
+                for p in payloads
+                for cand in p.get("candidates", [])
+                for part in cand.get("content", {}).get("parts", [])
+                if "functionCall" in part
+            ]
+            assert calls, "the mid-tool-arguments drop carries no functionCall part"
+            assert calls[0]["args"] == {"arg1": "v"}
+        elif point is failures_module.InjectionPoint.BEFORE_TERMINAL:
+            # The terminal chunk carries STOP — the bridge's truncation reader keys on it.
+            assert any(
+                "finishReason" in cand
+                for p in payloads
+                for cand in p.get("candidates", [])
+            )
+
+    @pytest.mark.parametrize("point", list(failures_module.InjectionPoint))
+    def test_openai_responses_frames_match_the_point(
+        self, point: failures_module.InjectionPoint
+    ) -> None:
+        """KBR-302 — `drop_at(OPENAI_RESPONSES, ...)` writes in the Responses grammar.
+
+        Event-framed SSE with the ``type`` key inside the payload. See the
+        Gemini twin's comment for why the recorder path is not used.
+        """
+        frames = failures_module.frames_for(WireFormat.OPENAI_RESPONSES, point)
+        if point is failures_module.InjectionPoint.BEFORE_FIRST_BYTE:
+            assert frames == ()
+            return
+        events = [
+            (name, data)
+            for frame in frames
+            for name, data in _sse_events(frame)
+        ]
+        names = [name for name, _ in events]
+        assert names[0] == "response.created", names
+        if point is failures_module.InjectionPoint.AFTER_TEXT:
+            assert names == ["response.created", "response.output_text.delta"]
+            assert events[1][1]["delta"] == "kbr-tb4"
+        elif point is failures_module.InjectionPoint.MID_TOOL_ARGUMENTS:
+            assert names == [
+                "response.created",
+                "response.function_call_arguments.delta",
+            ]
+            assert events[1][1]["delta"] == '{"arg1":"v'
+        elif point is failures_module.InjectionPoint.BEFORE_TERMINAL:
+            assert names == [
+                "response.created",
+                "response.output_text.delta",
+                "response.completed",
+            ]
+            assert events[-1][1]["response"]["status"] == "completed"
+
 
 class TestScripted:
     """AC-15 — `scripted(*replies)` dispatches by attempt and fails loudly on overrun."""
@@ -746,6 +984,49 @@ class TestSuccess:
             and p["delta"].get("type") == "text_delta"
         ]
         assert any(t for t in text_deltas)
+
+    async def test_gemini_streaming_success_emits_a_text_delta_then_stop(
+        self, recorder: RecordingUpstream
+    ) -> None:
+        """KBR-302 — the minimal Gemini success stream carries one text delta and STOP.
+
+        `success()` for Gemini inlines its own minimal shape — the recorder
+        deliberately stays two-format. The shape is role chunk + text-bearing
+        chunk + STOP finish chunk, all data-only.
+        """
+        recorder.responder = failures_module.success(WireFormat.GEMINI, stream=True)
+        reply = await _exchange(
+            recorder,
+            b"POST /v1beta/models/m:streamGenerateContent HTTP/1.1\r\nHost: p\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        body = _body(reply)
+        # Data-only — no `event:` lines on the Gemini wire.
+        assert b"event:" not in body
+        # The text-bearing chunk lands.
+        assert b'"text":' in body
+        # The terminal chunk carries STOP — the success reason.
+        assert b'"finishReason": "STOP"' in body
+
+    async def test_openai_responses_streaming_success_emits_text_delta_then_completed(
+        self, recorder: RecordingUpstream
+    ) -> None:
+        """KBR-302 — the minimal Responses success stream carries a text delta and `completed`."""
+        recorder.responder = failures_module.success(
+            WireFormat.OPENAI_RESPONSES, stream=True
+        )
+        reply = await _exchange(
+            recorder,
+            b"POST /v1/responses HTTP/1.1\r\nHost: p\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        events = _sse_events(_body(reply))
+        names = [name for name, _ in events]
+        assert names == [
+            "response.created",
+            "response.output_text.delta",
+            "response.completed",
+        ], names
+        completed = events[-1][1]["response"]
+        assert completed["status"] == "completed"
 
 
 class TestFalsification:
