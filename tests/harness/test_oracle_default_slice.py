@@ -111,12 +111,15 @@ _CORPUS_SKIP_TABLE: dict[str, str] = {
         "F3.d conversation.turns[2] dropped on CC adapter from Messages body "
         "carrying a 50 001-char tool_result; new finding, KBR-54 scope addition"
     ),
-    # F3.c: the CC reader residualises messages[N].reasoning_content (no slot).
-    # KBR-285 widened the CC content classifier to refusal/function_call/list content
-    # but did not touch reasoning_content.
+    # (F3.c — the CC reader's missing `reasoning_content` slot — resolved
+    # by KBR-310: the request-direction grammar models the field on assistant
+    # messages as a Thinking part, and `tool_use_and_tool_result` declares
+    # `thinking_signalled_or_inferred` so P8's part-path claim is in scope.
+    # The entry surfaces the remaining F3.a/F3.b drops — context_management
+    # and metadata — which are KBR-309's territory on the CC adapter.)
     "tool_use_and_tool_result": (
-        "F3.c messages[N].reasoning_content residualised by CC reader (no slot); "
-        "new finding, KBR-54 scope addition"
+        "F3.a envelope.extra[context_management] + F3.b envelope.extra[metadata] "
+        "unclaimed on CC adapter; sibling of KBR-54 scope addition, KBR-309 owns"
     ),
     # Framing gap, not a register gap: the entry's Messages body has role 'system'
     # inside messages (forbidden by the Anthropic Messages format — system prompts

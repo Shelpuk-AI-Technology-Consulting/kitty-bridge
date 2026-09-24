@@ -888,6 +888,25 @@ def _read_one_message(
         content_parts = _read_content(message.get("content"), path, residual, _ASSISTANT_PART_TYPES)
         parts.extend(content_parts)
 
+        # ``reasoning_content`` — the CC extension P8's site writes on this
+        # message: ``ProviderAdapter._inject_empty_reasoning_content`` puts
+        # ``""`` on every assistant message once thinking is active, because
+        # Kimi/Z.AI/custom-OpenAI reject the request without it. Modelled
+        # here as a ``Thinking`` part (empty string included — the
+        # absence-is-observable rule the reply direction applies to the
+        # same field), appended after the call/text content so a
+        # positionally-diffed run sees exactly one delta where the inbound
+        # turn lacks it. A non-string value keeps the fail-closed posture
+        # the unmodelled ``audio``/``function_call`` keys take. Assistant-
+        # only: P8 injects here and the published request shapes place the
+        # field on assistant messages; a ``user``/``tool``-turn carrier
+        # residualises on evidence, not in anticipation.
+        reasoning_content = message.get("reasoning_content")
+        mapped = {"role", "content", "tool_calls", "name", "refusal"}
+        if isinstance(reasoning_content, str):
+            mapped.add("reasoning_content")
+            parts.append(c.Thinking(text=reasoning_content))
+
         _residualise(
             message,
             # `audio` and `function_call` are NOT in the mapped set: they
@@ -899,7 +918,7 @@ def _read_one_message(
             # `Audio` part or a `function_call` mapping has the residual
             # entry to consult. A silent drop would be exactly the totality
             # violation the residual rule exists to prevent.
-            {"role", "content", "tool_calls", "name", "refusal"},
+            mapped,
             path,
             residual,
         )

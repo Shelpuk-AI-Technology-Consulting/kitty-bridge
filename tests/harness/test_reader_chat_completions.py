@@ -832,6 +832,147 @@ class TestMessages:
         with pytest.raises(c.ResidualFieldsError):
             c.verify_total(projected)
 
+    def test_an_assistant_reasoning_content_projects_a_thinking_part(self) -> None:
+        """KBR-310 — assistant ``reasoning_content`` (with text) projects a ``Thinking`` part.
+
+        P8's complement on the request direction, mirroring the reply
+        direction's established posture: the field is a CC extension some
+        providers document on assistant messages (DeepSeek's thinking-mode
+        guide names ``reasoning_content`` the CoT beside ``content``), and
+        the bridge itself injects it — ``ProviderAdapter
+        ._inject_empty_reasoning_content`` writes ``""`` on every assistant
+        message once thinking is active. The request reader's grammar grew
+        the slot after KBR-285 (which widened the content classifier but
+        deliberately left ``reasoning_content`` out); without it the
+        ``tool_use_and_tool_result`` corpus entry cannot survive the
+        totality gate on the default-transport slice.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "The answer is 4.",
+                        "reasoning_content": "because 2+2=4",
+                    }
+                ],
+            }
+        )
+
+        assistant_turn = projected.conversation.turns[0]
+        assert [type(p) for p in assistant_turn.parts] == [c.Text, c.Thinking]
+        assert assistant_turn.parts[1].text == "because 2+2=4"
+        assert projected.residual == {}
+
+    def test_an_empty_assistant_reasoning_content_still_projects(self) -> None:
+        """KBR-310 — ``reasoning_content: ""`` (P8's exact injection) projects too.
+
+        The reply direction's absence-is-observable rule applies here as
+        well: an empty string is a value the wire carried, so the ``Thinking``
+        part exists with empty text rather than disappearing. This is the
+        shape the ``tool_use_and_tool_result`` corpus entry actually meets —
+        P8 injects ``""``, not prose.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [PUBLISHED_TOOL_CALL],
+                        "reasoning_content": "",
+                    }
+                ],
+            }
+        )
+
+        assistant_turn = projected.conversation.turns[0]
+        assert [type(p) for p in assistant_turn.parts] == [c.ToolUse, c.Thinking]
+        assert assistant_turn.parts[1].text == ""
+        assert projected.residual == {}
+
+    def test_a_wrongly_typed_assistant_reasoning_content_residualises(self) -> None:
+        """KBR-310 — a non-string ``reasoning_content`` residualises at its path.
+
+        The fail-closed posture the reader takes for unmodelled payload on
+        this message object (``audio``/``function_call`` precedent): the key
+        is recognised, the value is not, so the run names the shape instead
+        of silently projecting it.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "hi",
+                        "reasoning_content": 42,
+                    }
+                ],
+            }
+        )
+
+        assert projected.residual == {"messages[0].reasoning_content": 42}
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_user_message_reasoning_content_residualises(self) -> None:
+        """KBR-310 — ``reasoning_content`` on a ``user`` message stays unmodelled.
+
+        P8 injects on assistant messages only, and the published request
+        shapes place the field on assistant messages; a user-turn carrier is
+        not a shape the bridge produces. Residualising at its path names it
+        if one ever appears — the slot widens on evidence, not in
+        anticipation.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "weather?",
+                        "reasoning_content": "why am i thinking",
+                    }
+                ],
+            }
+        )
+
+        assert projected.residual == {
+            "messages[0].reasoning_content": "why am i thinking"
+        }
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
+    def test_a_tool_message_reasoning_content_residualises(self) -> None:
+        """KBR-310 — ``reasoning_content`` on a ``tool`` message stays unmodelled.
+
+        Symmetry with R1d (user role). P8 injects on assistant messages
+        only; a tool-turn carrier is not a shape the bridge produces, and
+        residualising at the path names it if one ever appears.
+        """
+        projected = _read(
+            {
+                "model": "gpt-6-astra",
+                "messages": [
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_abc",
+                        "content": "ok",
+                        "reasoning_content": "stray",
+                    }
+                ],
+            }
+        )
+
+        assert projected.residual == {
+            "messages[0].reasoning_content": "stray"
+        }
+        with pytest.raises(c.ResidualFieldsError):
+            c.verify_total(projected)
+
     def test_a_cache_control_on_an_undecodable_image_residualises(self) -> None:
         """R6.3b — the image's ``cache_control`` survives the decode failure.
 
