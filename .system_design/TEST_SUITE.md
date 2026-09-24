@@ -1957,7 +1957,7 @@ None`. `mutmut` closes that gap.
   `pytest_add_cli_args_test_selection` take **arrays**.
 - **Test selection:** `pytest_add_cli_args_test_selection = ["-m", "l1", "--ignore",
   "tests/test_internal_keys_not_sent_upstream.py"]` followed by one `--ignore <path>` row per
-  module in `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the sixteen §8.2
+  module in `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the seventeen §8.2
   socket/process-binding modules, KBR-290). Mutation testing measures the L1 suite; letting it
   run L3 subsystem tests would make each mutant minutes long and attribute kills to the wrong
   layer. The `tests/test_internal_keys_not_sent_upstream.py` `--ignore` is mutmut-only — the
@@ -5083,7 +5083,7 @@ hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before a
 exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~13s,
 measured on Linux). T-H1 should note that mutation testing over `l1` used to re-pay that cost
 per mutant — KBR-290's deselection (below) closed that question for this file together with the
-fifteen others: the mutation baseline no longer runs it, the gate still does.
+sixteen others: the mutation baseline no longer runs it, the gate still does.
 
 **KBR-204 added three of the 38**, for the same Windows family by another route: an interactive
 command whose stdin reports as a terminal while its stdout is a pipe. The children get a
@@ -5092,7 +5092,7 @@ One cost to know about: a child that gets past **both** guards — the prompts' 
 with that stdin **blocks** waiting for keys nothing will type, so a regression there shows up as
 the runner's 60-second `TimeoutExpired`, not as a fast assertion.
 
-**KBR-290 reconciliation (2026-09-21).** The sixteen §8.2 modules are excluded from **mutmut's** test
+**KBR-290 reconciliation (2026-09-21).** The seventeen §8.2 modules are excluded from **mutmut's** test
 selection (`--ignore <path>` rows in `[tool.mutmut] pytest_add_cli_args_test_selection`) so the
 nightly mutation run never depends on loopback socket timing. The Fast job selection
 (`pytest -m "l1 or l2"`, `.github/workflows/tests.yml` line 110) is unchanged — every module here

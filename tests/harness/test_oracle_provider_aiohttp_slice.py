@@ -339,6 +339,26 @@ def _flip_captured_stream_true(captured: CapturedRequest) -> CapturedRequest:
     return replace(captured, body=json.dumps(body).encode("utf-8"))
 
 
+def _provider_key(fixture: BridgeFixture) -> str:
+    """Return the KBR-307 ``provider_key`` for the adapter the fixture bound.
+
+    The transport caches its adapter in ``_adapter``, so every ``bind()`` call
+    inside a single fixture returns the same instance — but the call shape
+    repeats and is easy to drift; this helper is the one place the derivation
+    lives, so a future change to how the runtime oracle's notion of "live on
+    this adapter" is computed lands here once.
+
+    Args:
+        fixture: A started `BridgeFixture` whose transport is bound to a
+            recorder.
+
+    Returns:
+        The bound adapter's ``provider_type`` (resolves to ``"ollama_cloud"``
+        on this transport; the KBR-307 derivation seam).
+    """
+    return fixture.transport.bind()[0].provider_type
+
+
 class TestCorpusDrivenProviderAiohttpSlice:
     """End-to-end oracle run on every inbound-Anthropic-Messages corpus entry.
 
@@ -380,7 +400,7 @@ class TestCorpusDrivenProviderAiohttpSlice:
         async with BridgeFixture(
             transport("provider_aiohttp", WireFormat.OLLAMA_CHAT)
         ) as fixture:
-            provider_key = fixture.transport.bind()[0].provider_type
+            provider_key = _provider_key(fixture)
             status, _text = await fixture.post(
                 inbound_path(InboundProtocol.MESSAGES),
                 json.loads(entry.request.body),
@@ -463,7 +483,7 @@ class TestRoutingFalsification:
                 register=r.REGISTER,
                 triggers_met=_triggers_met(clean),
                 expected_route=real_route,
-                provider_key=fixture.transport.bind()[0].provider_type,
+                provider_key=_provider_key(fixture),
             )
 
             # 2. The same captured body on a sentinel-wrong path raises
@@ -486,7 +506,7 @@ class TestRoutingFalsification:
                     register=r.REGISTER,
                     triggers_met=_triggers_met(clean),
                     expected_route=wrong_route,
-                    provider_key=fixture.transport.bind()[0].provider_type,
+                    provider_key=_provider_key(fixture),
                 )
             assert "route.path" in exc_info.value.paths, (
                 f"the routing falsification should name route.path; got "
@@ -544,12 +564,27 @@ class TestP19ClaimMachinery:
     """
 
     def _subject_entry(self):
-        """Return the smallest clean entry whose inbound body does not stream."""
-        return next(
-            e
-            for e in _size_ordered_am_entries()
-            if e.id not in _CORPUS_SKIP_TABLE
-            and json.loads(e.request.body).get("stream") is not True
+        """Return the smallest clean entry whose inbound body does not stream.
+
+        Returns:
+            The corpus entry the P19 claim-machinery tests drive.
+
+        Raises:
+            AssertionError: When no clean entry qualifies — a bare
+                ``next()`` would surface as a ``StopIteration`` traceback
+                that names nothing; the failure must say what the corpus
+                needs so the next author can act on it.
+        """
+        for entry in _size_ordered_am_entries():
+            if entry.id in _CORPUS_SKIP_TABLE:
+                continue
+            if json.loads(entry.request.body).get("stream") is not True:
+                return entry
+        raise AssertionError(
+            "no clean Anthropic-Messages corpus entry has a body without "
+            "stream: true — the P19 claim-machinery tests need one (the flip "
+            "must change the value to be a real mutation); add a corpus "
+            "entry whose body omits stream or sets it false"
         )
 
     async def test_flipped_stream_is_claimed_when_always_is_met(self) -> None:
@@ -559,7 +594,7 @@ class TestP19ClaimMachinery:
         async with BridgeFixture(
             transport("provider_aiohttp", WireFormat.OLLAMA_CHAT)
         ) as fixture:
-            provider_key = fixture.transport.bind()[0].provider_type
+            provider_key = _provider_key(fixture)
             status, _text = await fixture.post(
                 inbound_path(InboundProtocol.MESSAGES),
                 json.loads(entry.request.body),
@@ -588,7 +623,7 @@ class TestP19ClaimMachinery:
         async with BridgeFixture(
             transport("provider_aiohttp", WireFormat.OLLAMA_CHAT)
         ) as fixture:
-            provider_key = fixture.transport.bind()[0].provider_type
+            provider_key = _provider_key(fixture)
             status, _text = await fixture.post(
                 inbound_path(InboundProtocol.MESSAGES),
                 json.loads(entry.request.body),
