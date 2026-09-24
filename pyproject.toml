@@ -391,6 +391,8 @@ pytest_add_cli_args_test_selection = [
     "--ignore",
     "tests/harness/test_oracle_botocore_slice.py",
     "--ignore",
+    "tests/harness/test_oracle_provider_aiohttp_slice.py",
+    "--ignore",
     "tests/cli/test_stream_encoding.py",
 ]
 only_mutate = [

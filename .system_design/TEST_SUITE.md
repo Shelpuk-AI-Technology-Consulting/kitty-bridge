@@ -1960,7 +1960,7 @@ None`. `mutmut` closes that gap.
   `pytest_add_cli_args_test_selection` take **arrays**.
 - **Test selection:** `pytest_add_cli_args_test_selection = ["-m", "l1", "--ignore",
   "tests/test_internal_keys_not_sent_upstream.py"]` followed by one `--ignore <path>` row per
-  module in `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the sixteen §8.2
+  module in `tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the seventeen §8.2
   socket/process-binding modules, KBR-290). Mutation testing measures the L1 suite; letting it
   run L3 subsystem tests would make each mutant minutes long and attribute kills to the wrong
   layer. The `tests/test_internal_keys_not_sent_upstream.py` `--ignore` is mutmut-only — the
@@ -4223,6 +4223,60 @@ documented and no corpus entry sits within that margin of the boundary.
 §3.4 calls this surface L3 and T-K6 owns the ``l3`` activation; when it lands, the file
 gains the marker and the selection matrix picks it up.
 
+#### 7.4.5 What T-D7 settled — the provider-aiohttp slice, and what the corpus run found
+
+[KBR-57] (T-D7, 2026-09-24) closes the oracle's "every provider" claim for
+``ollama_cloud``, the third of the three ``use_custom_transport`` adapters (§3.3.4).
+The slice inherits T-D4's three contracts — the routing-derivation restriction
+(literal ``/api/chat``, recorder-authority rewrite, parameter-free ``base_url``),
+the module-local skip table, the ``_SENTINEL_ROUTE_PATH`` pin against
+``OllamaCloudAdapter().get_upstream_path`` — and adds the KBR-307 obligations:
+``provider_key`` derived from the binding, and ``Trigger.ALWAYS`` kept in
+``triggers_met`` so P19's scope gate is the discriminating filter.
+
+**P19's observation posture is recorded here because it is a wire fact, not a
+test gap.** The recorder captures after ``_ollama_body`` writes ``stream`` from
+the transport's endpoint-mode decision (§3.2.3, same boundary T-D6 records for
+P18) — but on a consistent drive the overwrite is **value-preserving**: the
+inbound Messages body either carries the same flag or none, and the readers'
+shared normalisation reads an absent request flag as its wire default, so the
+projections agree at ``envelope.stream`` and no delta appears. An ALWAYS row
+whose mutation is value-preserving on every honest input could be decorative
+without any corpus-driven case noticing, so the slice keeps P19 armed on every
+run (a transport whose ``stream`` decision ever diverges observably turns red)
+and proves the claim machinery with a synthetic flip of the captured value —
+claimed with ``ALWAYS`` met, ``UnclaimedMutationError`` with it omitted. The
+scope-exclusion half stays KBR-307 AC4's (a slice whose transport binds one
+adapter cannot drive a foreign one).
+
+**Five corpus entries pass clean** (``deltas == ("envelope.model",)``); nine
+are skip-tabled with findings named for the owner. Two are new to this route:
+
+- **K57-F1** — the CC→Ollama translation drops the Messages body's top-level
+  ``context_management`` / ``output_config`` / ``thinking``, merges the system
+  blocks, and flattens multi-part content with ``"\n"`` joins (``plain_turn``,
+  ``effort_configured``; eight paths each).
+- **K57-F2** — **reader gap**: the adapter emits ``id``/``type`` on
+  request-side ``tool_calls``, the published Ollama ``ChatRequest`` declares
+  ``function`` only on that sub-shape, and ``reader_ollama`` (T-A6, written
+  against the published schema) has no slot — the totality gate fails before
+  any delta can be classified (``tool_use_and_tool_result``,
+  ``compaction_budget_over``). Go's decoder tolerates the extra keys upstream;
+  whether the reader learns the keys or the adapter stops sending them is the
+  owner's call.
+
+The remaining skips carry T-D4's markers onto this route (``F3.d`` — the whole
+``tool_result`` turn dropped; the ``compaction_budget_under`` calibration gap)
+or are framing, not fidelity (``role: "system"`` inside ``messages``; a 400
+before any capture).
+
+**The OAuth login leg is the slice's other half.** A form-encoded token grant
+is not an LLM request and has no reader (§7.5's decided question), so the
+coverage is recorder-level: §7.2.2's dual-product load — a bridge-driven
+``/api/chat`` capture followed by the leg's ``OAUTH_TOKEN_SUFFIX`` capture on
+one recorder instance, teardown-clean over both. The T-B1 tests cover the leg
+in isolation; none ran a bridge and the leg concurrently.
+
 ### 7.5 The bridge fixture
 
 `tests/harness/bridge.py` — plan task **T-W8** ([KBR-31]). The counterpart of §7.2 on the
@@ -4895,7 +4949,7 @@ standing amnesty:
   its reason.
 
 A consequence worth stating: **a test may not be moved to `l3` before the Subsystem job exists.**
-Sixteen modules under `tests/` bind real sockets or spawn processes and are `l1` by default
+Seventeen modules under `tests/` bind real sockets or spawn processes and are `l1` by default
 today (an earlier draft said "roughly six"; the count has grown as Epic B, E and the
 KBR-132/144/176/220 fixes each landed a socket-binding module, and the bullet list below is now
 the authoritative enumeration). One new module is `l3`-marked from birth pending the Subsystem
@@ -4909,9 +4963,9 @@ the job that runs them; doing it earlier would remove them from every gate. T-H1
 reclassification into account before it measures a mutation baseline, because it selects on
 `l1`.
 
-**Sixteen modules are bulleted below — in thirteen bullets, since the T-W4, T-W8 and
+**Seventeen modules are bulleted below — in fourteen bullets, since the T-W4, T-W8 and
 KBR-272-egress rows each name two modules — and `tests/cli/test_stream_encoding.py`
-(KBR-10) is described after them, seventeen in all, named here so T-K6 inherits a list rather than a
+(KBR-10) is described after them, eighteen in all, named here so T-K6 inherits a list rather than a
 search** — the count is what T-K6 and T-H1 plan against. (The bullet count and the KBR-10 paragraph
 were already drifting apart before T-W8 added two; spelling out both is what stops the next
 addition guessing which set it joins. T-W9 joins the **bulleted** set, not the paragraph above it.)
@@ -5010,6 +5064,11 @@ addition guessing which set it joins. T-W9 joins the **bulleted** set, not the p
   precedent (`tests/harness/test_oracle_driven.py`; §3.4 names the surface L3). That sibling
   binds the same two sockets and is an inherited pre-KBR-272 gap in this enumeration — flagged
   for the owner rather than silently added here.
+- **KBR-57 (T-D7):** `tests/harness/test_oracle_provider_aiohttp_slice.py` starts a real
+  `BridgeServer` against the `ProviderRecordingUpstream` — two sockets per run — to drive the
+  transparency oracle's provider-aiohttp slice (`ollama_cloud`) end to end. The module runs in
+  **~0.7 seconds**, measured, the figure the fast-gate budget carries until T-K6 moves it. It
+  is `l1` by path default per the T-D1 / T-D6 precedent (§3.4 names the surface L3).
 - **KBR-96 (T-I4):** `tests/cli/test_background_bridge_ownership.py` spawns real
   `kitty.bridge_runner` children on real sockets, then calls
   `kitty.bridge.manage.{stop_bridge,start_bridge,restart_bridge,bridge_status}` **in-process**
@@ -5043,7 +5102,7 @@ hostile *interpreter start-up encoding*, and `PYTHONIOENCODING` is read before a
 exists, so a real child is the only oracle. Each spawn is short (the whole file runs in ~13s,
 measured on Linux). T-H1 should note that mutation testing over `l1` used to re-pay that cost
 per mutant — KBR-290's deselection (below) closed that question for this file together with the
-fifteen others: the mutation baseline no longer runs it, the gate still does.
+sixteen others: the mutation baseline no longer runs it, the gate still does.
 
 **KBR-204 added three of the 38**, for the same Windows family by another route: an interactive
 command whose stdin reports as a terminal while its stdout is a pipe. The children get a
@@ -5052,7 +5111,7 @@ One cost to know about: a child that gets past **both** guards — the prompts' 
 with that stdin **blocks** waiting for keys nothing will type, so a regression there shows up as
 the runner's 60-second `TimeoutExpired`, not as a fast assertion.
 
-**KBR-290 reconciliation (2026-09-21).** The sixteen §8.2 modules are excluded from **mutmut's** test
+**KBR-290 reconciliation (2026-09-21).** The seventeen §8.2 modules are excluded from **mutmut's** test
 selection (`--ignore <path>` rows in `[tool.mutmut] pytest_add_cli_args_test_selection`) so the
 nightly mutation run never depends on loopback socket timing. The Fast job selection
 (`pytest -m "l1 or l2"`, `.github/workflows/tests.yml` line 110) is unchanged — every module here
