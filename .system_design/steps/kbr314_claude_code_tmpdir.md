@@ -43,3 +43,36 @@ the `env_clear` list, and the `cli_args` list are all untouched.
 ## Implementation notes
 
 _(appended after the PR lands)_
+
+- PR #288, branch `fix/kbr-314-claude-code-tmpdir` off `origin/main` `adae476`,
+  commit `3fb18f1`.
+- Production delta: 2 lines in `src/kitty/launchers/claude.py` (one entry in
+  `_SETTINGS_ENV_OVERRIDE_KEYS`, one entry in `build_spawn_config`'s
+  `env_overrides`); 1 line in `src/kitty/cli/cleanup_cmd.py` (one entry in
+  `_KITTY_INJECTED_KEYS`). The two list additions land in lockstep; the
+  pre-existing `test_settings_and_cleanup_lists_are_identical` is the
+  structural guarantee.
+- Tests: four new L1 unit tests (R1 in `TestClaudeCodeTmpdir`, R2's two
+  membership assertions in `TestInjectedKeyListsInSync`, R3 in the new
+  `TestClaudeCodeTmpdirInSessionFile`, R4 in `test_cleanup_cmd.py::test_run_cleanup_strips_claude_code_tmpdir`).
+  All four watched RED before the production edit; the lockstep test
+  continues to pass.
+- Verification on this box (uid 1001): `tempfile.gettempdir()` → `/tmp`,
+  `/tmp` owner `root:root` mode `1777`. Claude Code's ownership check
+  ("owned by you or root") accepts root-owned → the fix silences the
+  error in the common case on every supported platform.
+- Reviewer rounds: 2 system-design rounds (both Majors resolved).
+  Code-reviewer and reviewer-bot verdicts pending on PR.
+- Accepted residual (per Requirements doc Design Notes): a user who exports
+  a hostile `TMPDIR` gets that value forwarded verbatim and Claude Code
+  may still print the error. A CWD fallback (only reachable when every
+  standard temp dir is unwritable) would silence the error at the cost of
+  a `claude-<uid>/` directory appearing in the repo — recorded, not fixed.
+- Cross-platform note: on macOS `tempfile.gettempdir()` returns a per-user
+  `/var/folders/...` path; on Windows `%TEMP%` is per-user. Both pass
+  Claude Code's ownership check. CI matrix covers all three.
+- Follow-up owed (none filed in this PR): if Claude Code's daemon ever
+  surfaces the original ownership error to its own log even when
+  `CLAUDE_CODE_TMPDIR` is set, that's upstream
+  `claude-code#90908`-class behaviour — Claude Code's decision about its
+  own socket, not the bridge's.
