@@ -717,7 +717,10 @@ vendors' block zoos, with `kind` a canonical snake_case name rather than the wir
 **An empty block is a part with an empty string, never nothing.** P5e injects an empty `thinking`
 block and P8 an empty `reasoning_content`; P8's trigger is conditional and *inferred*, so §3.3.2
 assertion 2 needs its absence to be observable. `Thinking.signature` carries what M8's carrier
-repair manipulates.
+repair manipulates. The request-direction assistant walker mirrors the slot on the CC request side
+(`messages[N].reasoning_content` → a `Thinking` part, KBR-310) so the assertion is honoured for
+P8's outbound injection; the reply direction's `reasoning_content` → `Thinking` projection was
+already there (the reply-direction P8 complement).
 
 **`Image.digest` is the lowercase hex SHA-256 of the decoded bytes** — or, when the payload
 cannot be decoded, of the raw encoded bytes the wire carried (see §7.4 rule 7 row 3; the second
@@ -4150,9 +4153,10 @@ default profile and passes the oracle with all 200+ M5 deltas claimed. The
 review's blocker, and the reason the requirements doc now records the budget's
 derivation beside the literal.
 
-**Four findings the corpus-driven run surfaces, named and owned.** Each is excluded by
-the skip table with its unclaimed-delta path and marker; each is recorded on KBR-54's
-scope-addition comment for the owner to ticket:
+**Four findings the corpus-driven run surfaced; three remain open.** Each is excluded by
+the skip table with its unclaimed-delta path and marker; each was recorded on KBR-54's
+scope-addition comment for the owner to ticket. F3.c is closed (KBR-310, 2026-09-24);
+F3.a/F3.b and F3.d stay open:
 
 - **F3.a / F3.b** — ``envelope.extra[context_management]`` and
   ``envelope.extra[metadata]`` are dropped on the Messages→CC translation with no
@@ -4160,10 +4164,25 @@ scope-addition comment for the owner to ticket:
   ``_CODEX_DROPPED_CONTROL_FIELDS``, but P23 is ``openai_subscription``-specific;
   nothing covers the CC adapter. ``plain_turn`` and ``effort_configured`` also surface
   two further user-turn part drops on the same route.
-- **F3.c** — ``messages[N].reasoning_content`` is residualised by the CC reader (no
-  slot in T-A2's grammar); KBR-285 widened the classifier to
-  refusal/``function_call``/list content but did not touch ``reasoning_content``.
-  ``tool_use_and_tool_result`` fails the totality gate on it.
+- ~~**F3.c** — ``messages[N].reasoning_content`` is residualised by the CC reader
+  (no slot in T-A2's grammar)~~ — **CLOSED 2026-09-24, KBR-310.** The finding
+  was real: KBR-285 widened the classifier to refusal/``function_call``/list
+  content but deliberately left ``reasoning_content`` out, and
+  ``tool_use_and_tool_result`` failed the totality gate on it. The fix grew
+  the slot rather than stripping the field: P8's injection
+  (``ProviderAdapter._inject_empty_reasoning_content`` writes ``""`` on
+  assistant messages once thinking is active) is a registered, deliberate
+  mutation those providers' wire contracts require, so the request-direction
+  assistant walker now models ``reasoning_content`` as a ``Thinking`` part —
+  empty string included (the absence-is-observable rule the reply direction
+  already applies to the same field) — appended after the call/text content so
+  a positionally-diffed run sees exactly one delta; a non-string value keeps
+  the fail-closed ``audio``/``function_call`` posture; the slot is
+  assistant-only (P8 injects there; a ``user``/``tool``-turn carrier
+  residualises on evidence, not in anticipation). The corpus entry declares
+  ``thinking_signalled_or_inferred`` so P8's part-path claim is in scope. The
+  entry still skips — now for F3.a/F3.b (KBR-309), which its body also
+  meets.
 - **F3.d** — ``conversation.turns[2]`` (the whole tool_result turn) is dropped on the
   CC adapter from a Messages body carrying a ~50 000-char ``tool_result`` — both the
   under- and over-limit entries. Likely M7 pairing-validation territory; the trigger
