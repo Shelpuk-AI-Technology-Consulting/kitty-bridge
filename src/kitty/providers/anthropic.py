@@ -428,15 +428,12 @@ class AnthropicAdapter(ProviderAdapter):
             anthropic["top_k"] = cc_request["_top_k"]
 
         # Extract system messages → top-level system field. Two parallel
-        # collections: ``system_parts`` feeds the joined-string form every
-        # body that ships today produces, and ``system_blocks`` carries the
-        # same parts as blocks with any ``cache_control`` marker in place
-        # (KBR-308) — emitted only when a marker is present AND the
-        # upstream is verified to accept markers on system blocks (the
-        # same ``forwards_thinking_signature`` gate the verbatim carriage
-        # restore below uses: on ``minimax_token`` and ``opencode_go``'s
-        # Messages-routed models the endpoint rejects such markers, so the
-        # join stands and the G43 scope-out is preserved on this route).
+        # collections: ``system_parts`` (joined-string form, every body that
+        # ships today produces) and ``system_blocks`` (the same parts as
+        # blocks, with any ``cache_control`` marker in place). The emit
+        # below picks one of three forms, gated on the
+        # ``forwards_thinking_signature`` flag (KBR-228 part B) and the
+        # G43/minimax scope-out (KBR-296).
         system_parts: list[str] = []
         system_blocks: list[dict] = []
         for msg in cc_request.get("messages", []):
@@ -453,6 +450,9 @@ class AnthropicAdapter(ProviderAdapter):
                             text = block.get("text", "")
                             system_parts.append(text)
                             system_block: dict = {"type": "text", "text": text}
+                            # KBR-308: keep the marker on the CC block so the
+                            # blocks-form emit below can ship it; the join
+                            # would lose it.
                             if block.get("cache_control") is not None:
                                 system_block["cache_control"] = block["cache_control"]
                             system_blocks.append(system_block)
@@ -460,13 +460,9 @@ class AnthropicAdapter(ProviderAdapter):
                             system_parts.append(block)
                             system_blocks.append({"type": "text", "text": block})
 
-        # KBR-228 part B: on the signature-binding routes the agent's own
-        # system value — blocks and cache breakpoints included — is what the
-        # thinking signatures are bound to, so it is restored verbatim from
-        # the carriage instead of this joined string.  Where the carriage is
-        # absent (a Chat Completions origin) or the upstream is unverified,
-        # today's join stands — except for KBR-308's marker-carrying blocks
-        # form on verified upstreams.
+        # KBR-228 part B: the agent's system value (blocks and markers
+        # included) on signature-binding routes — restored verbatim from
+        # ``_anthropic_system`` instead of a join.
         carried_system = cc_request.get("_anthropic_system")
         if carried_system is not None and self.forwards_thinking_signature:
             if isinstance(carried_system, list):
@@ -475,8 +471,16 @@ class AnthropicAdapter(ProviderAdapter):
                 ]
             else:
                 anthropic["system"] = carried_system
+        # KBR-308: blocks form when any system part carries a marker AND
+        # the upstream is verified — the same gate as the carriage restore
+        # above. On ``minimax_token`` / ``opencode_go``'s Messages-routed
+        # models (forwards_thinking_signature=False) the endpoint rejects
+        # markers on system blocks, so the join stands and the G43 scope-out
+        # is preserved on this route.
         elif any("cache_control" in block for block in system_blocks) and self.forwards_thinking_signature:
             anthropic["system"] = system_blocks
+        # Joined-string form for everything else: unmarked system, or any
+        # system on an unverified upstream.
         elif system_parts:
             anthropic["system"] = "\n".join(system_parts)
 

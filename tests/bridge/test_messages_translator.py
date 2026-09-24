@@ -592,6 +592,15 @@ class TestTranslateRequestCacheBreakpoints:
     unknown). Anthropic bills a cache read at 0.1x base input, so a lost
     breakpoint re-bills its prefix at roughly 10x on every turn. Where
     caching is implicit (OpenAI) the loss changes nothing billable.
+
+    **Count: 14 cases** — ten site tests (``tool``, ``system``,
+    ``user_text``, ``assistant_text``, ``image``, ``document``,
+    ``tool_use``, ``tool_result``, ``top_level``, ``tool_result_nested``),
+    the top-level key-set regression net, and three shape pins (the
+    marked/unmarked text-only-turn carve pair; the two-marked-text-blocks
+    last-marked-wins pin). A new sibling site or shape belongs here only
+    with a matching docstring update — a silent count change is a shape
+    change this class claims to pin.
     """
 
     def setup_method(self):
