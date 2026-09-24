@@ -271,12 +271,17 @@ class ClaudeAdapter(LauncherAdapter):
     ) -> SpawnConfig:
         """Build the spawn configuration for the Claude Code child process.
 
-        Sets the bridge URL, auth, and model env vars. When ``context_tokens``
-        is a positive number it is also exported as
-        ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` so Claude Code uses the model's
-        real context window instead of its 200K fallback for non-claude
-        models. Setting it for ``claude-*`` models is harmless — Claude Code
-        ignores the variable there.
+        Sets the bridge URL, auth, and model env vars. Always exports
+        ``CLAUDE_CODE_TMPDIR=tempfile.gettempdir()`` so Claude Code's
+        cross-session messaging daemon picks a user- or root-owned socket
+        dir (root-owned ``/tmp`` on Linux, per-user ``TMPDIR`` on macOS,
+        per-user ``%TEMP%`` on Windows); without it the daemon defaults to
+        ``/`` and prints a remediation hint on boxes where ``/`` is neither
+        (KBR-314). When ``context_tokens`` is a positive number it is also
+        exported as ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` so Claude Code uses
+        the model's real context window instead of its 200K fallback for
+        non-claude models. Setting it for ``claude-*`` models is harmless —
+        Claude Code ignores the variable there.
 
         Args:
             profile: Resolved profile with provider, model, and base_url.
