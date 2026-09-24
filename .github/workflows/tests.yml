@@ -59,6 +59,14 @@ jobs:
             python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
+        # `fetch-depth: 0` fetches the full repo history. Required by
+        # `tests/test_measure_changed_code_mutation.py`'s KBR-285 fixture
+        # tests, which invoke `git diff` against a historical commit
+        # (`30a91a0`) to pin the diff-mapping oracle against the actual
+        # diff rather than a free-form list. Cost is a slightly slower
+        # checkout for jobs that don't otherwise need history.
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
