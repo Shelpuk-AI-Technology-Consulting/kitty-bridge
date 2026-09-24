@@ -2179,21 +2179,34 @@ def residual_key(prefix: str, key: str | None = None, index: int | None = None) 
     return f"{rendered_prefix}.{key}"
 
 
-def reply_part_path(index: int | str) -> str:
+def reply_part_path(index: int | str, field_name: str | None = None) -> str:
     """Return the path naming one part of a reply.
 
+    Symmetric with :func:`part_path` so reply-side register rows can
+    address a part field with one helper call rather than string
+    concatenation. KBR-59 / T-D10's ``M27`` (``reply.parts[*].id``)
+    is the canonical caller; ``_SHAPES`` in
+    ``tests/harness/test_register.py`` lists the corresponding
+    ``(reply.parts[*].id, reply.parts[2].id)`` pair.
+
     Args:
-        index: Position in :attr:`Reply.parts`, or :data:`WILDCARD` for a row
-            naming every part. M12 does **not** use the wildcard — it is
-            anchored at index 0, because both translators substitute one text
-            part into a reply that was empty. The wildcard is here for T-D10,
-            whose reply diff reports concrete positions the register may need to
-            claim in bulk.
+        index: Position in :attr:`Reply.parts`, or :data:`WILDCARD` for
+            a row naming every part. M12 does **not** use the
+            wildcard — anchored at index 0, because both translators
+            substitute one text part into a reply that was empty.
+            M27 uses ``WILDCARD``; M29 uses ``WILDCARD`` for the
+            bare-index form.
+        field_name: Optional field on the part (e.g. ``"id"``). When
+            supplied, the path is ``reply.parts[<i>].<field_name>``;
+            when ``None`` (the default), the path is
+            ``reply.parts[<i>]``.
 
     Returns:
-        A path of the form ``reply.parts[<i>]``.
+        A path of the form ``reply.parts[<i>]`` or
+        ``reply.parts[<i>].<field_name>``.
     """
-    return f"reply.parts[{_index(index)}]"
+    base = f"reply.parts[{_index(index)}]"
+    return f"{base}.{field_name}" if field_name else base
 
 
 def reply_usage_path(key: str) -> str:

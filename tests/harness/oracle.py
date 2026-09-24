@@ -68,21 +68,48 @@ the same lever from the *under*-declaring direction.
 **Layer.** No ``pytestmark``; tests default to ``l1`` per ``tests/layers.py``
 and ``tests/harness/test_vertical_slice.py``'s precedent. ``l3`` activation
 is T-K6's job.
+
+**Response direction — KBR-59 (T-D10).** §3.3.1's last paragraph makes
+response translation "a different claim [that] gets a different test",
+and the plan splits the work as six request tasks against one reply
+task (T-A7) with its own comparison task (T-D10). This module carries
+its sibling entry point
+:func:`assert_no_unclaimed_reply_mutation` (T-D10) — same §3.3.2
+assertions, **omitting** §4.3 C2 (a reply body is the upstream's
+serialised output, never a forwarded pass-through) and §3.3.5 (the
+reply traverses the same connection the request did; routing is a
+request-side concern). The reply-twin keeps the request-side
+:func:`_run_assertions` and its KBR-307 ``provider_key`` plumbing
+intact, parameterised by a ``diff`` callable so the request-side
+diff (``_structural_diff``, hard-typed on :class:`Request`) and the
+reply-side diff (``_structural_reply_diff``, hard-typed on
+:class:`Reply`) share one assertion engine.
+
+**Reply-side falsification case (§1.4).** A captured reply with an
+injected, unrecognised top-level field (the response-direction
+analogue of §3.3.1's 5th row) fails the run at the totality gate with
+:class:`~harness.contract.ResidualFieldsError` — unmodified, no
+wrapper. ``verify_total`` on a :class:`Reply` projection enforces it;
+the test is the threshold check, not a new mechanism.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from harness import contract as c
 from harness import register as r
 from harness.contract import (
+    CapturedReply,
     CapturedRequest,
     Conversation,
     Projection,
+    Reply,
+    ReplyProjection,
     Request,
     WireFormat,
     _redact_query,
@@ -319,6 +346,102 @@ def _REGISTRY_GUARD() -> None:
 
 
 # --------------------------------------------------------------------------
+# Reply projection registry (KBR-59 / T-D10)
+# --------------------------------------------------------------------------
+
+#: The set of wire formats the reply-direction oracle asserts are
+#: *reachable* today. Five formats have a ``read_reply`` today; an
+#: additional reply reader (KBR-312 lands Bedrock Converse) grows
+#: this set in one place, and the import-time guard
+#: :func:`_REPLY_REGISTRY_GUARD` catches "constant grew but reader not
+#: yet landed" the first time pytest runs — the load-bearing case
+#: (reviewer finding S8). The Bedrock Converse format is *not* in this
+#: set until the reply reader lands.
+_ASSERTABLE_REPLY_FORMATS: frozenset[WireFormat] = frozenset({
+    WireFormat.ANTHROPIC_MESSAGES,
+    WireFormat.CHAT_COMPLETIONS,
+    WireFormat.GEMINI,
+    WireFormat.OLLAMA_CHAT,
+    WireFormat.OPENAI_RESPONSES,
+})
+
+#: Per-format reply projection registry, parallel to
+#: :data:`_REQUEST_PROJECTIONS`. Central registration, mirroring
+#: :func:`_register_projection`'s import-time call site.
+_REPLY_PROJECTIONS: dict[WireFormat, ReplyProjection] = {}
+
+
+def _register_reply_projection(projection: ReplyProjection) -> None:
+    """Insert one :class:`~harness.contract.ReplyProjection` into
+    :data:`_REPLY_PROJECTIONS`.
+
+    Called once per reply reader at module import time. Re-registration
+    is silent (no-op) so a test fixture that re-imports a reader does
+    not warn. Mirrors :func:`_register_projection` so the request and
+    reply registries use one shape.
+
+    Args:
+        projection: An instance of any class implementing
+            :class:`~harness.contract.ReplyProjection`.
+    """
+    _REPLY_PROJECTIONS[projection.wire_format] = projection
+
+
+def _reply_reader_for(fmt: WireFormat) -> ReplyProjection:
+    """Return the registered reply reader for ``fmt``.
+
+    Args:
+        fmt: The wire format to read.
+
+    Returns:
+        The registered :class:`~harness.contract.ReplyProjection`.
+
+    Raises:
+        RuntimeError: When no reply reader is registered for ``fmt`` —
+            either the caller supplied a format the suite does not yet
+            cover, or the floor constant :data:`_ASSERTABLE_REPLY_FORMATS`
+            grew without a reader landing (caught earlier at import time
+            by :func:`_REPLY_REGISTRY_GUARD`, so reaching this branch
+            indicates the caller reached past the guard).
+    """
+    try:
+        return _REPLY_PROJECTIONS[fmt]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"harness/oracle.py: no ReplyProjection registered for {fmt!r}; "
+            "every format in _ASSERTABLE_REPLY_FORMATS must have a reader — "
+            "_REPLY_REGISTRY_GUARD should have caught this at import time"
+        ) from exc
+
+
+def _REPLY_REGISTRY_GUARD() -> None:
+    """Assert :data:`_ASSERTABLE_REPLY_FORMATS` is a subset of the
+    registered reply projections.
+
+    The check is **superset**, not exact: an additional reply reader
+    (e.g. Bedrock Converse via KBR-312) is welcome to grow the
+    registry past the floor — what the guard catches is the converse,
+    "the constant grew without a reader landing". The reviewer
+    suggestion S8 named this as the load-bearing failure case to pin.
+
+    Raises:
+        RuntimeError: When a format is in :data:`_ASSERTABLE_REPLY_FORMATS`
+            but no reader is registered for it.
+    """
+    missing = [
+        fmt
+        for fmt in _ASSERTABLE_REPLY_FORMATS
+        if fmt not in _REPLY_PROJECTIONS
+    ]
+    if missing:
+        raise RuntimeError(
+            f"harness/oracle.py: _ASSERTABLE_REPLY_FORMATS grew but no "
+            f"reply reader is registered for {missing}; the floor "
+            "constant and the reader registration must move together"
+        )
+
+
+# --------------------------------------------------------------------------
 # Public report object
 # --------------------------------------------------------------------------
 
@@ -347,6 +470,45 @@ class OracleReport:
     inbound_projection: Request
     captured_projection: Request
     deltas: tuple[str, ...]
+
+
+# --------------------------------------------------------------------------
+# Reply-direction report object (KBR-59 / T-D10)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReplyOracleReport:
+    """A small report the reply-direction oracle attaches to a successful run.
+
+    Mirrors :class:`OracleReport` but carries :class:`Reply` projections
+    rather than :class:`Request`. The two reports are separate dataclasses
+    rather than one type with a ``kind`` discriminator — the call-site
+    reviewer is told at the type level whether the comparison ran on the
+    request or the reply side, and T-I8 (cross-attempt comparison) reads
+    both as separate records. KBR-59.
+
+    ``__hash__`` is set to ``None`` explicitly so a future
+    set-or-dict use fails loud rather than inheriting-by-luck from
+    dataclass auto-hash (the :class:`Reply` projection's parts are
+    themselves unhashable, so a derived hash would ``TypeError`` at
+    first use — making the limitation a property of the type, not an
+    accident of attribute composition; reviewer suggestion S3).
+
+    Attributes:
+        inbound_projection: The wire-independent form of the inbound
+            reply as captured on the agent side.
+        captured_projection: The wire-independent form of the captured
+            reply as observed on the upstream.
+        deltas: The concrete delta paths the structural diff found, in
+            walk order. Empty on a run with byte-identical projections.
+    """
+
+    inbound_projection: Reply
+    captured_projection: Reply
+    deltas: tuple[str, ...]
+
+    __hash__ = None  # type: ignore[assignment]
 
 
 # --------------------------------------------------------------------------
@@ -487,12 +649,115 @@ def assert_no_unclaimed_mutation(
     )
 
 
+def assert_no_unclaimed_reply_mutation(
+    inbound: CapturedReply,
+    inbound_format: WireFormat,
+    captured: CapturedReply,
+    captured_format: WireFormat,
+    register: tuple[r.MutationRow, ...],
+    triggers_met: frozenset[r.Trigger],
+    *,
+    provider_key: str = r.ALL_PROVIDERS,
+) -> ReplyOracleReport:
+    """Assert that every difference between the two reply projections is registered.
+
+    The response-direction twin of :func:`assert_no_unclaimed_mutation`
+    (KBR-59 / T-D10). §3.3.1's last paragraph makes response translation
+    "a different claim [that] gets a different test", and the obligations
+    — and omissions — are explicit.
+
+    Runs three obligations, in order:
+
+    1. **Totality gate** (§3.3.1, §7.4). Both projections pass through
+       :func:`~harness.contract.verify_total`. A non-empty residual or a
+       dropped field fails the run, naming the field, with the
+       ``verify_total`` exception type **unmodified** — the entry point
+       does not wrap it (reviewer suggestion S6).
+    2. **§3.3.2 assertion 1 + assertion 2.** Threaded through
+       :func:`_run_assertions` with :func:`_structural_reply_diff`; the
+       shared claim-matching and conditional-violations machinery stays
+       path-agnostic and untouched (reviewer decision B2).
+    3. **(omitted) §4.3 C2 native-passthrough byte-level check.** The
+       reply body is the upstream's serialised output, never a forwarded
+       pass-through; key-order preservation is a request-side concern.
+    4. **(omitted) §3.3.5 routing assertion.** Routing is part of the
+       *request*: the reply traverses the same connection the request
+       did, and the request oracle already verifies that. The entry
+       point's signature has no ``expected_route`` parameter — a
+       compile-time shape pin, not a runtime one.
+
+    Args:
+        inbound: The agent-side reply as observed on the wire.
+        inbound_format: The format of ``inbound`` — supplied by the
+            harness from the observed wire shape (§3.3.4).
+        captured: The upstream-side reply as observed on the recording
+            upstream (already reassembled from SSE if streamed; that is
+            the boundary the reply readers' ``read_reply`` docstring
+            carries — KBR-39 / T-A7).
+        captured_format: The format of ``captured``.
+        register: The Permitted-Mutation Register rows the oracle
+            classifies against. Typically :data:`~harness.register.REGISTER`.
+        triggers_met: The trigger vocabulary the input met.
+        provider_key: The adapter this run is judging — narrows the
+            runtime notion of "live on this adapter" via
+            :func:`~harness.register.row_is_in_scope`. Defaults to
+            :data:`~harness.register.ALL_PROVIDERS`, the permissive
+            sentinel — the call-site short-circuit mirrors KBR-307
+            verbatim. Keyword-only.
+
+    Returns:
+        A :class:`ReplyOracleReport` recording the projections and the
+        deltas. The report is what future reply-side cross-attempt
+        comparisons (T-I8) read on a successful run.
+
+    Raises:
+        UnreadableBodyError: When a reply reader cannot read a body.
+            Bubbles from :class:`~harness.contract.ReplyProjection`
+            unchanged.
+        ProjectionTotalityError: When :func:`~harness.contract.verify_total`
+            rejects a projection. Bubbles unchanged; the concrete type
+            is :class:`~harness.contract.ResidualFieldsError` or
+            :class:`~harness.contract.DroppedFieldsError`, not the
+            parent (reviewer finding C8).
+        UnclaimedMutationError: When §3.3.2 assertion 1 fails on the
+            reply side.
+        ConditionalRowFiredWithoutTriggerError: When §3.3.2 assertion 2
+            fails on the reply side.
+    """
+    # Step 1 — project both captures through the registered reply readers.
+    inbound_projection = _reply_reader_for(inbound_format).read_reply(inbound)
+    captured_projection = _reply_reader_for(captured_format).read_reply(captured)
+
+    # Step 2 — totality gate. verify_total raises unmodified on non-empty
+    # residual or dropped field; that raise is the oracle's first
+    # failure mode and skips the structural diff.
+    verify_total(inbound_projection)
+    verify_total(captured_projection)
+
+    # Step 3–4 — diff via the reply twin, claim matching, assertion 1, assertion 2.
+    deltas = _run_assertions(
+        inbound_projection,
+        captured_projection,
+        register,
+        triggers_met,
+        diff=_structural_reply_diff,
+        provider_key=provider_key,
+    )
+
+    return ReplyOracleReport(
+        inbound_projection=inbound_projection,
+        captured_projection=captured_projection,
+        deltas=tuple(deltas),
+    )
+
+
 def _run_assertions(
     inbound_projection: Request,
     captured_projection: Request,
     register: tuple[r.MutationRow, ...],
     triggers_met: frozenset[r.Trigger],
     *,
+    diff: Callable[[Any, Any], tuple[str, ...]] | None = None,
     provider_key: str = r.ALL_PROVIDERS,
 ) -> list[str]:
     """Run §3.3.2 assertions 1 and 2 over two already-projected requests.
@@ -502,11 +767,27 @@ def _run_assertions(
     without paying for a body, a reader, or a bridge — the T-W9 precedent
     for attribution: a failing test must name the layer that failed.
 
+    The ``diff`` callable is KBR-59's (T-D10) seam: the request oracle
+    keeps ``None`` (resolved to :func:`_structural_diff`, hard-typed on
+    :class:`Request`, at call time); the reply-twin passes
+    :func:`_structural_reply_diff`, hard-typed on :class:`Reply`. The
+    assertion-claiming machinery downstream is path-agnostic and stays
+    shared — one engine, two diffs. ``None`` rather than the callable
+    itself is the default because :func:`_structural_diff` is defined
+    later in this module, so a module-level default value would raise
+    :class:`NameError` at import time.
+
     Args:
         inbound_projection: The inbound request's projection.
         captured_projection: The captured request's projection.
         register: The Permitted-Mutation Register rows.
         triggers_met: The trigger vocabulary the input met.
+        diff: The structural diff to drive. ``None`` (every existing
+            call site — 25 in ``test_oracle.py``, plus the request
+            oracle's private call site) resolves to
+            :func:`_structural_diff` at call time, so the
+            request-side behaviour is unchanged. KBR-59 / reviewer
+            finding C7.
         provider_key: The adapter this run is judging — narrows the
             runtime oracle's notion of "live on this adapter" by scoping
             each row by its :attr:`~harness.register.MutationRow.scope`.
@@ -526,7 +807,12 @@ def _run_assertions(
         UnclaimedMutationError: When assertion 1 fails.
         ConditionalRowFiredWithoutTriggerError: When assertion 2 fails.
     """
-    deltas = _structural_diff(inbound_projection, captured_projection)
+    # Resolve the diff at call time so the module-level default can be
+    # ``None`` (KBR-59 — :func:`_structural_diff` is defined later in
+    # this module, so it cannot be the function-arg default).
+    if diff is None:
+        diff = _structural_diff
+    deltas = diff(inbound_projection, captured_projection)
 
     # Claim matching. For each delta, the rows whose trigger is met,
     # whose pattern matches, and whose site is reachable on the adapter
@@ -1059,6 +1345,78 @@ def _diff_tools(inbound: Conversation, captured: Conversation) -> Iterable[str]:
             yield c.tool_path(name, "cache_control")
 
 
+def _structural_reply_diff(inbound: Reply, captured: Reply) -> tuple[str, ...]:
+    """Emit concrete delta paths between two :class:`Reply` projections.
+
+    The response-direction twin of :func:`_structural_diff` (KBR-59 /
+    T-D10). Walks ``parts`` and the bare ``stop_reason``. **Two fields
+    are skipped unconditionally** (reviewer finding C10 retired the
+    earlier "non-canonical value" qualifier):
+
+    * :attr:`Reply.usage` — the design carries it "but excluded from
+      the fidelity diff" (``contract.py:1318`` docstring); usage is
+      provider-reported and never agent-supplied, so a difference
+      carries no I1 information.
+    * :attr:`Reply.stop_reason_raw` — carries the wire's own value on
+      a non-canonical stop reason; it has no I1 information either.
+
+    Neither generates a ``reply.usage[*]`` or ``reply.stop_reason_raw``
+    delta. The residual is not walked, matching :func:`_structural_diff`'s
+    rationale: the totality gate has already rejected a non-empty
+    residual before this function runs.
+
+    Address forms:
+
+    * ``reply.parts[<i>].<field>`` — field-level, per §7.4.1 rule 2
+      (residual keys are indexed; field names are stable across
+      readers).
+    * ``reply.parts[<i>]`` — bare-index, for a part-count mismatch or
+      a kind mismatch at an index (two readers that disagree about a
+      part boundary report a delta at the boundary and leave the
+      fields unaddressed).
+    * ``reply.stop_reason`` — the keyed literal, the M28 anchor.
+
+    Args:
+        inbound: The inbound reply projection.
+        captured: The captured reply projection.
+
+    Returns:
+        A tuple of concrete delta paths in walk order. Empty on
+        byte-equal projections.
+    """
+    deltas: list[str] = []
+
+    # stop_reason — bare keyed literal (M28's anchor). The raw value is
+    # skipped above; see the docstring.
+    if inbound.stop_reason != captured.stop_reason:
+        deltas.append(c.REPLY_STOP_REASON)
+
+    # Parts — index-aligned pairwise diff. Length mismatch or kind
+    # mismatch collapses to the bare index; same-kind field differences
+    # address the field directly.
+    n = max(len(inbound.parts), len(captured.parts))
+    for i in range(n):
+        in_part = inbound.parts[i] if i < len(inbound.parts) else None
+        cap_part = captured.parts[i] if i < len(captured.parts) else None
+
+        # Either side ran out, or the parts disagree on kind — the
+        # §7.4.1 bare-index form. Reporting a bare-index delta here is
+        # deliberate: a narrower field-level path would imply a
+        # same-kind comparison that this branch already ruled out.
+        if type(in_part) is not type(cap_part) or in_part is None or cap_part is None:
+            deltas.append(c.reply_part_path(i))
+            continue
+
+        # Same kind; address every differing field.
+        for field in dataclasses.fields(in_part):
+            in_value = getattr(in_part, field.name)
+            cap_value = getattr(cap_part, field.name)
+            if in_value != cap_value:
+                deltas.append(f"{c.reply_part_path(i)}.{field.name}")
+
+    return tuple(deltas)
+
+
 # --------------------------------------------------------------------------
 # Claim matching + assertion 2
 # --------------------------------------------------------------------------
@@ -1238,7 +1596,25 @@ _register_projection(GeminiProjection())
 _register_projection(OllamaProjection())
 _register_projection(ResponsesProjection())
 
+# Reply-direction readers (KBR-59 / T-D10) — central registration here,
+# mirroring the request-side block above. Five formats have a
+# `read_reply` today; an additional reader (e.g. KBR-312's Bedrock
+# Converse reply reader) grows _ASSERTABLE_REPLY_FORMATS above and
+# adds one line here.
+from harness.reader_anthropic_messages import AnthropicMessagesReplyProjection  # noqa: E402
+from harness.reader_chat_completions import ChatCompletionsReplyProjection  # noqa: E402
+from harness.reader_gemini import GeminiReplyProjection  # noqa: E402
+from harness.reader_ollama import OllamaChatReplyProjection  # noqa: E402
+from harness.reader_responses import ResponsesReplyProjection  # noqa: E402
+
+_register_reply_projection(AnthropicMessagesReplyProjection())
+_register_reply_projection(ChatCompletionsReplyProjection())
+_register_reply_projection(GeminiReplyProjection())
+_register_reply_projection(OllamaChatReplyProjection())
+_register_reply_projection(ResponsesReplyProjection())
+
 _REGISTRY_GUARD()
+_REPLY_REGISTRY_GUARD()
 
 
 __all__ = [
@@ -1247,7 +1623,9 @@ __all__ = [
     "NativePassthroughKeyOrderError",
     "OracleError",
     "OracleReport",
+    "ReplyOracleReport",
     "RoutingMismatchError",
     "UnclaimedMutationError",
     "assert_no_unclaimed_mutation",
+    "assert_no_unclaimed_reply_mutation",
 ]
