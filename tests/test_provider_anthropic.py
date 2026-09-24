@@ -379,6 +379,69 @@ class TestAnthropicStopSequencesAndTopK:
         assert result["top_k"] == 40
 
 
+class TestAnthropicFamilySixSamplingKeysDrop:
+    """KBR-305: the six KBR-301 sampling keys stay dropped on the Messages rebuild.
+
+    The Anthropic Messages request schema accepts none of the six (verified
+    2026-09-23 against ``platform.claude.com/docs/en/api/messages`` — no
+    ``seed``, ``n``, penalties, or logprobs fields exist; the API is
+    single-response-only).  This adapter family rebuilds its body from an
+    allowlist, so the keys die here by omission; the tests below pin that
+    omission as deliberate so a future widening is a code change plus a
+    register edit, never a silent one.  Register row P43 claims the drop.
+
+    Parametrised over the whole family because each member rebuilds through
+    the base class's allowlist (the four delegates call
+    ``super().translate_to_upstream`` on the translated branch); the
+    OpenCode case names a Messages-routed model because the adapter routes
+    on the model and its Responses route is P37's territory.
+    """
+
+    SIX_SAMPLING_KEYS = ("n", "seed", "presence_penalty", "frequency_penalty", "logprobs", "top_logprobs")
+
+    @pytest.mark.parametrize(
+        "adapter_cls,model",
+        [
+            (AnthropicAdapter, "claude-sonnet-4-6"),
+            (CustomAnthropicAdapter, "claude-sonnet-4-6"),
+            (MiniMaxTokenAnthropicAdapter, "claude-sonnet-4-6"),
+            (OpenCodeGoAdapter, "minimax-m2.7"),
+            (ZaiAnthropicAdapter, "claude-sonnet-4-6"),
+        ],
+    )
+    def test_each_key_stays_absent(self, adapter_cls, model):
+        """Carrying all six at once leaves none of them on the Messages body."""
+        adapter = adapter_cls()
+        cc = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+            **{key: 1 for key in self.SIX_SAMPLING_KEYS},
+        }
+        cc["logprobs"] = True  # the bool spelling, not the int 1
+        result = adapter.translate_to_upstream(cc)
+        leaked = [key for key in self.SIX_SAMPLING_KEYS if key in result]
+        assert not leaked, f"{adapter_cls.__name__} leaked {leaked} onto the Messages body"
+
+    def test_values_do_not_land_under_message_spellings(self):
+        """The keys do not resurface under a renamed Messages spelling either."""
+        cc = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+            "n": 3,
+            "seed": 42,
+            "presence_penalty": 0.5,
+            "frequency_penalty": 0.5,
+            "logprobs": True,
+            "top_logprobs": 5,
+        }
+        result = AnthropicAdapter().translate_to_upstream(cc)
+        assert "num_choices" not in result
+        assert "response_logprobs" not in result
+        assert "top_logprobs" not in result
+
+
 class TestAnthropicToolChoiceAndMetadata:
     """KBR-214: the CC ``tool_choice`` and ``_metadata`` reach the Messages body.
 

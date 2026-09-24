@@ -485,6 +485,85 @@ class TestDeclaredControls:
         assert req.envelope.extra["keep_alive"] == "5m"
 
 
+class TestOllamaTopLevelLogprobs:
+    """KBR-305: top-level ``logprobs`` / ``top_logprobs`` project onto the sampling set.
+
+    Ollama's published ``ChatRequest`` carries both keys top-level —
+    ``Logprobs bool json:"logprobs,omitempty"`` and
+    ``TopLogprobs int json:"top_logprobs,omitempty"`` in
+    ``ollama/api/types.go`` — the same spellings Chat Completions uses.
+    KBR-305 teaches the Ollama adapter to forward them, and the reader to
+    project them; without the reader half, any ollama_cloud capture
+    carrying the keys residualises and the oracle's totality gate
+    (``verify_total`` → ``ResidualFieldsError``) hard-fails the run before
+    register matching.
+
+    Projection is **verbatim** — the reader family's documented
+    "no inner-type validation" posture (``reader_ollama.py``,
+    ``_project_options``, mirrored from ``reader_chat_completions.py``):
+    type discipline belongs to the corpus and the oracle, not the reader.
+    """
+
+    def test_logprobs_true_projects(self) -> None:
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "logprobs": True,
+        }
+        req = _project(body)
+        assert req.residual == {}
+        assert req.conversation.sampling["logprobs"] is True
+
+    def test_logprobs_false_projects(self) -> None:
+        """``False`` is the only falsy-but-meaningful value in the six; it projects."""
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "logprobs": False,
+        }
+        req = _project(body)
+        assert req.residual == {}
+        assert req.conversation.sampling["logprobs"] is False
+
+    def test_top_logprobs_int_projects(self) -> None:
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "top_logprobs": 5,
+        }
+        req = _project(body)
+        assert req.residual == {}
+        assert req.conversation.sampling["top_logprobs"] == 5
+
+    def test_top_logprobs_bool_projects_verbatim(self) -> None:
+        """A bool-typed ``top_logprobs`` projects verbatim — no inner-type guard.
+
+        The adapter's typed guard (KBR-305, ``OllamaCloudAdapter``) keeps a
+        direct-CC ``top_logprobs: true`` off this wire, but the reader is
+        total over the wire format whatever shape arrives; adding an
+        ``isinstance`` guard here would silently change the family posture
+        for one key.
+        """
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "top_logprobs": True,
+        }
+        req = _project(body)
+        assert req.residual == {}
+        assert req.conversation.sampling["top_logprobs"] is True
+
+    def test_absent_keys_project_nothing(self) -> None:
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        req = _project(body)
+        assert req.residual == {}
+        assert "logprobs" not in req.conversation.sampling
+        assert "top_logprobs" not in req.conversation.sampling
+
+
 class TestToolCalls:
     """The ``tool_calls`` array projects into ``ToolUse`` parts."""
 
