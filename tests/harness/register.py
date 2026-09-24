@@ -1317,6 +1317,77 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
             "it ever does, M29 needs a projectable anchor."
         ),
     ),
+    # KBR-309 rows appended after KBR-55's M27/M28/M29 (renamed to M30/M31
+    # to keep ids unique; the KBR-271 "register-edit companion sites" lesson).
+    MutationRow(
+        id="M30",
+        # KBR-309: drop an agent's ``context_management`` on the translated
+        # Messages route. Anthropic's ``context_management`` is a **beta**
+        # field — the documented endpoint accepts it only when the request
+        # carries ``anthropic-beta: context-management-2025-06-27``
+        # (platform.claude.com/docs/en/build-with-claude/context-editing,
+        # fetched 2026-09-24). The bridge builds upstream headers from
+        # scratch and forwards no inbound agent header (§4.2 C1), so a
+        # KBR-224-style restore would 400 at the upstream. The drop is the
+        # design posture, not a bug; beta-header carriage is a separate
+        # product decision.
+        #
+        # P23's ``_CODEX_DROPPED_CONTROL_FIELDS`` lists ``context_management``
+        # at the same wire-key address, but P23 is ``openai_subscription``-
+        # specific (the Responses allowlist is the policy point there). The
+        # Messages → CC translation has its own policy point — the
+        # translator, which never reads the field — and this row names it.
+        site=("kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.extra_path("context_management"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1b",
+        scope=_TRANSLATED_MESSAGES_ADAPTERS,
+    ),
+    MutationRow(
+        id="M31",
+        # KBR-309: drop the parts-join output on a multi-text-part user
+        # turn. ``build_user_content_message`` collapses multi-text-part
+        # user turns into a joined string by design (KBR-222's byte-identity
+        # decision): every part's text except the last is folded into the
+        # first, and every part after the first is dropped. The captured CC
+        # body carries one text part whose text differs from the inbound's
+        # first text part (``conversation.turns[*].parts[*].text`` delta) and
+        # whose collection is one shorter than the inbound (``conversation.
+        # turns[*].parts[*]`` whole-part drop). ``cache_control`` on the
+        # dropped parts is itself a loss — M16 claims the field-level drop;
+        # M31 claims the part-level collapse that consumes the field.
+        #
+        # KBR-296 deliberately scoped ``carry_cache_control=True`` to the M9
+        # fallback path only; KBR-258 / KBR-263 closed the cache_control
+        # follow-ups as register rows rather than a ``carry_cache_control``
+        # expansion to hop 1, and KBR-309 closes the join's surface deltas
+        # the same way.
+        #
+        # ⚠️ The bare ``parts[*]`` anchor would also claim a *deleted* part
+        # (§3.3.1's own falsification case — a row claiming the whole
+        # collection is a mask, not a fix). The trade-off is recorded here
+        # so a future reader sees the deliberate cost. M3 / M4 / M8 / M17
+        # also use the same bare-part anchor with conditional triggers;
+        # ``_claim_matching`` filters by ``row.trigger in triggers_met``
+        # *before* co-claim, so M31's always-met trigger does not collide
+        # with those rows when theirs are unmet, and adds co-claimers when
+        # theirs are met (no deferral rule applies in ``_claim_matching``,
+        # unlike ``_conditional_violations``'s proper-prefix examples in
+        # `oracle.py:1132-1149`).
+        site=(
+            "kitty/bridge/messages/translator.py:build_user_content_message",
+            "kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",
+        ),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(
+            c.part_path(c.WILDCARD, c.WILDCARD, "text"),
+            c.part_path(c.WILDCARD, c.WILDCARD),
+        ),
+        conditional=False,
+        design_ref="§3.2.1",
+        scope=_TRANSLATED_MESSAGES_ADAPTERS,
+    ),
 )
 
 # --------------------------------------------------------------------------
