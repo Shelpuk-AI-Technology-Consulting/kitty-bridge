@@ -5337,6 +5337,24 @@ class BridgeServer:
 
     async def _handle_messages(self, request: web.Request) -> web.StreamResponse:
         # pragma: no mutate block
+        """Handle an inbound Anthropic Messages request end to end.
+
+        Validates and normalizes the request, then either streams the reply
+        (delegating to :meth:`_stream_messages`) or, non-streaming, sends one
+        upstream request and decides by the reply's shape: a native
+        Messages-shaped reply is judged through the D3 truncation check and
+        the empty gate (KBR-306) before it ships as-is; a Chat
+        Completions-shaped reply is judged by the empty gate and translated.
+        Errors surface in the endpoint's own envelope (``type: "error"``).
+
+        Args:
+            request: The inbound client request carrying the Messages API body.
+
+        Returns:
+            A JSON ``Response`` — the translated message, the D3 ``400``
+            truncation terminal, or the D4 ``502 empty_response`` terminal —
+            or, for ``stream: true``, the prepared SSE stream.
+        """
         exc = await self._select_backend_or_hold(request)
         if exc is not None:
             return self._all_unhealthy_response(exc, style="anthropic")
@@ -5430,6 +5448,37 @@ class BridgeServer:
                 truncation = self._messages_truncation_before_content(cc_response)
                 if truncation is not None:
                     return web.json_response(_d3_truncation_error_body(truncation), status=400)
+                # KBR-306: judge the parsed native reply through the Messages-shaped arm
+                # of _is_empty_cc_response (mirrors PreambleHold._block_start_releases Q14 D1;
+                # a thinking block does not count as content, consistent with the streaming
+                # hold; tool_use blocks count as content per D1). The empty ladder already
+                # walked inside _request_with_retry (its built-in walk — mirror the existing
+                # walk, invent no second ladder); the gate sits after the walk, before the
+                # audit/bill/mark block, so a judged-empty completion triggers no handler
+                # side effects at all. The D4 body byte-images the elif D4 (server.py:5510)
+                # and the streaming S11 terminal (server.py:7095); one client branch
+                # (502, reason=empty_response) covers the route in both stream modes.
+                # Whitespace-only text carries over as non-empty (arm as-is — closing that
+                # cell would require widening the arm AND the streaming hold together,
+                # changing streaming behaviour the ticket records as fine); reasoning-only
+                # trade-off KBR-287/293/297/298/300 carries over unchanged.
+                if self._is_empty_cc_response(cc_response):
+                    logger.warning(
+                        "Messages non-streaming empty native response (%s), responding with the "
+                        "empty-response terminal",
+                        self._active_provider.provider_type,
+                    )
+                    return web.json_response(
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "api_error",
+                                "message": _NATIVE_EMPTY_REPLY_MESSAGE,
+                                "reason": "empty_response",
+                            },
+                        },
+                        status=502,
+                    )
                 result = cc_response
             # KBR-298 widened by KBR-300, KBR-304 closed the native carve-out: judge
             # the parsed cc_response through _is_empty_cc_response before

@@ -955,8 +955,9 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   per handler, no new ladder logic, no per-route D4 body change. The
   native-Messages arm of `/v1/messages` — the `if cc_response.get("type") ==
   "message"` branch, where the reply arrives in native Messages shape —
-  stays structurally out of the gate (it never reaches the elif) and
-  remains the recorded residual for both KBR-300 and KBR-304. Tests: each
+  stayed structurally out of the gate (it never reaches the elif) and was
+  the recorded residual for both KBR-300 and KBR-304 — closed by KBR-306
+  below. Tests: each
   of the four KBR-300 test files gained a native-provider variant
   (`test_an_empty_native_completion_ends_in_the_d4_terminal` +
   `test_an_empty_native_attempt_crosses_to_a_healthy_plain_peer` +
@@ -965,6 +966,67 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   deliberately leaves `upstream_wire_shape` at the inherited
   `CHAT_COMPLETIONS` (the base-class invariant is a production-adapter
   rule; the test exercises the conjunct dimension only).
+- **KBR-306 closed the last cell: the native-Messages arm of `/v1/messages`
+  non-streaming.** After KBR-304 every CC-shaped non-streaming empty reply
+  on every route was judged, but the `if cc_response.get("type") ==
+  "message"` branch of `_handle_messages` — the arm a native Anthropic
+  provider reaches when it answers in its own Messages shape — shipped the
+  ladder-exhausted empty reply as a billed, healthy-marked `200`:
+  `result = cc_response` fell through to the audit/bill/mark block, and
+  `_messages_truncation_before_content` (D3) could not catch a genuinely
+  empty `end_turn`. The fix mirrors KBR-298/300/304 exactly: inside the
+  `if` branch, after the D3 truncation check and before
+  `result = cc_response`, the parsed native reply is judged through
+  `self._is_empty_cc_response` — whose Messages-shaped arm (pinned by the
+  streaming twin `PreambleHold._block_start_releases`, Q14 D1) decides —
+  and a judged-empty completion ends in the route's D4 terminal
+  (`server.py:5510-5520`'s byte-image: bare-JSON `502` +
+  `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"`), before
+  `_audit_response_tool_use` / `_log_usage` / `_mark_backend_healthy`. One
+  client branch, `(502, reason=empty_response)`, now covers `/v1/messages`
+  in both stream modes — the D4 body is byte-identical across the
+  non-streaming elif, the native `if` arm, and the streaming S11 terminal.
+  The ladder is unchanged: `_is_non_retryable_reply` already judges
+  Messages-shaped empties through the same arm, so
+  `_request_with_retry_{single,balancing}` walked these attempts before
+  this ticket; the gate sits where it can only see a content-bearing reply
+  or the exhausted empty one. D3 keeps its ordering (a
+  `max_tokens` / `model_context_window_exceeded` stop reason on a
+  content-less reply is non-retryable in the ladder and renders the
+  request-shaped `400` before the new gate). Two carry-overs are
+  deliberate, recorded here so they are not read as accidents:
+  - *Whitespace-only text is not judged empty* (PO confirmation
+    2026-09-23): the Messages arm's `text != ""` (no `.strip()`) mirrors
+    the streaming hold's release semantics; a native reply whose only
+    content is a whitespace-only text block reaches the client as `200`
+    in both stream modes. Widening it would require changing BOTH the arm
+    and the streaming hold together to preserve the documented mirror —
+    a behaviour change on a streaming path this ticket explicitly
+    records as fine, so it stays open.
+  - *A thinking-only native reply takes the ladder* (the KBR-287/293/
+    297/298/300 reasoning-only trade-off, carried through the
+    KBR-277/285 judge family): the arm counts a thinking block as empty,
+    consistent with the streaming hold, which also does not release on a
+    thinking block. A tool_use block counts as content (D1: any block
+    whose type is not text/thinking/redacted_thinking is content).
+  Tests:
+  `tests/bridge/test_messages_native_non_streaming_empty_hold.py` (the
+  KBR-300/304 harness shape in a sibling file: a real in-process
+  `BridgeServer` against an `aioresponses` upstream; the
+  `_NativeOpenAIAdapter` stub physically mirrored from the raw-CC file;
+  Messages-shaped canned bodies that flow through the
+  `_native_messages_request + type == "message"` guard as-is; the
+  recording seam capturing `_log_usage` / `_mark_backend_healthy`; three
+  RED tests on the unfixed code — empty, thinking-only, and the
+  balancing-mode `[native, native]` exhaustion whose `healthy_log == []`
+  is the meaningful "no healthy-mark" pin, the single-backend assertion
+  being vacuous by the recorded asymmetry; four pass-through pins —
+  content-bearing, tool-use-only, D3 truncation, and the
+  `[native, plain]` crossing — pass under both predicates). The existing
+  R4 pin in `tests/bridge/test_native_provider_reply_shape.py`
+  (`test_claude_code_still_gets_the_upstream_messages_reply`, three real
+  native adapters) continues to hold and is the stronger content-bearing
+  pass-through pin.
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
