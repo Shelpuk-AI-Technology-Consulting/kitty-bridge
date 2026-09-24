@@ -752,8 +752,8 @@ def assert_no_unclaimed_reply_mutation(
 
 
 def _run_assertions(
-    inbound_projection: Request,
-    captured_projection: Request,
+    inbound_projection: Request | Reply,
+    captured_projection: Request | Reply,
     register: tuple[r.MutationRow, ...],
     triggers_met: frozenset[r.Trigger],
     *,

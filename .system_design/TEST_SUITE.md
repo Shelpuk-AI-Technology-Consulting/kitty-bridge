@@ -148,9 +148,14 @@ id-synthesis rows added by KBR-195 (M18, M19), six KBR-194 Gemini-side slot drop
 the Gemini inbound route (M20–M25), KBR-184's M26 (the Anthropic-family `metadata`
 drop, G31), and KBR-271's M9a and M9b (the M9 fallback converter's cache-breakpoint drops,
 G43's register half) — one response-path row (M12), and the routing row **M14** (§3.3.5), which is
-listed here because the destination is a mutation surface the body cannot show. Twenty-eight rows
-in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a downstream
-error, so it mutates nothing — leaving **twenty-seven live** bridge-level rows.
+listed here because the destination is a mutation surface the body cannot show. Twenty-eight request-path rows
+in all after KBR-59 (T-D10) adds the three response-direction rows **M27, M28, M29** at the
+table immediately below this prose — a Gemini response-direction `functionCall.id` echo,
+the Ollama canonical tool-calling `reply.stop_reason` delta, and the rare Ollama-vs-CC
+part-ordering disagreement on Thinking+ToolUse replies (§3.2.1, KBR-257 / KBR-267
+comment 3.1 / KBR-267 comment 3.2). Thirty-one rows in all. The former substitution row
+M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutates nothing
+— leaving **thirty live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|

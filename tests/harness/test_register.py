@@ -143,7 +143,7 @@ class TestTheRowsThemselves:
     """§3.2 publishes 83 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """27 bridge-level rows less the withdrawn M13, plus 56 provider-level.
+        """30 bridge-level rows less the withdrawn M13, plus 53 provider-level.
 
         The +3 over the pre-KBR-59 count is the three response-direction
         rows KBR-59 adds (M27, M28, M29). The +8 over the pre-KBR-195 count
