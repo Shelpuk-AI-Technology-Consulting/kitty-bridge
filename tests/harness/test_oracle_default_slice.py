@@ -300,7 +300,8 @@ def _triggers_met(entry) -> frozenset[r.Trigger]:
     KBR-307 precedent (`test_oracle_driven.py` includes it at its driven-slice
     call site); `_claim_matching` keeps only rows whose trigger is in the set,
     so the unconditional rows M14 and M26 stay inert without it (KBR-309: M26
-    is the metadata drop M26 was authored to claim). For entries whose body
+    is the row that now claims the previously-unclaimed `metadata` delta).
+    For entries whose body
     exceeds the default profile's derived budget, `OVER_COMPACTION_BUDGET` is added
     — M5's trigger is PROFILE-decided and declared at the call site that resolves
     the profile (corpus README, "Triggers have three states").
