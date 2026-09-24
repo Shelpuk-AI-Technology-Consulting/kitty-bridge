@@ -1,8 +1,9 @@
 """The §8.2 socket-binding L1 module registry -- shared source of truth.
 
-``.system_design/TEST_SUITE.md`` §8.2 enumerates fifteen modules that bind
-real sockets or spawn real processes and so are ``l1`` by path default
-today. Two guards read this tuple, on different schedules:
+``.system_design/TEST_SUITE.md`` §8.2 enumerates sixteen bullet modules that
+bind real sockets or spawn real processes and so are ``l1`` by path default
+today; the KBR-10 paragraph entry below the bullets makes it seventeen in
+all. Two guards read this tuple, on different schedules:
 
 * **KBR-272** (DRAFT PR #235): a per-module ``pytest.mark.timeout(120)`` mark
   so the §8.2 modules' hang-prone fixtures and teardowns stay bounded on the
@@ -78,6 +79,9 @@ SOCKET_BINDING_L1_MODULES: tuple[str, ...] = (
     # KBR-56 (T-D6) bullet: the botocore-oracle slice starts a real
     # ``BridgeServer`` and the ``BedrockRecordingUpstream`` (two sockets).
     "tests/harness/test_oracle_botocore_slice.py",
+    # KBR-57 (T-D7) bullet: the provider-aiohttp-oracle slice starts a real
+    # ``BridgeServer`` and the ``ProviderRecordingUpstream`` (two sockets).
+    "tests/harness/test_oracle_provider_aiohttp_slice.py",
     # KBR-10 paragraph (38 child interpreters; §8.2 describes it after the
     # bullets, which is why it is a separate entry here).
     "tests/cli/test_stream_encoding.py",
