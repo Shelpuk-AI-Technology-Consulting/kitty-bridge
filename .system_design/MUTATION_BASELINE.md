@@ -155,7 +155,8 @@ run to completion: the clean-test run that precedes it exercises L1
 tests which make real upstream calls, and under sibling-session
 contention on the recording workstation those calls stalled in
 `CLOSE_WAIT` with no per-test timeout bound
-(`pytest-timeout` is not a dev dependency). The stats cache is
+(`pytest-timeout` joined the dev extra with KBR-272; the marks bound
+the socket-binding modules at 120 s). The stats cache is
 `mutants/mutmut-stats.json`; re-running `mutmut run` with the group's
 patterns on an idle workstation resumes from it and skips the ~20
 minute stats phase. Recording the score is the re-measure obligation
@@ -213,7 +214,8 @@ reference after that point is the outcome to avoid.
   for the same reason, so one `--deselect` only shifts the failure to
   the next case. Investigating the trampoline interaction further is
   its own ticket, not T-H1 scope.
-- `also_copy = ["README.md", "scripts"]` (KBR-266) — `tests/test_aggregate_mutation_baseline.py`
+- `also_copy = ["README.md", "scripts", "openapi"]` ("scripts" KBR-266;
+  "openapi" KBR-272) — `tests/test_aggregate_mutation_baseline.py`
   imports `scripts/aggregate_mutation_baseline.py` by filesystem path
   at module level, so a fresh `mutants/` tree needs `scripts/` inside
   it or test collection fails before the clean run starts. The entry

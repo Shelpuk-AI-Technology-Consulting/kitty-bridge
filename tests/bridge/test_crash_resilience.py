@@ -27,6 +27,9 @@ from kitty.types import BridgeProtocol
 # ── Stub adapters ──────────────────────────────────────────────────────────
 
 
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 class StubLauncher(LauncherAdapter):
     def __init__(self, protocol: BridgeProtocol = BridgeProtocol.MESSAGES_API):
         self._protocol = protocol

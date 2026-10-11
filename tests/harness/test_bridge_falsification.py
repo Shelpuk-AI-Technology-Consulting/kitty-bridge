@@ -34,8 +34,8 @@ it".
 shared registry holding four things that are wrong on purpose is a hazard, and
 it would also make the registry-completeness meta-test assert over them.
 
-**Layer.** No ``pytestmark``: the ``l1`` path default, for the reason
-``test_bridge.py`` records.
+**Layer.** The only ``pytestmark`` is the KBR-272 timeout bound (below); the
+``l1`` path default stands, for the reason ``test_bridge.py`` records.
 """
 
 from __future__ import annotations
@@ -66,6 +66,9 @@ from kitty.providers.custom_openai import CustomOpenAIAdapter
 
 #: The format every defect below declares, so the one thing that differs between
 #: them is the defect itself.
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 FORMAT = WireFormat.ANTHROPIC_MESSAGES
 
 
