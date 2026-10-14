@@ -36,7 +36,12 @@ __all__ = ["CODEX_CLI_VERSION", "build_codex_user_agent"]
 #: checked-in reference workspace carries 0.0.0, a dev placeholder; its release
 #: builds carry the real one, which is what this impersonates.)  Nothing rewrites
 #: this at build time -- it is edited here when the impersonated version moves.
-CODEX_CLI_VERSION = "0.128.0"
+#:
+#: Keep it at or above OpenAI's model client gates: the backend rejects
+#: requests for version-gated models (GPT-6 Astra requires >= 0.153.0) from
+#: older-identity clients with HTTP 400 and an empty body (KBR-318).
+#: ``tests/test_upstream_identity_consistency.py`` guards the floor.
+CODEX_CLI_VERSION = "0.154.0"
 
 
 def build_codex_user_agent() -> str:
