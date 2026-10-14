@@ -1,9 +1,19 @@
-"""OpenAI OAuth flow orchestrator using OpenID Connect / OAuth 2.0 authorization code flow.
+"""OpenAI OAuth flow orchestrator: browser (authorization code) and headless (device code).
 
-This module implements the OpenAI Codex CLI OAuth flow as documented at
-https://auth.openai.com/oauth/authorize with PKCE (RFC 7636) support.
+Two login paths produce the same :class:`OAuthSession`:
 
-The full flow:
+- **Browser flow** (the default on a desktop): OpenID Connect authorization
+  code + PKCE against ``https://auth.openai.com/oauth/authorize`` with a
+  local callback server (see ``run_oauth_flow``).
+- **Device-code flow** (the default on a headless machine — SSH, CI, no
+  display): RFC 8628 against ``auth.openai.com``'s device endpoints with a
+  one-time code the user enters on any machine (see
+  ``run_oauth_device_flow``, KBR-317). The wire protocol mirrors the OpenAI
+  Codex CLI's implementation; the deliberate divergences (interval policy,
+  auto-detect default) are recorded in ``.system_design/SYSTEM_DESIGN.md``
+  §14.
+
+The full browser flow:
   1. Generate PKCE code_verifier + code_challenge (S256)
   2. Start a local callback server on port 1455 (fallback 1456-1459)
   3. Open the authorization URL in the user's browser
@@ -11,6 +21,18 @@ The full flow:
   5. Exchange the auth code for tokens (authorization_code grant)
   6. Exchange the id_token for an OpenAI API key (token-exchange grant)
   7. Return an OAuthSession wrapping the tokens and API key
+
+The full device flow:
+  1. POST /api/accounts/deviceauth/usercode → device_auth_id, user_code,
+     poll interval
+  2. Print the verification URL (auth.openai.com/codex/device) and the
+     one-time code; the user completes sign-in on any machine
+  3. Poll POST /api/accounts/deviceauth/token until authorized (403/404
+     mean "pending"), up to 15 minutes
+  4. Exchange the returned authorization code — with the server-issued
+     PKCE pair and the server-side redirect — for the same token shape as
+     the browser flow
+  5. Exchange the id_token for an OpenAI API key (best-effort, same as browser)
 """
 
 from __future__ import annotations
@@ -818,8 +840,6 @@ async def run_oauth_flow(http: aiohttp.ClientSession | None = None, *, device_au
     try:
         # Always print the URL as a fallback for WSL / headless environments
         # where webbrowser.open may appear to succeed but nothing opens.
-        import sys
-
         print(
             f"\n  Opening browser for OpenAI authentication.\n"
             f"  If the browser did not open, visit:\n\n"

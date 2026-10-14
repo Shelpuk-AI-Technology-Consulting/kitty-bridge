@@ -597,6 +597,7 @@ That holds for an endpoint carrying a query string too, and the query is kept an
 | `kitty profile`                              | Manage profiles (create, edit, delete, set default, list) |
 | `kitty auth openai`                          | Re-authenticate the ChatGPT subscription                  |
 | `kitty auth openai --device-auth`            | ... forcing device-code login (headless machines)         |
+| `kitty auth openai --no-device-auth`         | ... forcing browser login (e.g. behind an SSH tunnel)     |
 | `kitty doctor`                               | Diagnose installation and configuration issues            |
 | `kitty cleanup`                              | Restore agent config files after a crash                  |
 | `kitty bridge`                               | Start a standalone API server                             |
