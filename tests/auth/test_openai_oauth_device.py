@@ -448,8 +448,16 @@ class TestRunDeviceFlowEnd2End:
             task.cancel()
             with pytest.raises(OAuthDeviceCodeCancelledError):
                 await task
+
+    async def test_usercode_404_raises_disabled_error(self) -> None:
         """A 404 on /deviceauth/usercode means device-code auth is disabled
-        for this account/workspace — fail fast with the typed error."""
+        for this account/workspace — fail fast with the typed error.
+
+        Restored as a standalone test after a bad merge folded its body into
+        the cancellation test above (CI review round 2, test-discipline):
+        pytest collected 45 tests instead of 46 and the 404 scenario ran only
+        if the cancellation scenario passed first.
+        """
         with aioresponses() as m:
             m.post(OAUTH_DEVICE_USERCODE_URL, status=404, body="not found")
             with pytest.raises(OAuthDeviceCodeDisabledError):

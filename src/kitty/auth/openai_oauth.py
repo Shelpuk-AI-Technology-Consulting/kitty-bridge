@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, cast
 import aiohttp
 from aiohttp import web
 
-from kitty.auth.headless import is_headless_environment
+from kitty.auth.headless import select_device_flow
 from kitty.auth.oauth_session import (
     ID_TOKEN_TYPE,
     TOKEN_EXCHANGE_GRANT,
@@ -367,20 +367,7 @@ def format_device_code_prompt_plain(verification_url: str, user_code: str) -> st
     )
 
 
-def _select_device_flow(device_auth: bool | None) -> bool:
-    """Resolve the explicit flag (or auto-detect) into a path decision.
 
-    Single home of the §14.3 selection rule so the flow dispatch and the
-    CLI-layer "Opening browser" prediction cannot drift apart.
-
-    Args:
-        device_auth: ``True`` forces the device flow, ``False`` forces the
-            browser flow, ``None`` defers to ``is_headless_environment``.
-
-    Returns:
-        True when the device-code path should run.
-    """
-    return device_auth if device_auth is not None else is_headless_environment()
 
 
 async def run_oauth_device_flow(http: aiohttp.ClientSession | None = None) -> OAuthSession:
@@ -790,7 +777,7 @@ async def run_oauth_flow(http: aiohttp.ClientSession | None = None, *, device_au
     """
     # Selection rule (§14.3): explicit flag wins; otherwise the headless
     # predicate decides. One place, so every entry point inherits it.
-    if _select_device_flow(device_auth):
+    if select_device_flow(device_auth):
         return await run_oauth_device_flow(http=http)
 
     # Generate PKCE + state

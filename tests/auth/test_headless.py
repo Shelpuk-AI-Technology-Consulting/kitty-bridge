@@ -94,3 +94,36 @@ class TestIsHeadlessEnvironment:
         monkeypatch.setenv("DISPLAY", ":0")
         monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5678 5.6.7.8 9012")
         assert is_headless_environment() is True
+
+
+class TestSelectDeviceFlow:
+    """The §14.3 selection rule lives in one function, called by both
+    ``run_oauth_flow`` and the CLI's "Opening browser" gate so the two
+    cannot disagree.
+    """
+
+    def test_true_forces_device(self) -> None:
+        from kitty.auth.headless import select_device_flow
+
+        assert select_device_flow(True) is True
+
+    def test_false_forces_browser(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``False`` forces browser even on a headless box — the
+        ``--no-device-auth`` escape hatch used behind an SSH tunnel."""
+        from kitty.auth.headless import select_device_flow
+
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("DISPLAY", "")  # would otherwise read headless
+        assert select_device_flow(False) is False
+
+    def test_none_defers_to_predicate_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from kitty.auth.headless import select_device_flow
+
+        monkeypatch.setenv("CI", "true")
+        assert select_device_flow(None) is True
+
+    def test_none_defers_to_predicate_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from kitty.auth.headless import select_device_flow
+
+        monkeypatch.setenv("DISPLAY", ":0")
+        assert select_device_flow(None) is False

@@ -6,8 +6,9 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kitty.auth.headless import select_device_flow
 from kitty.auth.oauth_session import OAuthSession
-from kitty.auth.openai_oauth import _select_device_flow, run_oauth_flow
+from kitty.auth.openai_oauth import run_oauth_flow
 from kitty.cli.profile_cmd import BACKUP_PROMPT
 from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import Profile
@@ -58,7 +59,7 @@ async def run_oauth_for_provider(
     # is printed only when the browser path is the one that will run. The
     # prediction calls the same helper the flow dispatches on, so the two
     # cannot drift apart.
-    if not _select_device_flow(device_auth):
+    if not select_device_flow(device_auth):
         print_status("Opening browser for ChatGPT login...")
 
     try:

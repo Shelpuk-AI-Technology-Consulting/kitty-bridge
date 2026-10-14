@@ -215,16 +215,16 @@ through the same backend Kitty already uses. After signing in, pick the Astra mo
 ```bash
 $ kitty auth openai
   ... (device-code or browser login as above) ...
-  ? Model name (default: gpt-5.3-codex): gpt-6-astra-codex
+  ? Model name (default: gpt-5.3-codex): gpt-6-astra
   ? Profile name (default: openai-sub): astra
 
 $ kitty claude
 ```
 
-OpenAI rotates the model list on the subscription backend independently of Kitty releases. If `gpt-6-astra-codex` is
-rejected, try `gpt-6-astra`, or check which Astra model your ChatGPT plan offers (the model picker in the ChatGPT UI
-or `codex` on a machine where it is installed shows the exact id). `Astra Pro` is on Pro-tier subscriptions as
-`gpt-6-astra-pro`.
+OpenAI rotates the model list on the subscription backend independently of Kitty releases. If `gpt-6-astra` is
+rejected, try the codex-suffixed `gpt-6-astra-codex`, or check which Astra model your ChatGPT plan offers (the model
+picker in the ChatGPT UI or `codex` on a machine where it is installed shows the exact id). `Astra Pro` is on Pro-tier
+subscriptions as `gpt-6-astra-pro`.
 
 ### Example: Use MiMo V2 Pro with Claude Code
 

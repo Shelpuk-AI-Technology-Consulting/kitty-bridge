@@ -59,3 +59,22 @@ def is_headless_environment() -> bool:
     if sys.platform.startswith("linux") and not _env_var_set("DISPLAY") and not _env_var_set("WAYLAND_DISPLAY"):
         return True
     return False
+
+
+def select_device_flow(device_auth: bool | None) -> bool:
+    """Resolve the explicit OpenAI login-path flag into a path decision.
+
+    Single home of the selection rule (SYSTEM_DESIGN §14.3) so the flow
+    dispatch inside :func:`kitty.auth.openai_oauth.run_oauth_flow` and the
+    CLI layer's "Opening browser" prediction cannot drift apart: both call
+    this one function.
+
+    Args:
+        device_auth: ``True`` forces the device-code flow, ``False`` forces
+            the browser flow, ``None`` defers to
+            :func:`is_headless_environment`.
+
+    Returns:
+        bool: True when the device-code path should run.
+    """
+    return device_auth if device_auth is not None else is_headless_environment()

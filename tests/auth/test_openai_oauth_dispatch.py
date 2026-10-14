@@ -56,26 +56,29 @@ class TestRunOauthFlowDispatch:
             await run_oauth_flow(device_auth=False)
         assert stub_flows == {"browser": True}
 
-    async def test_none_defers_to_headless_true(
+    async def test_none_defers_to_selector_true(
         self, stub_flows: dict[str, bool], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(openai_oauth, "is_headless_environment", lambda: True)
+        """With no explicit flag, dispatch defers to ``select_device_flow``
+        (the §14.3 single source of truth, called by both the flow and the
+        CLI's "Opening browser" gate)."""
+        monkeypatch.setattr(openai_oauth, "select_device_flow", lambda flag: True)
         with pytest.raises(_SentinelPathError, match="device path"):
             await run_oauth_flow()
         assert stub_flows == {"device": True}
 
-    async def test_none_defers_to_headless_false(
+    async def test_none_defers_to_selector_false(
         self, stub_flows: dict[str, bool], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(openai_oauth, "is_headless_environment", lambda: False)
+        monkeypatch.setattr(openai_oauth, "select_device_flow", lambda flag: False)
         with pytest.raises(_SentinelPathError, match="browser path"):
             await run_oauth_flow()
         assert stub_flows == {"browser": True}
 
-    def test_predicate_import_site_is_production(self) -> None:
-        """The module under test must resolve the predicate through
-        ``kitty.auth.headless`` — the same object the CLI layer sees, not a
-        re-bind or a shadow."""
-        import kitty.auth.headless as headless
+    def test_select_device_flow_resides_in_headless(self) -> None:
+        """The selector is a public symbol of ``kitty.auth.headless`` (the
+        stdlib-only leaf), not a private import across the auth module —
+        CI review round 2, readability finding #2."""
+        from kitty.auth import headless as headless_mod
 
-        assert openai_oauth.is_headless_environment is headless.is_headless_environment
+        assert hasattr(headless_mod, "select_device_flow")
