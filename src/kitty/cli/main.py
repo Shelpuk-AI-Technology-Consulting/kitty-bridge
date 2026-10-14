@@ -412,16 +412,58 @@ def main() -> None:
 
 
 def _run_auth(profile_store: object, cred_store: object, extra_args: list[str]) -> None:
+    """Dispatch the ``kitty auth`` command.
+
+    Args:
+        profile_store: Profile store for the OAuth flow.
+        cred_store: Credential store for the OAuth flow.
+        extra_args: Arguments after the ``auth`` token. ``args[0]`` names
+            the provider (only ``openai`` is supported); the rest are the
+            provider's flags.
+
+    Raises:
+        SystemExit: On an unknown provider (exit 1) or a malformed flag
+            combination (exit 2, from argparse).
+    """
+    import argparse
+    import asyncio
+
     from kitty.cli.auth_cmd import run_auth_openai
 
     args = extra_args or []
-    if not args or args[0] == "openai":
-        import asyncio
-
-        with _tty_required("auth"):
-            asyncio.run(run_auth_openai(profile_store, cred_store))  # type: ignore[arg-type]
-    else:
+    # Bare `kitty auth` keeps its historical default of the openai provider.
+    if not args:
+        args = ["openai"]
+    if args[0] != "openai":
         print(f"Unknown auth provider: {args[0]!r}")
+        sys.exit(1)
+
+    # KBR-317: --device-auth forces the device-code login (no local browser
+    # needed); --no-device-auth forces the localhost-callback browser login
+    # (e.g. behind `ssh -L 1455:localhost:1455`). Neither flag → the flow
+    # auto-detects via kitty.auth.headless (SYSTEM_DESIGN §14.3).
+    flag_parser = argparse.ArgumentParser(
+        prog="kitty auth openai",
+        description="Authenticate the OpenAI ChatGPT subscription provider.",
+    )
+    group = flag_parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--device-auth",
+        dest="device_auth",
+        action="store_true",
+        default=None,
+        help="Force device-code login (for remote/headless machines; the default there anyway)",
+    )
+    group.add_argument(
+        "--no-device-auth",
+        dest="device_auth",
+        action="store_false",
+        help="Force the browser login with the localhost callback (e.g. behind an SSH port forward)",
+    )
+    flag_args = flag_parser.parse_args(args[1:])
+
+    with _tty_required("auth"):
+        asyncio.run(run_auth_openai(profile_store, cred_store, device_auth=flag_args.device_auth))  # type: ignore[arg-type]
 
 
 def _print_unknown_command(args: list[str], adapters: dict, store: ProfileStore) -> None:

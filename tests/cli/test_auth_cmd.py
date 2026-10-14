@@ -71,7 +71,7 @@ def _make_oauth_session() -> OAuthSession:
 def _mock_run_oauth_for_provider(session: OAuthSession):
     """Create an async mock for run_oauth_for_provider that returns (auth_ref, path)."""
 
-    async def _fake_run(profile_store, cred_store, provider):
+    async def _fake_run(profile_store, cred_store, provider, *, device_auth=None):
         import uuid
 
         auth_ref = str(uuid.uuid4())

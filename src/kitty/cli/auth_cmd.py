@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kitty.auth.oauth_session import OAuthSession
-from kitty.auth.openai_oauth import run_oauth_flow
+from kitty.auth.openai_oauth import _select_device_flow, run_oauth_flow
 from kitty.cli.profile_cmd import BACKUP_PROMPT
 from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import Profile
@@ -22,17 +22,28 @@ __all__ = ["run_auth_openai", "run_oauth_for_provider"]
 
 
 async def run_oauth_for_provider(
-    profile_store: ProfileStore, cred_store: CredentialStore, provider: str
+    profile_store: ProfileStore,
+    cred_store: CredentialStore,
+    provider: str,
+    *,
+    device_auth: bool | None = None,
 ) -> tuple[str, str]:
     """Run the OAuth flow for a provider and persist the session.
 
     Generic entry point that both the ``kitty auth`` command and the
-    profile-creation wizards can call to handle browser-based SSO.
+    profile-creation wizards can call to handle browser-based SSO. On a
+    headless environment (SSH, CI, no display) the flow defaults to the
+    device-code path, which needs no local browser (KBR-317).
 
     Args:
         profile_store: Profile store (used to derive config directory).
         cred_store: Credential store to save the session file path.
         provider: Provider type string (currently only ``"openai_subscription"``).
+        device_auth: Force the device-code path (``True``) or the browser
+            path (``False``). ``None`` (the default) auto-detects via
+            :func:`kitty.auth.headless.is_headless_environment`. Must match
+            the value forwarded to :func:`run_oauth_flow`, which performs
+            the actual dispatch.
 
     Returns:
         ``(auth_ref, session_file_path)`` tuple.
@@ -42,10 +53,16 @@ async def run_oauth_for_provider(
         Exception: If the OAuth flow fails.
     """
     check_tty()
-    print_status("Opening browser for ChatGPT login...")
+    # The device path's prompt announces itself on stderr; the stdout
+    # "Opening browser" line is wrong for a no-browser flow (§14.4), so it
+    # is printed only when the browser path is the one that will run. The
+    # prediction calls the same helper the flow dispatches on, so the two
+    # cannot drift apart.
+    if not _select_device_flow(device_auth):
+        print_status("Opening browser for ChatGPT login...")
 
     try:
-        session = await run_oauth_flow()
+        session = await run_oauth_flow(device_auth=device_auth)
     except Exception as exc:
         print_error(f"OpenAI OAuth flow failed: {exc}")
         raise
@@ -67,12 +84,20 @@ async def run_oauth_for_provider(
     return auth_ref, str(session_file_path)
 
 
-async def run_auth_openai(profile_store: ProfileStore, cred_store: CredentialStore) -> Profile:
+async def run_auth_openai(
+    profile_store: ProfileStore,
+    cred_store: CredentialStore,
+    *,
+    device_auth: bool | None = None,
+) -> Profile:
     """Run the OpenAI OAuth flow and create a profile.
 
     Args:
         profile_store: Profile store to save the new profile.
         cred_store: Credential store to store the session file path.
+        device_auth: Force the device-code path (``True``) or the browser
+            path (``False``). ``None`` (the default) auto-detects via
+            :func:`kitty.auth.headless.is_headless_environment`.
 
     Returns:
         The created and saved Profile.
@@ -84,7 +109,9 @@ async def run_auth_openai(profile_store: ProfileStore, cred_store: CredentialSto
     print_section("kitty auth openai")
 
     # Step 1: Run OAuth flow (shared helper)
-    auth_ref, _session_path = await run_oauth_for_provider(profile_store, cred_store, "openai_subscription")
+    auth_ref, _session_path = await run_oauth_for_provider(
+        profile_store, cred_store, "openai_subscription", device_auth=device_auth
+    )
 
     # Step 2: Prompt for model name
     model = prompt_text("Model name (default: gpt-5.3-codex): ")
