@@ -62,11 +62,25 @@ class TestIsHeadlessEnvironment:
         monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
         assert is_headless_environment() is False
 
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason=(
+            "Asserts the Linux-only DISPLAY branch of is_headless_environment: "
+            "macOS/Windows must NOT flip to headless when DISPLAY is absent"
+        ),
+    )
     def test_neither_display_nor_wayland_is_headless(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Linux with no X or Wayland socket has no usable GUI (the CLI-only VM case)."""
         monkeypatch.delenv("DISPLAY", raising=False)
         assert is_headless_environment() is True
 
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason=(
+            "Asserts the Linux-only DISPLAY branch of is_headless_environment: "
+            "an empty DISPLAY string on Linux still counts as headless"
+        ),
+    )
     def test_display_empty_string_is_headless(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DISPLAY", "")
         assert is_headless_environment() is True
