@@ -64,14 +64,16 @@ is wrong for a no-browser flow. The device path's own prompt (step 2's
 ## Implementation notes
 
 - `run_oauth_flow(http=None, *, device_auth=None)`: dispatch at the top —
-  `device_auth if device_auth is not None else is_headless_environment()`.
+  `select_device_flow(device_auth)` from `kitty.auth.headless`.
 - `run_oauth_for_provider(..., *, device_auth=None)` and
   `run_auth_openai(..., *, device_auth=None)` thread the kwarg.
 - The stdout `print_status("Opening browser for ChatGPT login...")` line is
-  now conditional: printed only when the browser path is the predicted one
-  (same predicate, re-evaluated — a pure function, so caller and dispatch
-  cannot disagree). The device path's stderr prompt announces itself; no
-  extra stdout line was added for it.
+  now conditional: printed only when the browser path is the predicted one.
+  The prediction calls the same public `select_device_flow` the flow
+  dispatches on (moved to `kitty.auth.headless` after CI-review round 2 so
+  the symbol is public, not a private cross-module import), so the two call
+  sites cannot drift apart. The device path's stderr prompt announces
+  itself; no extra stdout line was added for it.
 - The four existing browser-path tests in `test_openai_oauth.py` that call
   bare `run_oauth_flow()` now pass `device_auth=False` — on a headless CI
   box the unforced call would (correctly) take the device path and their

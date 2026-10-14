@@ -18,7 +18,10 @@ from __future__ import annotations
 import os
 import sys
 
-# Sentinel set used only in tests; the production code only consults os.environ.
+# SSH-related environment variables whose presence means "this looks like an
+# SSH session".  The production predicate iterates this tuple; the test
+# module also references each name in its own table-driven cases (the
+# constant is shared so a name change here ripples to both sides).
 _SSH_VARS: tuple[str, ...] = ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
 
 

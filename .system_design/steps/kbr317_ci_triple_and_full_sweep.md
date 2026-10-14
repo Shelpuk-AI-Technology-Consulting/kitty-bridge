@@ -46,9 +46,10 @@ run locally too.
   1 critical (FR-4 plain-copy form unimplemented), 3 high (vacuous L2
   request-shape tests, cancellation landing outside the try, missing
   to_dict equality test), plus warnings (dispatch-rule duplication →
-  `_select_device_flow` helper; bare `kitty auth` implicit-openai default
-  restored; vacuous dispatch test strengthened; README transcript
-  completed). All addressed; 146 auth+cli tests green afterwards.
+  `select_device_flow` in `kitty.auth.headless`; bare `kitty auth`
+  implicit-openai default restored; vacuous dispatch test strengthened;
+  README transcript completed). All addressed; 146 auth+cli tests green
+  afterwards.
 - Test-infra lessons recorded in the device-flow step file
   (aioresponses: yarl.URL keys, consumed-once registrations; no-op sleep
   stubs freeze the loop's clock and break timeout/cancellation tests).

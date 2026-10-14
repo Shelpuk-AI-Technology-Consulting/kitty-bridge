@@ -169,7 +169,7 @@ The browser login above assumes the browser and the terminal are on the **same m
 server (SSH into a CLI-only Ubuntu VM, a container, a dev box) while your browser is on your laptop, the login would
 redirect your laptop's browser to `localhost:1455` — a port that only exists on the server — and the flow would time out.
 
-Kitty handles this automatically. On an SSH session (or in CI, or on a machine with no display) it switches to a
+Kitty handles this automatically. On an SSH session (or on a machine with no display) it switches to a
 **device-code login**, the same flow the OpenAI Codex CLI uses on headless machines:
 
 ```bash
@@ -199,6 +199,9 @@ forwarding needed. The last two lines are a plain-text copy of the link and code
 for copy-pasting.
 
 **Notes:**
+
+- The command still requires an interactive terminal — Kitty needs a TTY to print the prompt and read your input. The
+  flow itself runs against `auth.openai.com` from the VM, regardless of where you open the browser.
 
 - Personal ChatGPT Plus/Pro accounts have device-code login enabled by default. On **Business/Team/Enterprise**
   workspaces an admin must first enable it (ChatGPT admin settings → permissions → device code authentication).

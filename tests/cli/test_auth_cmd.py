@@ -137,6 +137,61 @@ class TestRunOauthForProvider:
                 asyncio.run(run_oauth_for_provider(store, cred_store, "openai_subscription"))
 
 
+class TestOpeningBrowserGate:
+    """The stdout "Opening browser for ChatGPT login…" line is printed only
+    when the browser path is the one that will run; the device path's stderr
+    prompt announces itself, so a stdout line would be wrong for a no-browser
+    flow (SYSTEM_DESIGN §14.4). Gates the conditional added for KBR-317 —
+    CI review round 4 flagged it as untested."""
+
+    @staticmethod
+    def _captured_status_lines(store: ProfileStore, cred_store: CredentialStore, device_auth: bool | None) -> list[str]:
+        """Run run_oauth_for_provider with a stubbed flow and return the
+        ``print_status`` messages it emitted."""
+        session = _make_oauth_session()
+        with (
+            _mock_tty(),
+            patch(f"{_MOD}.run_oauth_flow", new=AsyncMock(return_value=session)),
+            patch(f"{_MOD}.print_status") as mock_status,
+        ):
+            from kitty.cli.auth_cmd import run_oauth_for_provider
+
+            asyncio.run(
+                run_oauth_for_provider(store, cred_store, "openai_subscription", device_auth=device_auth)
+            )
+        return [call.args[0] for call in mock_status.call_args_list]
+
+    def test_device_auth_true_suppresses_the_line(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        messages = self._captured_status_lines(store, cred_store, True)
+        assert not any("Opening browser" in m for m in messages)
+
+    def test_device_auth_false_prints_the_line(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        messages = self._captured_status_lines(store, cred_store, False)
+        assert any("Opening browser" in m for m in messages)
+
+    def test_auto_detect_headless_suppresses_the_line(
+        self, store: ProfileStore, cred_store: CredentialStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """device_auth=None on a headless box routes to the device flow, so
+        no "Opening browser" line may be printed. The patch lands on
+        ``kitty.auth.headless.is_headless_environment`` — the function
+        ``select_device_flow`` resolves at call time."""
+        import kitty.auth.headless as headless_mod
+
+        monkeypatch.setattr(headless_mod, "is_headless_environment", lambda: True)
+        messages = self._captured_status_lines(store, cred_store, None)
+        assert not any("Opening browser" in m for m in messages)
+
+    def test_auto_detect_desktop_prints_the_line(
+        self, store: ProfileStore, cred_store: CredentialStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import kitty.auth.headless as headless_mod
+
+        monkeypatch.setattr(headless_mod, "is_headless_environment", lambda: False)
+        messages = self._captured_status_lines(store, cred_store, None)
+        assert any("Opening browser" in m for m in messages)
+
+
 class TestAuthOpenaiProfileCreation:
     def test_auth_cmd_creates_profile_with_openai_subscription_provider(
         self, store: ProfileStore, cred_store: CredentialStore

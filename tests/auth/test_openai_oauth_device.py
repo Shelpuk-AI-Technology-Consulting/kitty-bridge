@@ -429,25 +429,42 @@ class TestRunDeviceFlowEnd2End:
         inter-poll sleep, where the loop spends ~99% of its wall clock
         (code-review round 1, High #3).
 
-        The ``fast_poll`` fixture is intentionally NOT used: it patches the
-        global ``asyncio.sleep``, which would also no-op this test's own
-        sleep and let the cancel land before the task ever started.
+        Synchronisation is event-driven, not a fixed sleep: a sleep stub
+        signals ``poll_entered`` as soon as the flow enters its first
+        inter-poll ``await asyncio.sleep(...)``, and the test then
+        cancels the task at that deterministic point. A fixed sleep would
+        be racy on loaded runners (the task may not have started yet)
+        and the leading cause of test flakiness, per the test suite's
+        own rule (CI review round 4).
         """
         import asyncio as asyncio_mod
 
+        poll_entered = asyncio_mod.Event()
+        real_sleep = asyncio_mod.sleep
+
+        async def _sleep_then_signal(seconds: float) -> None:
+            poll_entered.set()
+            await real_sleep(seconds)
+
+        monkeypatch.setattr(openai_oauth.asyncio, "sleep", _sleep_then_signal)
+
         with aioresponses() as m:
             m.post(OAUTH_DEVICE_USERCODE_URL, payload=codex_user_code_response)
-            # One pending poll is enough: the flow sleeps (really) before
-            # polling, and the cancel lands inside that sleep.
+            # One pending poll is enough: the flow sleeps (and signals)
+            # before polling, and the cancel lands inside that sleep.
             m.post(OAUTH_DEVICE_TOKEN_URL, status=403)
 
             task = asyncio_mod.ensure_future(run_oauth_device_flow())
-            # Real sleep: let the task reach its inter-poll sleep (the
-            # flow's own sleep is seconds; 0.05 s is comfortably inside it).
-            await asyncio_mod.sleep(0.05)
-            task.cancel()
-            with pytest.raises(OAuthDeviceCodeCancelledError):
-                await task
+            try:
+                # Deterministic synchronisation: wait until the flow
+                # enters its first inter-poll sleep, then cancel.
+                await asyncio_mod.wait_for(poll_entered.wait(), timeout=5.0)
+                task.cancel()
+                with pytest.raises(OAuthDeviceCodeCancelledError):
+                    await task
+            except asyncio_mod.TimeoutError:
+                task.cancel()
+                pytest.fail("the flow never reached its inter-poll sleep within 5 s")
 
     async def test_usercode_404_raises_disabled_error(self) -> None:
         """A 404 on /deviceauth/usercode means device-code auth is disabled
