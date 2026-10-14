@@ -192,7 +192,7 @@ class TestPortConflict:
         openai_oauth._start_callback_server = tracking_start
         try:
             with patch("kitty.auth.openai_oauth.webbrowser.open"), suppress(OAuthPortConflictError):
-                await run_oauth_flow()
+                await run_oauth_flow(device_auth=False)
 
             assert attempts[0] == 1455, "Should try primary port first"
             assert 1456 in attempts, "Should try first alternate port"
@@ -220,7 +220,7 @@ class TestPortConflict:
         openai_oauth._start_callback_server = always_conflict
         try:
             with pytest.raises(OAuthPortConflictError):
-                await run_oauth_flow()
+                await run_oauth_flow(device_auth=False)
 
             assert attempts == [1455, 1456, 1457, 1458, 1459]
         finally:
@@ -259,7 +259,7 @@ class TestTimeout:
                 patch("kitty.auth.openai_oauth.OAUTH_TIMEOUT_SECONDS", 1),
                 pytest.raises(OAuthTimeoutError),
             ):
-                await run_oauth_flow()
+                await run_oauth_flow(device_auth=False)
         finally:
             openai_oauth._start_callback_server = original_start
 
@@ -443,7 +443,7 @@ class TestRunOAuthFlow:
                 )
 
                 async with aiohttp.ClientSession() as http:
-                    result = await run_oauth_flow(http=http)
+                    result = await run_oauth_flow(http=http, device_auth=False)
 
             assert isinstance(result, OAuthSession)
             assert result.client_id == CLIENT_ID

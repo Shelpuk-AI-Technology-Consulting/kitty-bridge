@@ -2160,3 +2160,188 @@ The oracle covers four branches:
   (their triggers become content-shape-aware, not string-only); TEST_SUITE.md §3.2.1's M3/M4
   prose is updated to the closed state but the rows themselves stay. The Bedrock adapter
   continues to declare `WireShape.OTHER`; the emitted shape family is unchanged.
+
+---
+
+## 14. OpenAI OAuth login: browser flow and headless device-code flow
+
+Traces to [KBR-317](https://shelpuk.atlassian.net/browse/KBR-317). The `openai_subscription`
+provider authenticates through OpenAI's OAuth surface with the same `client_id` as the
+Codex CLI (`app_EMoamEEZ73f0CkXaXp7hrann`). Two login paths now exist; both land in the
+same `OAuthSession` shape, so the downstream `id_token` → API key exchange, the
+credential store, and the `openai_subscription` adapter are unchanged.
+
+### 14.1 Components
+
+| Component | Module | Responsibility |
+|---|---|---|
+| `run_oauth_flow` (`kitty.auth.openai_oauth`) | **changed** | Single entry point for both flows; gains keyword-only `device_auth: bool \| None = None` and dispatches (§14.3). Browser path otherwise unchanged. |
+| `run_oauth_device_flow` (`kitty.auth.openai_oauth`) | **new** | RFC 8628 device-authorization grant against `auth.openai.com`; mirrors `codex-rs/login/src/device_code_auth.rs`. |
+| `is_headless_environment` (`kitty.auth.headless`) | **new** | Pure predicate over `os.environ`: `CI`, `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY`, or (Linux) neither `DISPLAY` nor `WAYLAND_DISPLAY` set. Variable list from `codex-rs/core/src/env.rs` at revision `1fc72c6` (file since moved; pinned revision cited in openai/codex#9253); the headless-preference pattern itself is current-main behaviour in `codex-rs/cli/src/login.rs::run_login_with_device_code_fallback_to_browser`. |
+| CLI flag plumbing (`kitty.cli.main::_run_auth`, `kitty.cli.auth_cmd`) | **changed** | `kitty auth openai --device-auth` / `--no-device-auth`, forwarded as `device_auth: bool \| None` through `run_auth_openai` → `run_oauth_for_provider` → `run_oauth_flow`. |
+
+**Entry points served** (all four reach the dispatch through
+`run_oauth_for_provider`): `kitty auth openai` (`auth_cmd.py`), the profile
+wizard's OpenAI path (`profile_cmd.py` `_create_profile_flow`), the
+profile-edit re-auth branch (`profile_cmd.py`), and `kitty setup`
+(`setup_cmd.py`). Only `kitty auth openai` has a flag surface; the three
+interactive entry points inherit auto-detect.
+
+### 14.2 The wire contract (as confirmed against codex-rs @ main, 2026-10)
+
+Device-code login against `auth.openai.com` (the OAuth issuer):
+
+1. `POST {issuer}/api/accounts/deviceauth/usercode` — body
+   `{"client_id": "<CLIENT_ID>"}`, `Content-Type: application/json`.
+   Response: `{"device_auth_id": str, "user_code": str, "interval": str-digits}`.
+   The `interval` is a string of digits (codex deserialises it with
+   `s.trim().parse::<u64>()`); the `user_code` key may also arrive as
+   `usercode` (codex aliases both).
+2. The CLI prints `{issuer}/codex/device` as the verification URL and the
+   `user_code` as a one-time code (expires in 15 minutes per codex's prompt).
+3. `POST {issuer}/api/accounts/deviceauth/token` — body
+   `{"device_auth_id": str, "user_code": str}` — polled every `interval`
+   seconds. **403 / 404 mean "still pending" → keep polling** (up to 15 min
+   total). **Other non-2xx → fail fast with the status in the message.**
+   Success returns
+   `{"authorization_code": str, "code_challenge": str, "code_verifier": str}` —
+   the **server** mints the PKCE pair for the device flow (unlike the browser
+   flow, where the client mints it).
+4. `POST {issuer}/oauth/token` (the standard token endpoint) — authorization-code
+   grant with the server-issued PKCE pair and
+   `redirect_uri = {issuer}/deviceauth/callback` (a **server-side** redirect
+   target, not the user's loopback).
+   Response: the same token shape as the browser flow
+   (`access_token`, `id_token`, `refresh_token`, `account_id`, …).
+5. `id_token` → API key exchange proceeds as in the browser flow (best-effort,
+   non-fatal on failure).
+
+Why the device path needs no local callback: the authorization code is
+delivered to the CLI by the polling endpoint itself, so the browser never has
+to reach the machine running kitty.
+
+### 14.3 Selection rule
+
+| Condition | Path taken |
+|---|---|
+| `--device-auth` passed | Device-code flow, regardless of environment. |
+| `--no-device-auth` passed | Browser flow, regardless of environment (used with `ssh -L 1455:localhost:1455` when the user prefers the tunnel). |
+| Neither flag, headless per §14.2's predicate | Device-code flow. |
+| Neither flag, not headless | Browser flow (today's default). |
+
+**Why auto-detect is kitty's default when the `codex login` subcommand's
+default is browser-with-hint:** the ticket's premise is that a remote-VM
+user should not need to discover a flag to authenticate. Codex itself
+prefers device-code when headless in its other login paths
+(`run_login_with_device_code_fallback_to_browser`, TUI onboarding); kitty
+extends that preference to its single shared entry point. The device-code
+protocol is mirrored exactly; the selection default is a recorded product
+choice.
+
+### 14.4 Decisions, and why
+
+- **Mirror codex-rs's device protocol rather than design a bespoke UX.** The
+  ticket names the Codex CLI implementation as the reference and OpenAI has
+  already shipped, debugged, and documented this exact protocol for the same
+  `client_id`. A bespoke "paste the callback URL" variant (Claude Code's
+  approach) would be a different protocol from what OpenAI's
+  `/codex/device` page implements, and would split kitty's UX from the
+  tool it is mirroring.
+- **Dispatch inside `run_oauth_flow`, not in the CLI layer.** There are four
+  entry points into `run_oauth_for_provider` (§14.1); only one has a flag
+  surface. A `device_auth` kwarg with a `None` default threaded through
+  `run_oauth_for_provider` / `run_auth_openai` gives all four auto-detect
+  with no extra wiring, keeps the selection rule in one place, and
+  preserves the existing call-site behaviour when the kwarg is omitted.
+  The signature change is additive and keyword-only.
+- **`is_headless_environment` lives in its own `kitty.auth.headless` module.**
+  It is a pure predicate over the environment with no dependency on aiohttp,
+  asyncio, or the OAuth module; giving it its own home keeps it importable
+  from tests and from future callers (e.g. tmux-wrap warnings) without
+  dragging in the OAuth machinery.
+- **Fail fast on unexpected statuses and transport errors, poll only on
+  403/404.** Matches codex. A 401 or 5xx on the polling endpoint, or a DNS
+  failure mid-poll, is a server-side or network problem the user cannot fix
+  by waiting; only "not authorised yet" (403/404) is a legitimate reason to
+  keep the loop alive. The user re-runs the command.
+- **Interval policy deliberately diverges from codex.** Upstream
+  serde-defaults a missing `interval` to 0 and its poll loop
+  `Duration::from_secs(interval).min(remaining)` then busy-loops the token
+  endpoint for up to 15 minutes. Kitty's posture: missing field → 5 s
+  default; `interval` ≤ 0 or unparseable → typed
+  `OAuthDeviceCodeIntervalError` (fail fast); sleep floor `max(interval, 1)`;
+  final sleep clamped to the remaining budget. Recorded so a future reader
+  does not "fix" the clamp to match upstream.
+- **15-minute hard cap on polling, not `OAUTH_TIMEOUT_SECONDS`.** Codex uses
+  15 minutes for the device flow because the user has to switch machines,
+  open a browser, and type a code — a fundamentally slower interaction than
+  clicking a link. Reusing the 300 s browser timeout here would time out
+  legitimate logins.
+- **The prompt is kitty-owned, printed to stderr, and carries the
+  workspace-admin sentence.** Codex's `device_code_prompt` string is the
+  structural base (a test fixture, not a contract); kitty adds the admin
+  sentence because personal vs workspace entitlement is a question codex's
+  prompt does not have to answer. Stderr matches where the browser path
+  already prints its "if the browser did not open" hint. The device path
+  does not print the browser path's "Opening browser for ChatGPT
+  login…" line — that message is wrong for a no-browser flow.
+- **No secret values in logs or exception messages.** §9's structural
+  redaction guard is scoped to `kitty.bridge` loggers and does not cover
+  `kitty.auth.*`, so the requirement is stated directly on the new code:
+  DEBUG lines carry status codes and counts only, and OAuth error bodies
+  are redacted before landing in an exception message (some token-endpoint
+  errors echo request parameters verbatim).
+- **No change to the token shape or persistence layer.** Both flows produce
+  the same `OAuthSession`; the credential store, the `auth_ref` indirection,
+  and the `openai_subscription` adapter are untouched. This is the reason
+  the change is confined to `kitty/auth/` + CLI plumbing.
+
+### 14.5 Verification
+
+- L1 unit tests for `is_headless_environment` (table-driven over
+  monkeypatched `os.environ`).
+- L1 unit tests for the device-response parsers (interval as whitespace-
+  padded string, `user_code`/`usercode` alias, 403/404 pending, other
+  statuses fail fast) and the interval edge cases (missing → 5 s default;
+  `"0"`, negative, non-numeric → `OAuthDeviceCodeIntervalError`).
+- L1 redaction tests assert no device secret appears in DEBUG output.
+- L2 contract test pins kitty's JSON request/response shapes from §14.2 as
+  a literal fixture (kitty's contract; upstream drift needs a deliberate
+  fixture update, not a test failure).
+- L3 subsystem test drives `run_oauth_device_flow` end-to-end over mocked
+  HTTP (aioresponses): happy path, 404-on-usercode, poll-then-success,
+  poll-timeout (injected shrunken budget), transport exception mid-poll,
+  partial token response → typed error, cancellation, error body
+  containing the auth code → message without it, final-sleep clamp
+  (monkeypatched `asyncio.sleep`), session close-if-created.
+- CLI tests assert `--device-auth` / `--no-device-auth` route to the right
+  path with the environment detection stubbed; the device path emits the
+  device prompt and not the "Opening browser" line; `check_tty` still
+  gates the command.
+
+### 14.6 Known limits (recorded, not fixed here)
+
+- ChatGPT **Business/Team/Enterprise** workspaces must have device-code
+  authentication enabled by a workspace admin
+  (`https://chatgpt.com/admin/permissions`, "Enable device code
+  authentication for Codex CLI"); personal Plus/Pro accounts have it on by
+  default (toggle at `https://chatgpt.com/#settings/Security` when
+  disabled). This is an OpenAI-side entitlement; kitty cannot detect or
+  bypass it. Surfaced in the device prompt (§14.4) and in the README.
+- **Pre-existing redirect-URI/port-scan mismatch (not this ticket's scope).**
+  `REDIRECT_URI` is hardcoded to `http://localhost:1455/auth/callback`
+  while the callback server scans ports 1455–1459; if 1455 is occupied and
+  kitty binds 1456, the browser's redirect lands on whatever holds 1455 and
+  the flow times out with no hint. Recorded because §14.3's
+  `--no-device-auth` tunnel fallback makes the failure reachable; the
+  README's tunnel recipe carries the "port 1455 must be free" caveat.
+  Fixing it (bind-then-build-URL is impossible — OpenAI registers only
+  1455 for this client — so the fix would be refusing non-1455 binds with
+  a clear error) belongs to a separate ticket.
+- The verification URL is a **fixed string** (`{issuer}/codex/device`),
+  not per-login. Codex has the same property; the one-time code is the
+  per-login secret, not the URL.
+- The server-issued PKCE pair means the device flow's code_verifier is
+  chosen by OpenAI, not by kitty. This is codex's protocol choice, not a
+  kitty one; it is what makes the polling endpoint the sole delivery
+  channel for the authorization code.
