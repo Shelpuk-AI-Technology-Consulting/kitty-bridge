@@ -1893,10 +1893,16 @@ class TestTheIdentityMeetsOpenAisClientGates:
     gate landed, so the failure surfaced as a user-facing 400 instead of a
     red CI run.
 
-    This guard turns the next client-gate raise into a test failure here:
-    when OpenAI gates a new model behind a newer client, bump
-    ``CODEX_CLI_VERSION`` in ``kitty/codex_identity.py`` deliberately, with
-    this test's provenance note updated to cite the new gate.
+    **What this guard is, precisely.** A floor, not an early-warning
+    system: it fails when the constant drops below the lowest known gate
+    (a regression or a careless edit), and its assertion message carries
+    the bump instructions. It cannot detect a *new* gate raise — both
+    sides of the comparison are literals in this repository, and live
+    upstream probing is banned for ``tests/`` — so when OpenAI gates a
+    future model behind a newer client, the discovery channel is a
+    user-facing failure traced back here, and the deliberate response is
+    bumping ``CODEX_CLI_VERSION`` in ``kitty/codex_identity.py`` and
+    raising this floor with the new gate's provenance cited.
     """
 
     #: The lowest client version OpenAI is known to require for any
@@ -1905,6 +1911,7 @@ class TestTheIdentityMeetsOpenAisClientGates:
     _ASTRA_CLIENT_GATE = (0, 153, 0)
 
     def test_codex_cli_version_meets_openais_lowest_known_model_gate(self) -> None:
+        """The impersonated version stays at or above the lowest known gate."""
         parsed = tuple(int(part) for part in _CODEX_CLI_VERSION.split("."))
         assert len(parsed) == 3, (
             f"CODEX_CLI_VERSION {_CODEX_CLI_VERSION!r} must be a three-part "
