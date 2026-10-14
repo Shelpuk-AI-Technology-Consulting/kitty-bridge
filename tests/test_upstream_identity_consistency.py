@@ -88,9 +88,13 @@ bound the version in ``__init__`` would escape a sweep that built it first.
   value-shape comparison can); and ``bedrock``, whose hook never ships and
   whose contract is observed on the botocore request instead.
 
-The identity *policy* — what each adapter should claim to be — is Q1, and is
-untouched here: this file only requires that whatever an adapter claims, it
-claims it once and does not read it from kitty's release train.
+The identity *consistency* rule (Q1) — that whatever an adapter claims,
+it claims once and does not read it from kitty's release train — is
+untouched here. The file also enforces a **minimum client-version floor**
+(Q1-adjacent, KBR-318) in :class:`TestTheIdentityMeetsOpenAisClientGates`,
+because OpenAI version-gates Codex-backend models by the client identity
+the request carries and a stale identity surfaces as a user-facing 400;
+see that class for the gate's provenance.
 """
 
 from __future__ import annotations
@@ -1901,7 +1905,7 @@ class TestTheIdentityMeetsOpenAisClientGates:
     upstream probing is banned for ``tests/`` — so when OpenAI gates a
     future model behind a newer client, the discovery channel is a
     user-facing failure traced back here, and the deliberate response is
-    bumping ``CODEX_CLI_VERSION`` in ``kitty/codex_identity.py`` and
+    bumping ``CODEX_CLI_VERSION`` in ``src/kitty/codex_identity.py`` and
     raising this floor with the new gate's provenance cited.
     """
 
@@ -1923,5 +1927,5 @@ class TestTheIdentityMeetsOpenAisClientGates:
             f"lowest known client gate {self._ASTRA_CLIENT_GATE} (GPT-6 "
             "Astra requires Codex CLI >= 0.153.0): model requests gated to "
             "newer clients will be rejected with HTTP 400. Bump the "
-            "constant in kitty/codex_identity.py."
+            "constant in src/kitty/codex_identity.py."
         )
