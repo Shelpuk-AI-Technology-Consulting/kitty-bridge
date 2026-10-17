@@ -1,0 +1,19 @@
+---
+id: kbr319_subscription_health
+depends_on: [kbr319_exact_messages_relay]
+---
+
+# KBR-319 — Subscription relay health and cooldowns
+
+## Planned delivery
+
+Route raw relay failures through the existing backend health state: rate limits honor retry hints, authentication failures park as `auth`, plan failures park as `entitlement`, and transport or other upstream failures use existing kinds. Streaming failures before emitted content obey the same policy.
+
+## Decisions and why
+
+- **Reuse the existing circuit breaker.** A second health model would produce divergent selection, observability, cooldown, and recovery behavior for a profile that is otherwise a normal balancing member.
+- **Claude Code owns token refresh.** Kitty only relays the request it receives; a session/auth failure is surfaced and parked rather than refreshed from a copied credential.
+
+## Implementation notes
+
+Pending.
