@@ -7,7 +7,7 @@ depends_on: [kbr319_subscription_profile, kbr319_launcher_eligibility]
 
 ## Planned delivery
 
-For an eligible subscription backend on `/v1/messages`, retain the incoming JSON bytes and end-to-end headers, forwarding them directly to Anthropic. The raw relay bypasses translation, model replacement, compaction, request mutation, synthetic authorization, and token refresh. It supports normal and SSE responses.
+For an eligible subscription backend on `/v1/messages`, retain the incoming JSON bytes and end-to-end headers, forwarding them directly to Anthropic. The raw relay bypasses translation, model replacement, compaction, request mutation, synthetic authorization, and token refresh. It supports normal and SSE responses; it preserves an incoming `x-api-key` but never synthesizes one.
 
 ## Decisions and why
 

@@ -2357,57 +2357,79 @@ Code's request while Kitty supplies local routing and the established balancing 
 ### 15.1 The contract
 
 `anthropic_subscription` is a distinct, tokenless profile type. During profile setup or editing,
-Kitty calls `claude auth status --json` and accepts only an active Claude.ai subscriber session.
-It displays returned non-secret account/subscription details and saves no OAuth access token,
-refresh token, or copied credential. Claude Code continues to own storage and refresh, which keeps
-macOS Keychain and non-macOS credential-file differences outside Kitty's credential model.
+Kitty calls `claude auth status --json` and accepts only a JSON object whose `loggedIn` is `true`,
+whose `authMethod` is `"claude.ai"`, and whose `subscriptionType` is a non-empty string. `email`
+is optional. These four names are the complete allowlist: unknown values, command stdout/stderr, and
+the decoded object are never logged, stored, or displayed. The profile retains a generated UUIDv4
+`auth_ref` only for schema compatibility; no CredentialStore value exists for it, and subscription
+launch paths bypass credential resolution and validation. Claude Code continues to own storage and
+refresh, which keeps macOS Keychain and non-macOS credential-file differences outside Kitty's
+credential model.
 
 A direct subscription profile may run only under `kitty … claude`. Codex, Gemini, Kilo, default
 profile-first non-Claude routing, and generic bridge mode reject it before credential lookup,
 egress, bridge creation, or child spawn. For a non-Claude balancing launch, Kitty excludes
 subscription members before it constructs backend state; remaining members keep their configured
 order and backup flags. No remaining member is a configuration error, not a fallback to an
-unapproved provider. A BridgeServer guard preserves this boundary for embedded callers.
+unapproved provider. A Claude-launched mixed pool may retry or fail over a raw subscription request
+only to another subscription member, so that request never crosses into an API-key translation path.
+A BridgeServer guard preserves this boundary for embedded callers.
 
 For an eligible subscription backend on `/v1/messages`, the bridge reads the inbound JSON bytes
 once, validates only enough to return the normal invalid-JSON response, then posts those same bytes
 using `data=`. It does not call model normalization, a translator, compaction, truncation, provider
 normalization, synthetic upstream authentication, or token refresh. End-to-end incoming headers —
-including Claude Code's OAuth `Authorization`, `anthropic-beta`, and `anthropic-version` — retain
-their values. Authority/Host, hop-by-hop headers, and HTTP length/framing are the sole exceptions:
-they cannot survive the localhost-to-Anthropic hop and aiohttp regenerates them. The raw relay is
-not available through Chat Completions, Responses, or Gemini ingress.
+including Claude Code's OAuth `Authorization`, `anthropic-beta`, `anthropic-version`, and any
+incoming `x-api-key` — retain their values. Kitty never injects `x-api-key`. Authority/Host,
+hop-by-hop headers, and HTTP length/framing are the sole exceptions: they cannot survive the
+localhost-to-Anthropic hop and aiohttp regenerates them. The raw relay is not available through Chat
+Completions, Responses, or Gemini ingress.
 
-Raw relay failures enter the existing backend-health state. Rate limits use a provider retry hint
-when present; OAuth failures park as `auth`; plan denials park as `entitlement`; transport and other
-upstream failures use their existing kinds. The existing selection, failover, all-unhealthy response,
-healthz/stats, and recovery-hold paths remain the one system for every balancing member.
+Raw relay failures retain status, a bounded response body, and parsed `Retry-After` before entering
+the existing backend-health state. Rate limits use that hint when present; OAuth failures park as
+`auth`; plan denials park as `entitlement`; transport and other upstream failures use their existing
+kinds. Non-streaming and pre-emission SSE failures share this classifier. The existing selection,
+failover, all-unhealthy response, healthz/stats, and recovery-hold paths remain the one system for
+every balancing member.
 
 ### 15.2 Decisions, and why
 
 - **Ask `claude auth status --json`, not Claude Code's private credential storage.** The command
   reports the supported cross-platform status without Kitty reading, storing, or accidentally
-  logging OAuth material. Parsing `~/.claude/.credentials.json` would fail on a Keychain-backed
-  macOS session and couple Kitty to an implementation detail Claude Code may change.
+  logging OAuth material. The strict four-field reader allowlist prevents a future Claude Code
+  status addition from becoming a new secret-display/storage channel. Parsing
+  `~/.claude/.credentials.json` would fail on a Keychain-backed macOS session and couple Kitty to
+  an implementation detail Claude Code may change.
+- **Retain a UUID with no credential record.** The existing schema and profile-store contract use a
+  UUIDv4 `auth_ref`; making it optional would widen every profile consumer. A provider-specific
+  launch bypass keeps compatibility while establishing the invariant that this UUID cannot be used
+  as an API key, upstream header, or child environment value.
 - **A separate provider type, not an `anthropic` option.** API-key Anthropic constructs its own
   headers and can translate requests; subscription traffic must preserve Claude Code's identity and
   bytes. Combining them would make a security-relevant distinction implicit.
 - **Byte-preserve the body and every end-to-end header.** Decoding/re-serializing JSON changes wire
-  bytes even when values are equal. Rebuilding headers risks dropping OAuth opt-ins. Routing and
-  framing fields are excluded only because they become invalid at the new TCP destination.
+  bytes even when values are equal. Rebuilding headers risks dropping OAuth opt-ins. `x-api-key` is
+  retained if Claude Code sent it; only synthetic injection is forbidden. Routing and framing fields
+  are excluded only because they become invalid at the new TCP destination.
 - **Filter a balancing pool before all startup work.** Reading excluded credentials or using an
   excluded first member for the spawn configuration would violate the Claude-only policy even if
   random selection later skipped it.
+- **Keep raw subscription attempts inside their own balancing subset.** The raw OAuth request has no
+  permitted translation/authentication fallback. Allowing it to fail over to an ordinary member
+  would silently abandon the byte-exact subscription contract, so a mixed Claude pool can only
+  choose another subscription member for that request.
 - **Reuse the health state, not a subscription-specific circuit breaker.** Two circuits would diverge
   in cooldown, failover, observability, and recovery semantics for otherwise equivalent members.
 
 ### 15.3 Verification
 
-- L1 tests cover status parsing, provider/launcher eligibility, profile menus, and failure kinds.
+- L1 tests cover status parsing (including unknown/secret-shaped extra fields), provider/launcher
+  eligibility, profile menus, and failure kinds.
 - L2 tests prove provider/schema/menu registration and that Kitty profile/credential output never
-  stores OAuth token material.
+  stores OAuth token material or a subscription credential record.
 - L3 aiohttp tests compare captured raw body bytes and headers for normal and SSE Messages relays,
-  then exercise subscription cooldown/failover and recovery through BridgeServer.
+  then exercise subscription-only cooldown/failover, 429 retry hints, entitlement, and recovery
+  through BridgeServer.
 - The step records are `.system_design/steps/kbr319_subscription_profile.md`,
   `kbr319_launcher_eligibility.md`, `kbr319_exact_messages_relay.md`, and
   `kbr319_subscription_health.md`; each receives implementation notes when its stage lands.

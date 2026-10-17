@@ -7,7 +7,7 @@ depends_on: [kbr319_exact_messages_relay]
 
 ## Planned delivery
 
-Route raw relay failures through the existing backend health state: rate limits honor retry hints, authentication failures park as `auth`, plan failures park as `entitlement`, and transport or other upstream failures use existing kinds. Streaming failures before emitted content obey the same policy.
+Route raw relay failures through the existing backend health state. The failure carrier preserves status, a bounded body, and parsed `Retry-After`: rate limits honor retry hints, authentication failures park as `auth`, plan failures park as `entitlement`, and transport or other upstream failures use existing kinds. Streaming failures before emitted content use the same classifier.
 
 ## Decisions and why
 

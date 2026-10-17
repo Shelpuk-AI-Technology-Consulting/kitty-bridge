@@ -7,7 +7,7 @@ depends_on: []
 
 ## Planned delivery
 
-Add the distinct `anthropic_subscription` provider declaration and a tokenless local Claude Code session-status reader. The setup and profile flows validate `claude auth status --json`, display only non-secret account/subscription details, and save a non-secret local-session descriptor instead of an OAuth token or Kitty-owned OAuth session.
+Add the distinct `anthropic_subscription` provider declaration and a tokenless local Claude Code session-status reader. The reader accepts only `loggedIn: true`, `authMethod: "claude.ai"`, a non-empty `subscriptionType`, and optional `email`; unknown status fields, raw stdout/stderr, and parsed payloads never reach logs, storage, or UI. Setup/profile flows display only allowlisted account/subscription details and retain a generated schema-compatible UUID with no CredentialStore record instead of an OAuth token or Kitty-owned OAuth session.
 
 ## Decisions and why
 

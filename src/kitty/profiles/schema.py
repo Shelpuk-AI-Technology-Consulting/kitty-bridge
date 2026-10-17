@@ -27,6 +27,7 @@ _PROVIDER_TYPES = Literal[
     "openai_subscription",
     "openrouter",
     "anthropic",
+    "anthropic_subscription",
     "bedrock",
     "azure",
     "vertex",
@@ -45,6 +46,7 @@ PROVIDER_LIST: list[str] = list(typing.get_args(_PROVIDER_TYPES))
 
 PROVIDER_LABELS: dict[str, str] = {
     "anthropic": "Anthropic",
+    "anthropic_subscription": "Anthropic Claude.ai Subscription (Claude Code only)",
     "azure": "MS Azure",
     "bedrock": "AWS Bedrock",
     "byteplus": "BytePlus",
@@ -93,6 +95,7 @@ PROVIDER_SECTIONS: list[tuple[str, list[str]]] = [
             "novita",
             "ollama_cloud",
             "openai_subscription",
+            "anthropic_subscription",
             "opencode_go",
             "mimo",
             "zai_coding",
@@ -192,9 +195,7 @@ class Profile(BaseModel):
         # ``Profile.model_validate(some_profile)``), on which the key test
         # would silently fall through — hence the isinstance guard.
         if isinstance(data, dict) and data.get("base_url") is not None:
-            raise ValueError(
-                'Profile.base_url is not read; set the base URL in provider_config["base_url"] instead'
-            )
+            raise ValueError('Profile.base_url is not read; set the base URL in provider_config["base_url"] instead')
         return data
 
 

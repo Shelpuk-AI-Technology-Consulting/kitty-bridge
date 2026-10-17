@@ -779,6 +779,33 @@ def _mock_run_oauth_for_provider(session: OAuthSession):
 
 
 class TestCreateProfileFlowOAuth:
+    def test_anthropic_subscription_checks_local_session_not_key_prompt(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        """Create a tokenless profile from the existing Claude Code session."""
+        from kitty.auth.claude_subscription import ClaudeSubscriptionStatus
+
+        create = _import_create_profile_flow()
+        with (
+            patch(
+                "kitty.cli.profile_cmd.SelectionMenu.show",
+                return_value=PROVIDER_LABELS["anthropic_subscription"],
+            ),
+            patch(
+                "kitty.auth.claude_subscription.read_claude_subscription_status",
+                return_value=ClaudeSubscriptionStatus(True, "pilot@example.test", "max", None),
+            ) as status_reader,
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["claude-opus", "subscription-profile"]),
+            patch("kitty.cli.profile_cmd.prompt_confirm", side_effect=[True, False]),
+            patch("kitty.cli.profile_cmd.prompt_secret") as prompt_secret,
+        ):
+            profile = create(store, cred_store)
+
+        assert profile.provider == "anthropic_subscription"
+        assert cred_store.get(profile.auth_ref) is None
+        status_reader.assert_called_once_with()
+        prompt_secret.assert_not_called()
+
     def test_oauth_provider_skips_api_key_prompt(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """When provider requires OAuth, no API key prompt appears; OAuth flow runs instead."""
         create = _import_create_profile_flow()

@@ -7,7 +7,7 @@ depends_on: [kbr319_subscription_profile]
 
 ## Planned delivery
 
-Centralize the rule that `anthropic_subscription` profiles are usable only by the Claude launcher. Direct non-Claude and generic bridge requests fail before credential resolution or egress. A non-Claude balancing launch removes subscription members before backend construction; an empty eligible result is a configuration error.
+Centralize the rule that `anthropic_subscription` profiles are usable only by the Claude launcher. Direct non-Claude and generic bridge requests fail before credential resolution or egress. A non-Claude balancing launch removes subscription members before backend construction; an empty eligible result is a configuration error. A Claude raw subscription attempt may fail over only to another subscription member, never to an API-key translation path.
 
 ## Decisions and why
 
