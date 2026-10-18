@@ -36,3 +36,10 @@ bytes untouched — a mid-stream failure still records what it saw. The `Retry-A
 `kitty.providers.base.parse_retry_after_seconds`; both subscription consumers delegate to it. Tests: the 401/403
 envelopes (names `claude auth login`, never `kitty setup`), non-streaming and streaming token attribution with the
 byte-exactness assertions kept, and the existing parser pins through the delegator.
+
+Review round 3 (same day): single-backend transport failures (a dropped wire to Anthropic) now answer the same 500
+`api_error` envelope the translated non-streaming arm uses, instead of the middleware's bridge-shaped 500 — the arm
+sits last so the timeout keeps its 504, and anything that is not a transport blip still propagates as a bug. The
+streaming usage pump's line buffer is capped at the translators' `_SSE_MAX_LINE_BYTES` (drop and resync; forwarded
+bytes untouched). Subscription setup/profile creation now offers `claude-sonnet-4-6` as the default model instead of
+falling through to the OpenRouter-format prompt, pinned in both flows' tests.

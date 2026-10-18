@@ -249,7 +249,7 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
                 raise SystemExit(1) from exc
 
     # Step 3: Model
-    _default_models = {"openai_subscription": "gpt-5.3-codex"}
+    _default_models = {"openai_subscription": "gpt-5.3-codex", "anthropic_subscription": "claude-sonnet-4-6"}
     default_model = _default_models.get(provider)
     if default_model:
         model = prompt_text(f"Model (default: {default_model}): ")

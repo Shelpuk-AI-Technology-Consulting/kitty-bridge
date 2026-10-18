@@ -5562,6 +5562,28 @@ class BridgeServer:
                     },
                     status=504,
                 )
+            except Exception as exc:
+                # Single-backend mode has no relay loop, so a dropped wire to
+                # Anthropic would otherwise surface as the middleware's
+                # bridge-shaped 500. Balancing parks and fails over inside the
+                # loop; here there is no backend to park, and the agent gets
+                # the same api_error envelope the translated non-streaming arm
+                # answers for a generic failure. This arm sits last: the
+                # timeout above must keep its own answer. Anything that is not
+                # a transport blip is a bug and propagates untouched.
+                if not _is_transport_error(exc):
+                    raise
+                logger.warning("Subscription relay transport failure: %s", exc)
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": "Upstream connection to Anthropic failed. Check the network and try again.",
+                        },
+                    },
+                    status=500,
+                )
 
         try:
             _normalize_messages_request(body)
@@ -6075,7 +6097,15 @@ class BridgeServer:
             try:
                 async for chunk_bytes in upstream.content:
                     await _write_client(sr, chunk_bytes)
+                    # A newline-less upstream (faulty path) must not grow the
+                    # buffer for the life of the stream: drop the accumulation
+                    # immediately on crossing the translators' line cap and
+                    # resync at the next line boundary. Only local usage
+                    # attribution degrades; forwarded bytes are untouched.
                     sse_buffer += chunk_bytes
+                    if len(sse_buffer) > _SSE_MAX_LINE_BYTES:
+                        logger.warning("Subscription relay SSE line exceeded the cap; dropping the buffered line")
+                        sse_buffer = b""
                     while b"\n" in sse_buffer:
                         line, _, sse_buffer = sse_buffer.partition(b"\n")
                         if _anthropic_sse_usage(line, stream_usage):

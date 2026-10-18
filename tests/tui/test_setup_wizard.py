@@ -300,6 +300,24 @@ class TestSetupWizardOAuth:
 
         assert profile.model == "gpt-5.3-codex"
 
+    def test_anthropic_subscription_uses_default_model(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        """The subscription prompt offers a Claude default, not the OpenRouter example."""
+        from kitty.auth.claude_subscription import ClaudeSubscriptionStatus
+
+        with (
+            _mock_tty(),
+            patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["anthropic_subscription"]),
+            patch(
+                "kitty.auth.claude_subscription.read_claude_subscription_status",
+                return_value=ClaudeSubscriptionStatus(True, "pilot@example.test", "max", None),
+            ),
+            patch(f"{_MOD}.prompt_text", side_effect=["", "anthropic-subscription"]),
+            patch(f"{_MOD}.prompt_confirm", side_effect=[False, False]),
+        ):
+            profile = run_setup_wizard(store, cred_store)
+
+        assert profile.model == "claude-sonnet-4-6"
+
 
 class TestSetupWizardBackupStep:
     """R9: wizard step 6 asks for the backup flag, defaulting to No."""

@@ -138,7 +138,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
 
     # Step 3: Model
     print_step(3, 7, "Model selection")
-    _default_models = {"openai_subscription": "gpt-5.3-codex"}
+    _default_models = {"openai_subscription": "gpt-5.3-codex", "anthropic_subscription": "claude-sonnet-4-6"}
     default_model = _default_models.get(provider)
     if default_model:
         model = prompt_text(f"Model (default: {default_model}): ")

@@ -841,6 +841,27 @@ class TestCreateProfileFlowOAuth:
 
         assert profile.model == "gpt-5.3-codex"
 
+    def test_anthropic_subscription_uses_default_model(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        """The subscription prompt offers a Claude default, not the OpenRouter example."""
+        from kitty.auth.claude_subscription import ClaudeSubscriptionStatus
+
+        create = _import_create_profile_flow()
+        with (
+            patch(
+                "kitty.cli.profile_cmd.SelectionMenu.show",
+                return_value=PROVIDER_LABELS["anthropic_subscription"],
+            ),
+            patch(
+                "kitty.auth.claude_subscription.read_claude_subscription_status",
+                return_value=ClaudeSubscriptionStatus(True, "pilot@example.test", "max", None),
+            ),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["", "subscription-profile"]),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            profile = create(store, cred_store)
+
+        assert profile.model == "claude-sonnet-4-6"
+
     def test_oauth_provider_session_file_is_accessible(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Credential store holds a path to an existing session file for OAuth profiles."""
         create = _import_create_profile_flow()

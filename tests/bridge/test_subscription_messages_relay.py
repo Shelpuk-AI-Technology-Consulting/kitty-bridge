@@ -626,3 +626,77 @@ class TestSubscriptionAuthEnvelope:
         assert "subscription" in message.lower()
         assert "kitty setup" not in message
         assert "API key" not in message
+
+
+class TestSubscriptionTransportFailure:
+    """A dropped wire to Anthropic still answers the Messages envelope (R3)."""
+
+    @pytest.mark.asyncio()
+    async def test_single_backend_transport_failure_answers_envelope_not_middleware_500(
+        self,
+    ) -> None:
+        """A connection failure is an api_error envelope, not the bridge's 500."""
+        server = _make_server()
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_UPSTREAM_URL, exception=aiohttp.ClientConnectionError("connection refused"))
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_BODY,
+                        headers={"Content-Type": "application/json", **_INBOUND_HEADERS},
+                    ) as resp,
+                ):
+                    assert resp.status == 500, await resp.text()
+                    payload = await resp.json()
+        finally:
+            await server.stop_async()
+
+        assert payload["type"] == "error"
+        assert payload["error"]["type"] == "api_error"
+        assert "failed" in payload["error"]["message"].lower()
+
+
+class TestSubscriptionStreamLineCap:
+    """The streaming usage pump's line buffer is bounded like the translators'."""
+
+    @pytest.mark.asyncio()
+    async def test_newline_less_line_beyond_the_cap_does_not_grow_unbounded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A huge newline-less line is dropped, the stream still completes."""
+        monkeypatch.setattr("kitty.bridge.server._SSE_MAX_LINE_BYTES", 64)
+        oversized_then_usage = (
+            b"data: " + b"X" * 200 + b"\n"
+            b"event: message_start\n"
+            b'data: {"type":"message_start","message":{"id":"msg_c","type":"message","role":"assistant",'
+            b'"model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,'
+            b'"usage":{"input_tokens":7,"output_tokens":1}}}\n\n'
+            b"event: message_stop\n"
+            b'data: {"type":"message_stop"}\n\n'
+        )
+        server = _make_server()
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    _UPSTREAM_URL,
+                    body=oversized_then_usage,
+                    headers={"Content-Type": "text/event-stream"},
+                )
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_STREAM_BODY,
+                        headers={"Content-Type": "application/json", **_INBOUND_HEADERS},
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+                    client_bytes = await resp.content.read()
+        finally:
+            await server.stop_async()
+
+        assert client_bytes == oversized_then_usage
