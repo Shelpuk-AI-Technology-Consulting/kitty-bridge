@@ -23,3 +23,12 @@ stripped set, no `x-api-key` synthesis). Non-streaming success returns upstream 
 streaming pumps SSE verbatim; failures raise UpstreamError into the Messages-dialect envelope. Other ingress routes
 reject subscription backends with a 400 configuration error. 15 L3 tests in
 tests/bridge/test_subscription_messages_relay.py. Reviewed: code-reviewer APPROVE (R7/R8/R11).
+
+Review round (2026-10-18, PR #294 CI review): a relay read timeout (`ServerTimeoutError`) escaped
+`_is_transport_error` (which deliberately excludes `asyncio.TimeoutError`) and the handler's only
+`except UpstreamError`, surfacing as a raw aiohttp 500. The handler's subscription branch now catches
+`asyncio.TimeoutError` and answers the translated path's 504 `api_error` envelope, parking no backend and failing
+over to none — the semantics the owner chose to mirror from the translated Messages path (§16.1 records it). Mid-stream
+SSE failures were already contained inside `_relay_subscription_messages_stream` (`stream_failed`), so the new arm
+only ever sees pre-emission timeouts. Two L3 tests pin the 504 envelope and the no-parking semantics
+(tests/bridge/test_subscription_relay_health.py).

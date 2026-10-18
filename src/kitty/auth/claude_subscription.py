@@ -7,7 +7,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 
-__all__ = ["ClaudeSubscriptionStatus", "read_claude_subscription_status"]
+__all__ = ["ClaudeSubscriptionStatus", "read_claude_subscription_status", "session_detail"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,21 @@ class ClaudeSubscriptionStatus:
     email: str | None
     subscription_type: str | None
     reason: str | None
+
+
+def session_detail(status: ClaudeSubscriptionStatus) -> str:
+    """Render the allowlisted account details for display.
+
+    The only fields that reach a UI are the reader's allowlisted email and
+    subscription type; the raw payload never passes through here.
+
+    Args:
+        status: A status returned by :func:`read_claude_subscription_status`.
+
+    Returns:
+        The non-empty details, comma-separated; empty when none are set.
+    """
+    return ", ".join(value for value in (status.email, status.subscription_type) if value)
 
 
 def read_claude_subscription_status(
@@ -64,6 +79,16 @@ def read_claude_subscription_status(
             email=None,
             subscription_type=None,
             reason="Claude Code status timed out. Check the Claude Code session, then try again.",
+        )
+    except OSError:
+        # Any other spawn failure (a non-executable binary, a broken exec).
+        # The OS error text can carry filesystem paths, so the remediation is
+        # a fixed message.
+        return ClaudeSubscriptionStatus(
+            available=False,
+            email=None,
+            subscription_type=None,
+            reason="Claude Code could not be started. Check that it is installed and executable, then try again.",
         )
 
     # A failed status command does not expose trustworthy session data.

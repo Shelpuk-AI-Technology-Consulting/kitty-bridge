@@ -2439,8 +2439,9 @@ Code's request while Kitty supplies local routing and the established balancing 
 
 ### 16.1 The contract
 
-`anthropic_subscription` is a distinct, tokenless profile type. During profile setup or editing,
-Kitty calls `claude auth status --json` and accepts only a JSON object whose `loggedIn` is `true`,
+`anthropic_subscription` is a distinct, tokenless profile type. During profile setup, editing, and
+`kitty doctor` diagnostics (both the checklist and single-profile paths), Kitty calls
+`claude auth status --json` and accepts only a JSON object whose `loggedIn` is `true`,
 whose `authMethod` is `"claude.ai"`, and whose `subscriptionType` is a non-empty string. `email`
 is optional. These four names are the complete allowlist: unknown values, command stdout/stderr, and
 the decoded object are never logged, stored, or displayed. The profile retains a generated UUIDv4
@@ -2474,7 +2475,13 @@ Completions, Responses, or Gemini ingress.
 Raw relay failures retain status, a bounded response body, and parsed `Retry-After` before entering
 the existing backend-health state. Rate limits use that hint when present; OAuth failures park as
 `auth`; plan denials park as `entitlement`; transport and other upstream failures use their existing
-kinds. Non-streaming and pre-emission SSE failures share this classifier. The existing selection,
+kinds. Non-streaming and pre-emission SSE failures share this classifier. A stalled upstream is the
+one classified non-parking failure: before the first byte reaches the client, the relay answers the
+translated Messages streaming path's 504 `api_error` envelope, parking no backend and failing over
+to none — one timeout semantics for both stream modes. This deliberately diverges from the
+translated path's non-streaming arms (a 500 envelope single-backend; park-and-failover when
+balancing): the equivalence to mirror is the streaming arm's, and a stall after emission closes the
+stream per the established post-emission rule rather than answering 504. The existing selection,
 failover, all-unhealthy response, healthz/stats, and recovery-hold paths remain the one system for
 every balancing member.
 
@@ -2509,13 +2516,15 @@ every balancing member.
 
 ### 16.3 Verification
 
-- L1 tests cover status parsing (including unknown/secret-shaped extra fields), provider/launcher
-  eligibility, profile menus, and failure kinds.
+- L1 tests cover status parsing (including unknown/secret-shaped extra fields and other spawn
+  failures), provider/launcher eligibility, profile menus, and failure kinds.
+- L1 tests pin the doctor session checks in both execution paths (the credential store is never
+  consulted for a subscription profile) and the edit flow's verify-only session re-check.
 - L2 tests prove provider/schema/menu registration and that Kitty profile/credential output never
   stores OAuth token material or a subscription credential record.
 - L3 aiohttp tests compare captured raw body bytes and headers for normal and SSE Messages relays,
-  then exercise subscription-only cooldown/failover, 429 retry hints, entitlement, and recovery
-  through BridgeServer.
+  then exercise subscription-only cooldown/failover, 429 retry hints, entitlement, recovery
+  through BridgeServer, and the pre-emission timeout's 504/no-park/no-failover semantics.
 - The step records are `.system_design/steps/kbr319_subscription_profile.md`,
   `kbr319_launcher_eligibility.md`, `kbr319_exact_messages_relay.md`, and
   `kbr319_subscription_health.md`; each receives implementation notes when its stage lands.

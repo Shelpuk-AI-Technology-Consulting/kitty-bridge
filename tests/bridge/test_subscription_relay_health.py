@@ -401,3 +401,65 @@ class TestSubscriptionRelayHealth:
 
         assert len(calls) == 2
         assert _parked(server) == []
+
+    @pytest.mark.asyncio()
+    async def test_upstream_read_timeout_answers_504_envelope_without_parking(self) -> None:
+        """A stalled upstream answers the agent's envelope, not a raw 500."""
+        backends = [_subscription_member("sub-only")]
+        server = _make_server(backends)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_UPSTREAM_URL, exception=aiohttp.ServerTimeoutError("read timed out"))
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_BODY,
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer sub-token"},
+                    ) as resp,
+                ):
+                    assert resp.status == 504, await resp.text()
+                    payload = await resp.json()
+        finally:
+            await server.stop_async()
+
+        assert payload["error"]["type"] == "api_error"
+        assert payload["error"]["message"] == ("Upstream provider timed out (120s). Try /clear to reduce context size.")
+        assert _parked(server) == []
+
+    @pytest.mark.asyncio()
+    async def test_upstream_read_timeout_parks_no_member_and_fails_over_to_none(self) -> None:
+        """A timeout is a slow request, not a sick backend: nothing parks."""
+        backends = [_subscription_member("sub-0"), _subscription_member("sub-1")]
+        server = _make_server(backends)
+        calls: list = []
+        port = await server.start_async()
+
+        def _timeout_responder(url: str, **kwargs: object) -> object:
+            """Record the attempt, then stall the upstream."""
+            calls.append((kwargs.get("data"), dict(kwargs.get("headers") or {})))
+            raise aiohttp.ServerTimeoutError("read timed out")
+
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    _UPSTREAM_URL,
+                    callback=_timeout_responder,
+                    repeat=True,
+                )
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_BODY,
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer sub-token"},
+                    ) as resp,
+                ):
+                    assert resp.status == 504, await resp.text()
+        finally:
+            await server.stop_async()
+
+        # Exactly one upstream attempt: a timeout triggers no failover hop.
+        assert len(calls) == 1
+        assert _parked(server) == []

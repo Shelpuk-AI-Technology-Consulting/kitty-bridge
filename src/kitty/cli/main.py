@@ -578,6 +578,17 @@ def _run_bridge(
 
     profile = backend  # type: ignore[assignment]
 
+    # The Claude-only gate runs before any credential lookup: a subscription
+    # profile has no key to resolve, and the honest answer is the launcher
+    # requirement, not a missing key.
+    from kitty.profiles.eligibility import ProfileEligibilityError, require_launcher_eligible_profile
+
+    try:
+        require_launcher_eligible_profile(profile, None)  # type: ignore[arg-type]
+    except ProfileEligibilityError as exc:
+        print_error(str(exc))
+        sys.exit(1)
+
     # Resolve API key from credential store (KBR-87: a corrupt stored value
     # reports cleanly and exits, where today's missing-key path does)
     auth_ref = profile.auth_ref  # type: ignore[attr-defined, union-attr]
@@ -692,6 +703,16 @@ def _run_bridge_balancing(
     profile_store = _PS()
     resolver = ProfileResolver(profile_store)
     member_profiles = resolver.resolve_balancing(balancing.name)
+
+    # Bridge mode is launcher-agnostic, so the eligibility filter drops
+    # subscription members exactly as a non-Claude launcher's pool would —
+    # before any member's credential is read.
+    from kitty.profiles.eligibility import filter_launcher_eligible_profiles
+
+    member_profiles = filter_launcher_eligible_profiles(member_profiles, None)
+    if not member_profiles:
+        print_error(f"Balancing profile {balancing.name!r} has no members eligible for 'bridge'")
+        sys.exit(1)
 
     # Build backends list: (provider, resolved_key, profile)
     backends = []

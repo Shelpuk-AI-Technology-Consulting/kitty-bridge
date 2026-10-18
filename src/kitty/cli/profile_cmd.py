@@ -7,6 +7,7 @@ import uuid
 
 import questionary
 
+from kitty.auth.claude_subscription import session_detail
 from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import (
     _NAME_PATTERN,
@@ -206,7 +207,7 @@ def _create_profile_flow(store: ProfileStore, cred_store: CredentialStore) -> Pr
         if not status.available:
             print_error(status.reason or "Claude Code subscription is unavailable")
             raise ValueError(status.reason or "Claude Code subscription is unavailable")
-        detail = ", ".join(value for value in (status.email, status.subscription_type) if value)
+        detail = session_detail(status)
         print_status(f"Using local Claude Code subscription ({detail})")
         auth_ref = str(uuid.uuid4())
     elif provider_adapter.requires_oauth:
@@ -353,6 +354,8 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
 
     For API-key providers: allows changing the model name and API key.
     For OAuth providers: allows changing the model and re-running OAuth.
+    For subscription providers: verifies the Claude Code session only; no
+    credential is prompted, stored, or rotated.
     Either way, the backup (reserve-tier) flag can be toggled.
 
     Args:
@@ -369,8 +372,14 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
 
     provider_adapter = _get_provider(profile.provider)
     is_oauth = provider_adapter.requires_oauth
+    # A subscription profile's credential is Claude Code's session, not a
+    # stored key: the edit flow can only verify it, never replace it.
+    is_subscription = profile.provider == "anthropic_subscription"
 
-    credential_label = "Re-authenticate" if is_oauth else "API Key"
+    if is_subscription:
+        credential_label = "Re-check Claude Code session"
+    else:
+        credential_label = "Re-authenticate" if is_oauth else "API Key"
     # "Both" keeps its established meaning of model + credential; "Backup" is a
     # separate choice rather than part of it.
     options = ["Model", credential_label, "Both", "Backup"]
@@ -383,13 +392,32 @@ def _edit_profile_flow(store: ProfileStore, cred_store: CredentialStore, profile
 
     updates: dict = {}
 
+    # A subscription re-check gates the whole flow: it runs before the model
+    # prompt so a failed check aborts before any typed input is discarded.
+    subscription_status = None
+    if is_subscription and field in (credential_label, "Both"):
+        from kitty.auth.claude_subscription import read_claude_subscription_status
+
+        subscription_status = read_claude_subscription_status()
+        if not subscription_status.available:
+            print_error(subscription_status.reason or "Claude Code subscription is unavailable")
+            return
+
     if field in ("Model", "Both"):
         new_model = prompt_text(f"New model name (current: {profile.model}): ")
         if new_model and new_model.strip():
             updates["model"] = new_model.strip()
 
     if field in (credential_label, "Both"):
-        if is_oauth:
+        if is_subscription and subscription_status is not None:
+            # Verified above. Nothing is prompted, stored, or rotated: the
+            # placeholder auth_ref stays.
+            detail = session_detail(subscription_status)
+            suffix = f" ({detail})" if detail else ""
+            print_status(f"Claude Code subscription session verified{suffix}")
+            if not updates:
+                return
+        elif is_oauth:
             # Re-run OAuth flow to get fresh session
             from kitty.cli.auth_cmd import run_oauth_for_provider
 

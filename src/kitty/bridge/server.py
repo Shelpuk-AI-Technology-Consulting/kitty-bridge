@@ -5500,6 +5500,24 @@ class BridgeServer:
                     {"type": "error", "error": {"type": "api_error", "message": error_msg}},
                     status=exc.status,
                 )
+            except asyncio.TimeoutError:
+                # A stalled upstream mirrors the translated Messages path: the
+                # agent gets its 504 envelope and no backend is parked — a
+                # timeout is a slow request, not a sick backend.
+                logger.error("Upstream POST timed out after %ds for the subscription relay", _STREAM_READ_TIMEOUT)
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": (
+                                f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). "
+                                "Try /clear to reduce context size."
+                            ),
+                        },
+                    },
+                    status=504,
+                )
 
         try:
             _normalize_messages_request(body)
@@ -5773,6 +5791,9 @@ class BridgeServer:
 
         Raises:
             UpstreamError: When the upstream fails in single-backend mode.
+            asyncio.TimeoutError: When the upstream stalls past the read
+                timeout; the handler answers 504 without parking, matching
+                the translated Messages path.
         """
         url = self._build_upstream_url(body)
         headers = self._subscription_relay_headers(request)

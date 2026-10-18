@@ -166,6 +166,34 @@ def test_read_claude_subscription_status_missing_binary_returns_actionable_reaso
     )
 
 
+def test_read_claude_subscription_status_other_spawn_error_returns_actionable_reason() -> None:
+    """Any other spawn failure becomes remediation, never a wizard traceback."""
+
+    def run_status(*_args: object, **_kwargs: object) -> CompletedProcess[str]:
+        """Raise the process error emitted for a non-executable Claude binary.
+
+        Args:
+            *_args: Ignored process arguments.
+            **_kwargs: Ignored process keyword arguments.
+
+        Raises:
+            PermissionError: Always, with a path-carrying message that must
+                not surface in the returned status.
+        """
+        raise PermissionError("denied: /usr/local/bin/claude")
+
+    status = read_claude_subscription_status(run_status)
+
+    assert status.available is False
+    assert status.email is None
+    assert status.subscription_type is None
+    assert status.reason == (
+        "Claude Code could not be started. Check that it is installed and executable, then try again."
+    )
+    # The OS error text carries filesystem paths; the status must not carry it.
+    assert "/usr/local/bin/claude" not in (status.reason or "")
+
+
 def test_read_claude_subscription_status_timeout_returns_actionable_reason() -> None:
     """Bound the status command and explain a hang without leaking output."""
     seen: list[tuple[tuple[object, ...], dict[str, object]]] = []

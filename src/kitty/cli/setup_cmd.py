@@ -7,6 +7,7 @@ import uuid
 
 import questionary
 
+from kitty.auth.claude_subscription import session_detail
 from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import _NAME_PATTERN, PROVIDER_LABELS, PROVIDER_SECTIONS, RESERVED_NAMES, Profile
 from kitty.profiles.store import ProfileStore
@@ -93,7 +94,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
         if not status.available:
             print_error(status.reason or "Claude Code subscription is unavailable")
             raise ValueError(status.reason or "Claude Code subscription is unavailable")
-        detail = ", ".join(value for value in (status.email, status.subscription_type) if value)
+        detail = session_detail(status)
         print_status(f"Using local Claude Code subscription ({detail})")
         auth_ref = str(uuid.uuid4())
     elif provider_adapter.requires_oauth:

@@ -747,7 +747,8 @@ Run `kitty doctor` to check your installation. It verifies that:
 
 - Agent binaries are installed and discoverable
 - A default profile exists
-- All profile credentials can be resolved
+- All profile credentials can be resolved (subscription profiles have none — the local Claude Code session is checked
+  instead)
 
 For deeper issues, use the logging flags:
 
@@ -990,9 +991,34 @@ This is a manual, best-effort configuration. Some IDE-specific features may not 
 
 ### Can I use my Anthropic (Claude Pro/Team) subscription with Kitty?
 
-No. Anthropic's Terms of Service prohibit accessing their subscription APIs from third-party software. You **can** use
-Kitty with Anthropic's API directly — sign up at [console.anthropic.com](https://console.anthropic.com), create an API
-key, and use the `anthropic` provider. You will be billed per token, not through your subscription.
+Yes — with Claude Code. Set up the **Anthropic Claude.ai Subscription** provider (`kitty setup`), and launch with
+`kitty claude`. Kitty relays Claude Code's request to Anthropic exactly as formed: it translates nothing, stores no
+token, and your login stays entirely in Claude Code's hands. The profile works **only with Claude Code** — other
+launchers refuse it, and a balancing pool used by another agent skips subscription members. Kitty with Anthropic's API
+directly (per-token billing) remains available through the `anthropic` provider.
+
+### "uses an Anthropic Claude.ai subscription and requires the Claude Code launcher"
+
+You ran `kitty <agent>` (or `kitty bridge`) with a subscription profile, but only Claude Code can relay its own
+subscription request. Launch it with `kitty claude`, or use an API-key profile for other agents.
+
+### "has no members eligible for"
+
+Your balancing pool's only usable members are Anthropic Claude.ai subscription profiles, and you launched an agent
+other than Claude Code (subscription members are skipped for them, never translated). Launch with `kitty claude`, or
+add an API-key member to the pool.
+
+### "requires the Claude Code Messages relay"
+
+Something other than Claude Code sent a request to a subscription backend on a route the relay does not serve. The
+subscription relay exists only on `POST /v1/messages` and only for Claude Code's own requests — point the client at
+the bridge with `kitty claude`, or switch to an API-key profile.
+
+### "Claude Code is not signed in" / "not using a Claude.ai subscription"
+
+The Claude Code session Kitty checked during setup or `kitty doctor` is missing or is not a Claude.ai subscription
+login. Run `claude auth login`, then retry. If the status command could not run or timed out, the message says so —
+check that Claude Code is installed, on PATH, and responsive (`claude auth status`), then retry.
 
 ### What is the difference between "OpenAI" and "OpenAI ChatGPT Plan"?
 
