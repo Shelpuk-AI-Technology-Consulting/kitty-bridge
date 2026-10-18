@@ -43,3 +43,11 @@ sits last so the timeout keeps its 504, and anything that is not a transport bli
 streaming usage pump's line buffer is capped at the translators' `_SSE_MAX_LINE_BYTES` (drop and resync; forwarded
 bytes untouched). Subscription setup/profile creation now offers `claude-sonnet-4-6` as the default model instead of
 falling through to the OpenRouter-format prompt, pinned in both flows' tests.
+
+Review round 4 (same day): the relay now honours the per-request `TransportGrace` window every
+translated route rides out (README Balanced Profiles promises it pool-wide) — same-member retries
+while the window lasts, park-and-fail-over once spent, and the same grace in single-backend mode
+before the handler's 500 envelope. Tests: two-blips-then-success with no parking and no hop
+(grace knobs patched instant), and a single-backend call-count pin (initial attempt + one retry per
+grace delay). The SSE line-cap test now asserts the drop's warning via caplog, making the cap
+regression-visible (the round-3 test alone passed with the cap deleted).

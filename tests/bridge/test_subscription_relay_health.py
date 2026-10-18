@@ -463,3 +463,43 @@ class TestSubscriptionRelayHealth:
         # Exactly one upstream attempt: a timeout triggers no failover hop.
         assert len(calls) == 1
         assert _parked(server) == []
+
+    @pytest.mark.asyncio()
+    async def test_transport_blip_rides_out_grace_before_parking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Brief connection trouble retries the same member, as everywhere else."""
+        # Keep the grace window instant: the contract under test is the retry
+        # decision, not the 30-second wait.
+        monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0, 0.0))
+        monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_PERIOD", 1.0)
+        backends = [_subscription_member("sub-0"), _subscription_member("sub-1")]
+        server = _make_server(backends)
+        calls: list = []
+        port = await server.start_async()
+
+        def _blip_then_reply(url: str, **kwargs: object) -> object:
+            """Drop the wire twice, then answer."""
+            calls.append((kwargs.get("data"), dict(kwargs.get("headers") or {})))
+            if len(calls) <= 2:
+                raise aiohttp.ClientConnectionError("connection reset")
+            return CallbackResult(status=200, body=json.dumps(_UPSTREAM_REPLY))
+
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_UPSTREAM_URL, callback=_blip_then_reply, repeat=True)
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_BODY,
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer sub-token"},
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+        finally:
+            await server.stop_async()
+
+        # Both blips were absorbed on the same member: no parking, no hop.
+        assert len(calls) == 3
+        assert _parked(server) == []

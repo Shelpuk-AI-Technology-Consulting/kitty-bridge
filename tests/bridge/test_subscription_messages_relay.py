@@ -633,9 +633,12 @@ class TestSubscriptionTransportFailure:
 
     @pytest.mark.asyncio()
     async def test_single_backend_transport_failure_answers_envelope_not_middleware_500(
-        self,
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A connection failure is an api_error envelope, not the bridge's 500."""
+        # The envelope is the contract here; keep the grace window instant.
+        monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0,))
+        monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_PERIOD", 1.0)
         server = _make_server()
         port = await server.start_async()
         try:
@@ -658,13 +661,45 @@ class TestSubscriptionTransportFailure:
         assert payload["error"]["type"] == "api_error"
         assert "failed" in payload["error"]["message"].lower()
 
+    @pytest.mark.asyncio()
+    async def test_single_backend_transport_failure_rides_out_grace_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The single attempt is retried inside the grace window before the 500."""
+        monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0, 0.0))
+        monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_PERIOD", 1.0)
+        server = _make_server()
+        port = await server.start_async()
+        seen: list = []
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_UPSTREAM_URL, exception=aiohttp.ClientConnectionError("connection refused"), repeat=True)
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_BODY,
+                        headers={"Content-Type": "application/json", **_INBOUND_HEADERS},
+                    ) as resp,
+                ):
+                    assert resp.status == 500, await resp.text()
+                    payload = await resp.json()
+            seen = m.requests.get(("POST", aiohttp.client.URL(_UPSTREAM_URL)), [])
+        finally:
+            await server.stop_async()
+
+        assert payload["error"]["type"] == "api_error"
+        # Initial attempt plus one retry per grace delay: the single backend
+        # was retried, not surfaced on the first blip.
+        assert len(seen) == 3
+
 
 class TestSubscriptionStreamLineCap:
     """The streaming usage pump's line buffer is bounded like the translators'."""
 
     @pytest.mark.asyncio()
     async def test_newline_less_line_beyond_the_cap_does_not_grow_unbounded(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A huge newline-less line is dropped, the stream still completes."""
         monkeypatch.setattr("kitty.bridge.server._SSE_MAX_LINE_BYTES", 64)
@@ -680,7 +715,10 @@ class TestSubscriptionStreamLineCap:
         server = _make_server()
         port = await server.start_async()
         try:
-            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+            with (
+                caplog.at_level("WARNING", logger="kitty.bridge.server"),
+                aioresponses(passthrough=["http://127.0.0.1"]) as m,
+            ):
                 m.post(
                     _UPSTREAM_URL,
                     body=oversized_then_usage,
@@ -700,3 +738,6 @@ class TestSubscriptionStreamLineCap:
             await server.stop_async()
 
         assert client_bytes == oversized_then_usage
+        # The distinguishing signal the reply promised: the drop is logged, so
+        # a regression deleting the cap goes red here rather than passing.
+        assert any("exceeded the cap" in record.message for record in caplog.records)

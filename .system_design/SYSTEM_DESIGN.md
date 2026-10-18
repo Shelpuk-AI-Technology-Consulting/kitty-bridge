@@ -2481,7 +2481,10 @@ translated Messages streaming path's 504 `api_error` envelope, parking no backen
 to none — one timeout semantics for both stream modes. This deliberately diverges from the
 translated path's non-streaming arms (a 500 envelope single-backend; park-and-failover when
 balancing): the equivalence to mirror is the streaming arm's, and a stall after emission closes the
-stream per the established post-emission rule rather than answering 504. The existing selection,
+stream per the established post-emission rule rather than answering 504. Transport blips are not a
+divergence: the relay rides out the same per-request `TransportGrace` window every translated route
+honours — same-member retries while it lasts, park-and-fail-over once it is spent, and in
+single-backend mode the same grace before the handler's 500 envelope. The existing selection,
 failover, all-unhealthy response, healthz/stats, and recovery-hold paths remain the one system for
 every balancing member.
 

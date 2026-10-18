@@ -5885,28 +5885,44 @@ class BridgeServer:
             envelope via :class:`UpstreamError`.
 
         Raises:
-            UpstreamError: When the upstream fails in single-backend mode.
+            UpstreamError: When the upstream fails in single-backend mode,
+                after the request's transport grace is spent.
             asyncio.TimeoutError: When the upstream stalls past the read
                 timeout; the handler answers 504 without parking, matching
                 the translated Messages path.
         """
         url = self._build_upstream_url(body)
         headers = self._subscription_relay_headers(request)
+        # One grace budget per request, shared across members, exactly as the
+        # translated routes ride out connection trouble (README Balanced
+        # Profiles promises this pool-wide).
+        grace = TransportGrace()
         if not self._backends:
-            return await self._relay_subscription_attempt(request, body, raw, url, headers)
+            while True:
+                try:
+                    return await self._relay_subscription_attempt(request, body, raw, url, headers)
+                except Exception as exc:
+                    # Single-backend mode honours the same grace before
+                    # surfacing: the handler's transport arm answers once the
+                    # window is spent.
+                    if not await self._wait_out_transport_blip(exc, grace):
+                        raise
         while True:
             try:
                 response = await self._relay_subscription_attempt(request, body, raw, url, headers)
             except UpstreamError as exc:
                 self._mark_subscription_unhealthy(exc)
             except Exception as exc:
-                # A dropped wire to Anthropic is a sick backend, not a sick
-                # request: park it as transport and fail over. Anything that
-                # is not a transport blip propagates untouched.
-                if not _is_transport_error(exc):
-                    raise
-                if self._current_backend_idx >= 0:
-                    self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="transport")
+                # A dropped wire to Anthropic first rides out the same
+                # transport grace every translated route honours; once the
+                # window is spent it is a sick backend: park it as transport
+                # and fail over. Anything that is not a transport blip
+                # propagates untouched.
+                if not await self._wait_out_transport_blip(exc, grace):
+                    if not _is_transport_error(exc):
+                        raise
+                    if self._current_backend_idx >= 0:
+                        self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="transport")
             else:
                 if self._current_backend_idx >= 0:
                     self._mark_backend_healthy(self._current_backend_idx)
