@@ -2346,15 +2346,98 @@ choice.
   kitty one; it is what makes the polling endpoint the sole delivery
   channel for the authorization code.
 
+## 15. Impersonated Codex CLI identity and OpenAI's client-version gates
+
+Traces to [KBR-318](https://shelpuk.atlassian.net/browse/KBR-318). The
+`openai_subscription` provider does not present itself as kitty: every
+request to `chatgpt.com/backend-api/codex/responses` claims to be a Codex
+CLI install, carrying the CLI's `User-Agent` and its `version` header.
+OpenAI version-gates individual models on that identity — a request whose
+claimed version is below a model's gate is rejected with **HTTP 400 and an
+empty body**, with no hint that the version was the problem. The gate first
+bit on `gpt-6-astra` (requires Codex CLI ≥ 0.153.0) while kitty claimed
+`0.128.0`; the failure surfaced as a user-facing 400, not a red CI run.
+Login into the provider is §14's concern; this section is the request
+identity once logged in.
+
+### 15.1 Components
+
+| Component | Module | Responsibility |
+|---|---|---|
+| `CODEX_CLI_VERSION` (`kitty.codex_identity`) | **existing, re-pointed** | The single literal for the impersonated CLI version — `"0.154.0"` as of v1.18.0. Every version field kitty sends OpenAI derives from it. |
+| `build_codex_user_agent` (`kitty.codex_identity`) | **existing** | Builds `codex_cli_rs/{version} ({os} {release}; {machine})` from the constant. Also consumed by the OAuth token leg's `token_request_headers` (`kitty.auth.oauth_session`) — a bump moves that identity too, beyond this section's logged-in-request scope. |
+| `OpenAISubscriptionAdapter._build_codex_headers` (`kitty.providers.openai_subscription`) | **existing** | Sends `version: CODEX_CLI_VERSION` on every Codex-backend request; the UA rides alongside it. |
+| `TestTheIdentityMeetsOpenAisClientGates` (`tests/test_upstream_identity_consistency.py`) | **new** | The tripwire: asserts the parsed constant stays ≥ the lowest known client gate (`(0, 153, 0)`, Astra's), with the bump instructions carried in the assertion message. |
+
+### 15.2 Decisions, and why
+
+- **One literal, two derived fields, never a second copy.** The `version`
+  header and the `User-Agent` both read the module constant, so a bump
+  moves every consumer together. The KBR-8 two-source defect — two
+  independently-editable version literals that can silently disagree — is
+  pinned shut: a single-source test asserts the version literal appears
+  exactly once in `src/`, and header ⇄ constant ⇄ UA agreement tests
+  assert both fields derive from the module (§15.3).
+- **The guard is a floor, not an early-warning system.** It fails when the
+  constant drops below the lowest *known* gate (a regression or a careless
+  edit). It cannot detect a *new* gate raise: both sides of the comparison
+  are literals in this repository, and live upstream probing is banned for
+  `tests/`. A future gate raise is discovered the way this one was — a
+  user-facing failure traced back to the identity — and the deliberate
+  response is: bump `CODEX_CLI_VERSION`, raise the floor in the test, cite
+  the new gate's provenance in the test docstring.
+- **The constant is living by design.** OpenAI gates models by client
+  version and rotates the list independently of kitty releases; each
+  future gate needs a conscious bump. The tripwire exists to make that a
+  test failure with instructions rather than a customer's 400. The
+  version is also pinned to never be kitty's own release train
+  (`kitty.__version__ != CODEX_CLI_VERSION`), because the two numbers
+  move on independent schedules.
+- **Why 0.154.0 specifically.** ≥ 0.153.0 satisfies the Astra gate;
+  0.154.0 is the value the fix was validated against empirically (the
+  identical request rejected at `0.128.0` succeeded end-to-end at
+  `0.154.0`). The then-current stable (0.162.1) was deliberately *not*
+  adopted: only a version validated against the real backend ships, not
+  merely the newest release — the same question the next gate raise will
+  face.
+
+### 15.3 Verification
+
+- L1 module tests pin the UA format (version + running platform) and that
+  the impersonated version is not kitty's release train
+  (`tests/test_codex_identity.py`).
+- L1 consistency tests pin `version` header ⇄ constant ⇄ UA agreement
+  (`tests/providers/test_openai_subscription.py::TestCodexHeaders`).
+- L1 single-source test asserts the version literal appears exactly once
+  in `src/` (`tests/test_oauth_leg_identity.py`) — the KBR-8 regression
+  pin.
+- L1 tripwire: the floor guard (§15.1), watched red at `0.128.0` and
+  green at `0.154.0` — a development-time observation recorded in the
+  KBR-318 ticket, not a committed artifact.
+
+### 15.4 Known limits (recorded, not fixed here)
+
+- **A new gate raise is invisible to CI until a user hits it.** This is a
+  consequence of the no-live-probing rule, accepted deliberately: the
+  discovery channel is a user-facing 400 with an empty body, and the
+  response is the bump-and-raise-floor procedure from §15.2.
+- **The gate value's provenance is community documentation**, not an
+  official API reference ("Codex && Work GPT-6-ASTRA…" ChatGPT community
+  thread; confirmed empirically). It is cited in the tripwire's
+  docstring so the next maintainer can re-verify before trusting it.
+- **Gate raises are expected to recur.** Recorded so a future reader does
+  not mistake the recurrence for a defect in the design: the constant is
+  a deliberate, periodically-bumped value, not a set-and-forget one.
+
 ---
 
-## 15. Anthropic subscription relay
+## 16. Anthropic subscription relay
 
 Traces to [KBR-319](https://shelpuk.atlassian.net/browse/KBR-319). This is a Claude Code
 subscription feature, not API-key Anthropic support: the subscription request must remain Claude
 Code's request while Kitty supplies local routing and the established balancing safety controls.
 
-### 15.1 The contract
+### 16.1 The contract
 
 `anthropic_subscription` is a distinct, tokenless profile type. During profile setup or editing,
 Kitty calls `claude auth status --json` and accepts only a JSON object whose `loggedIn` is `true`,
@@ -2395,7 +2478,7 @@ kinds. Non-streaming and pre-emission SSE failures share this classifier. The ex
 failover, all-unhealthy response, healthz/stats, and recovery-hold paths remain the one system for
 every balancing member.
 
-### 15.2 Decisions, and why
+### 16.2 Decisions, and why
 
 - **Ask `claude auth status --json`, not Claude Code's private credential storage.** The command
   reports the supported cross-platform status without Kitty reading, storing, or accidentally
@@ -2424,7 +2507,7 @@ every balancing member.
 - **Reuse the health state, not a subscription-specific circuit breaker.** Two circuits would diverge
   in cooldown, failover, observability, and recovery semantics for otherwise equivalent members.
 
-### 15.3 Verification
+### 16.3 Verification
 
 - L1 tests cover status parsing (including unknown/secret-shaped extra fields), provider/launcher
   eligibility, profile menus, and failure kinds.
