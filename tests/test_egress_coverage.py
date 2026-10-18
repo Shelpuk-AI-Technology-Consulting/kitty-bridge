@@ -49,7 +49,7 @@ _EXPECTED_COUNTS: dict[tuple[str, str], int] = {
     ("providers/openai_subscription.py", "curl_cffi session"): 1,
     ("providers/bedrock.py", "boto3 client"): 2,
     ("validation.py", "aiohttp session"): 1,
-    ("auth/openai_oauth.py", "aiohttp session"): 1,
+    ("auth/openai_oauth.py", "aiohttp session"): 2,
     ("cli/egress_cmd.py", "aiohttp session"): 1,
     ("bridge/manage.py", "urllib"): 1,
 }
@@ -62,7 +62,7 @@ _ALLOWLIST: dict[str, str] = {
     "providers/openai_subscription.py": "one builder, two sessions: proxies= and NOPROXY (KBR-161)",
     "providers/bedrock.py": "botocore Config(proxies=...); SSO mode reports supports_egress()=False",
     "validation.py": "session built with aiohttp_session_kwargs(egress); fails closed under egress",
-    "auth/openai_oauth.py": "session built with aiohttp_session_kwargs()",
+    "auth/openai_oauth.py": "two sessions (browser + device flows), both built with aiohttp_session_kwargs()",
     "cli/egress_cmd.py": "the gateway self-test; proxied by definition",
     # Exempt: never leaves the machine.
     "bridge/manage.py": "localhost /healthz poll — must stay direct, see should_bypass()",
@@ -633,7 +633,7 @@ class TestProxyApplicationSitesInventory:
     #: the function is invoked from a closed surface and a call-count scan would miss
     #: it after a regression that broke the builder without removing the calls.
     _EXPECTED_PROXY_APPLICATION_COUNTS: dict[tuple[str, str], int] = {
-        ("auth/openai_oauth.py", "aiohttp_session_kwargs"): 1,
+        ("auth/openai_oauth.py", "aiohttp_session_kwargs"): 2,
         ("providers/ollama_cloud.py", "aiohttp_session_kwargs"): 1,
         ("providers/model_context_sync.py", "aiohttp_session_kwargs"): 1,
         ("providers/openai_subscription.py", "_new_curl_session"): 1,

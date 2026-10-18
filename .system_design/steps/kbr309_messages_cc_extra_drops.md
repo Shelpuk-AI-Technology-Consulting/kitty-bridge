@@ -143,3 +143,21 @@ Open follow-ups filed separately, deliberately out of scope:
 - `context_management` beta-header carriage (the rationale that drives
   M27's drop rather than a KBR-224-style restore) is a separate product
   decision, owned elsewhere.
+
+## Merge-conflict note (2026-10-18)
+
+PR #284 conflicted with `origin/main` twice over row ids. First rebase
+(b6dbe3c): KBR-55 took M27/M28/M29, so the context_management row went
+M27 → M30 and the first-draft M28 (parts-join) row was **dropped** — KBR-308
+had already closed the join via `carry_cache_control=True` at hop 1, and the
+bare-`parts[*]` anchor would over-claim §3.3.1's deleted-part falsification
+case. Second (this merge of origin/main): KBR-59 landed its response-direction
+rows on **M30/M31/M32**, so the context_management row is now **M33** (next
+free id), appended last in both the `REGISTER` tuple and the §3.2.1 table.
+All companion sites re-pinned: REGISTER 87 (34 bridge-level live M-rows +
+53 provider-level), markdown M-count 34, unconditional list 52 (main's 51 +
+M33; KBR-59 rows are all conditional), slice annotations `M26/M33`. This step
+file's "M27 (new)" / "M28 (new)" wording above records the first-draft plan;
+the landed row id is M33 and M28 does not exist. **M33 is a request-side row**,
+so the "next reply-side row id" noted in the KBR-59 record moves from M33 to
+**M34** (the KBR-58/T-D9 corpus slice inherits that).

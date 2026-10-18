@@ -90,6 +90,30 @@ def test_run_cleanup_removes_stale_values(tmp_path):
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
 
 
+def test_run_cleanup_strips_claude_code_tmpdir(tmp_path):
+    """KBR-314: ``kitty cleanup`` strips the temp-dir override from a stale
+    user-global settings file alongside the other injected keys.
+    """
+    settings_path = tmp_path / "settings.json"
+    backup_path = tmp_path / "claude-settings-backup.json"
+    settings_data = {
+        "env": {
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:32987",
+            "CLAUDE_CODE_TMPDIR": "/tmp",
+        },
+    }
+    settings_path.write_text(json.dumps(settings_data))
+
+    with patch("kitty.cli.cleanup_cmd._get_backup_path", return_value=backup_path):
+        exit_code = run_cleanup(settings_path=settings_path)
+    assert exit_code == 0
+
+    result = json.loads(settings_path.read_text())
+    env = result["env"]
+    assert "CLAUDE_CODE_TMPDIR" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+
+
 def test_run_cleanup_already_clean(tmp_path):
     settings_path = tmp_path / "settings.json"
     settings_data = {

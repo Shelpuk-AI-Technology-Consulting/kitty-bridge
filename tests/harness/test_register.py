@@ -125,14 +125,25 @@ _SHAPES: tuple[tuple[str, str], ...] = (
         c.part_path(c.WILDCARD, c.WILDCARD, "display_name"),
         c.part_path(2, 0, "display_name"),
     ),
+    # KBR-59 (T-D10) — M30's anchor (Gemini response-direction functionCall-id
+    # echo from KBR-257). The reply-side twin of M18/M19 — same field name,
+    # response direction. ``_SHAPES`` carries both the request-side
+    # ``part_path(WILDCARD, WILDCARD, "id")`` (M18's anchor) and the
+    # reply-side ``reply_part_path(WILDCARD, "id")`` (M30's anchor); the
+    # row text in ``register.py`` keeps the two paths distinct so
+    # ``test_no_two_rows_are_indistinguishable`` does not collapse them.
+    (c.reply_part_path(c.WILDCARD, "id"), c.reply_part_path(2, "id")),
+    # KBR-59 (T-D10) — M32's anchor (Ollama-vs-CC part ordering on rare
+    # Thinking+ToolUse replies).
+    (c.reply_part_path(c.WILDCARD), c.reply_part_path(2)),
 )
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 84 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 87 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """31 bridge-level rows less the withdrawn M13, plus 53 provider-level.
+        """34 bridge-level rows less the withdrawn M13, plus 53 provider-level.
 
         The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
@@ -154,21 +165,23 @@ class TestTheRowsThemselves:
         that route). The +3 over the pre-KBR-55 count is KBR-55: M27 (G28
         top_k drop on the translated non-Anthropic routes), M28 (G29 empty
         stop_sequences omission), M29 (G30 string-form stop rewritten into
-        the list form). The +1 over the pre-KBR-309 count is KBR-309's M30
-        (translated-route ``context_management`` drop, beta-gated) —
-        id-renumbered from KBR-309's first-draft M27 because KBR-55 took
-        that id on `origin/main` before KBR-309 rebased (the KBR-271
-        "register-edit companion sites" lesson). KBR-309's first-draft M28
-        (parts-join claim) was dropped entirely on the rebase: KBR-308
-        already expanded `carry_cache_control=True` to hop 1, closing the
-        join on every cache_control-bearing multi-part turn, and a
-        bare-`parts[*]` claim would mask §3.3.1's "deleted part"
+        the list form). The +3 over the pre-KBR-59 count is the three
+        response-direction rows KBR-59 adds (M30, M31, M32). The +1 over
+        the pre-KBR-309 count is KBR-309's M33 (translated-route
+        ``context_management`` drop, beta-gated) — id-renumbered from
+        KBR-309's first-draft M27 because KBR-55 took that id on
+        `origin/main`, and again from M30 because KBR-59 took M30/M31/M32
+        (the KBR-271 "register-edit companion sites" lesson). KBR-309's
+        first-draft M28 (parts-join claim) was dropped entirely on the
+        rebase: KBR-308 already expanded `carry_cache_control=True` to hop 1,
+        closing the join on every cache_control-bearing multi-part turn, and
+        a bare-`parts[*]` claim would mask §3.3.1's "deleted part"
         falsification case — see `test_oracle_curl_cffi.py`'s
         `test_inbound_content_survives_while_introduced_is_caught`. All
         literals are the no-reflow damage test — a future change that
         drops a row or adds one without updating the guard fails loudly.
         """
-        assert len(r.REGISTER) == 84
+        assert len(r.REGISTER) == 87
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -718,6 +731,15 @@ class TestTheTriggerArrangingBy:
             r.Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED: r.ArrangingBy.REQUEST,
             r.Trigger.ANTHROPIC_TOP_K_PRESENT: r.ArrangingBy.REQUEST,
             r.Trigger.EMPTY_STOP_SEQUENCES: r.ArrangingBy.REQUEST,
+            # KBR-59 (T-D10) — three new response-direction triggers,
+            # all RESPONSE per the row text in ``register.py``. The
+            # classification matches the ArrangingBy.RESPONSE
+            # enumeration update; KBR-59 spec documents why each is a
+            # property of the captured reply rather than a corpus
+            # entry.
+            r.Trigger.CAPTURED_TOOL_CALL_ID_PRESENT: r.ArrangingBy.RESPONSE,
+            r.Trigger.OLLAMA_CANONICAL_TOOL_CALLING_REPLY: r.ArrangingBy.RESPONSE,
+            r.Trigger.REPLY_CONTAINS_THINKING_AND_TOOL_USE: r.ArrangingBy.RESPONSE,
         }
 
         assert set(expected) == set(r.Trigger) - {r.Trigger.ALWAYS}, (

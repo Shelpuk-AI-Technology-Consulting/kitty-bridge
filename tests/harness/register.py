@@ -136,8 +136,9 @@ class ArrangingBy(Enum):
       regardless of inbound wire"), it is met when
       ``provider.dispatch == "_cc_to_responses"``.
     * :attr:`RESPONSE` — a property of the upstream response, arranged by a
-      scripted recorder (``M6``, ``M8``, ``M9``, ``M12``, ``M17``). T-D8
-      reads these from a named scripted-recorder test, not from the corpus.
+      scripted recorder (``M6``, ``M8``, ``M9``, ``M12``, ``M17``,
+      ``M30``, ``M31``, ``M32``). T-D8 reads these from a named
+      scripted-recorder test, not from the corpus.
     * :attr:`PROFILE` — derived from the profile (``M1`` — profile model;
       ``M4`` / ``M5`` — compaction budget from profile model, and on a
       balancing profile from the smallest context in the pool). Declared
@@ -306,6 +307,36 @@ class Trigger(Enum):
     # a non-empty list is carried as-is, so §3.3.2 assertion 2 owes a
     # corpus entry that proves the omission's absence.
     EMPTY_STOP_SEQUENCES = ("empty_stop_sequences", ArrangingBy.REQUEST)
+    # KBR-59 (T-D10) / response-direction mirror of
+    # ``GEMINI_INBOUND_ID_ABSENT``. The captured upstream CC reply carries
+    # a ``tool_calls[].id``; the Gemini reply reader projects it onto
+    # ``reply.parts[*].id`` for KBR-257's functionCall-id echo on the
+    # ``google_aistudio`` / ``vertex`` providers. RESPONSE — the trigger
+    # reads a wire-level property of the captured CC reply, decided by
+    # the scripted recorder at T-D8 time, not by a corpus entry.
+    CAPTURED_TOOL_CALL_ID_PRESENT = (
+        "captured_tool_call_id_present",
+        ArrangingBy.RESPONSE,
+    )
+    # KBR-59 (T-D10) / KBR-267 — the canonical tool-calling exchange on
+    # Ollama Cloud: ``message.tool_calls`` non-empty AND
+    # ``done_reason == "stop"``. Ollama's single wire value ``"stop"``
+    # covers both CC's ``"stop"`` and ``"tool_calls"``; the reader
+    # maps it to ``end_turn`` per KBR-267's independent-oracle rule.
+    # RESPONSE — decided by the upstream's reply bytes (T-D8).
+    OLLAMA_CANONICAL_TOOL_CALLING_REPLY = (
+        "ollama_canonical_tool_calling_reply",
+        ArrangingBy.RESPONSE,
+    )
+    # KBR-59 (T-D10) / KBR-267 — rare Ollama vs Chat Completions
+    # part-ordering disagreement on replies that carry both Thinking
+    # and ToolUse. ``message.thinking`` non-empty AND
+    # ``message.tool_calls`` non-empty. RESPONSE — decided by the
+    # upstream's reply bytes (T-D8).
+    REPLY_CONTAINS_THINKING_AND_TOOL_USE = (
+        "reply_contains_thinking_and_tool_use",
+        ArrangingBy.RESPONSE,
+    )
 
 
 #: Docstrings on the two adapter-dispatch triggers — the asymmetry is
@@ -1317,10 +1348,123 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
             "it ever does, M29 needs a projectable anchor."
         ),
     ),
-    # KBR-309 rows appended after KBR-55's M27/M28/M29 (renamed to M30/M31
-    # to keep ids unique; the KBR-271 "register-edit companion sites" lesson).
     MutationRow(
         id="M30",
+        # KBR-59 (T-D10) — response-direction mirror of M18/M19. KBR-257
+        # made the Gemini reply translator carry the upstream CC
+        # ``tool_calls[].id`` onto the emitted ``functionCall.id`` when
+        # the upstream carried one, and omit it when absent (the
+        # ``SYSTEM_DESIGN.md`` §4 X4 rule, ``emit when present, omit when
+        # absent`` — Gemini ``FunctionCall.id`` is optional per
+        # ``v1beta``). The reader projects the id faithfully (KBR-36).
+        # The delta this row claims is the *response-direction*
+        # counterpart of M18/M19's request-side functionCall synthesis:
+        # when the upstream carried an id, the reply projection's
+        # ``reply.parts[*].id`` matches the captured CC id rather than
+        # being absent.
+        #
+        # The companion M18/M19 Trigger names ("ABSENT") and the
+        # response-side name ("PRESENT") are deliberately named from
+        # the captured side they read; the request-side names a
+        # request-wire property (the inbound Gemini body) while
+        # ``CAPTURED_TOOL_CALL_ID_PRESENT`` names a captured-reply-wire
+        # property (the upstream CC reply). Same family, opposite
+        # direction, no shared convention to confuse.
+        #
+        # Anchored at ``reply.parts[*].id`` (3-segment, with ``id`` as
+        # the field) per §3.3.1a — the field name, never the bare
+        # ``reply.parts[*]``. The M5/M3 lesson repeated for M32.
+        #
+        # ‡ NOT_PROJECTABLE is not an option: the reader projects the
+        # id faithfully today (the Gemini reader has read it since
+        # T-A4 / KBR-36), so the path is projectable. A
+        # NOT_PROJECTABLE row would blind the oracle to exactly the
+        # path KBR-257 made projectable. The KBR-195 §8 rationale
+        # carries forward verbatim.
+        #
+        # Renumbered from M27 at the 2026-10-18 merge of origin/main:
+        # KBR-55 landed its G28/G29/G30 rows on the M27/M28/M29 ids
+        # first, so the reply rows take the next free ids (the same
+        # collision KBR-195's reviewer round caught for M21/M22/M23).
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator._translate_content",),
+        trigger=Trigger.CAPTURED_TOOL_CALL_ID_PRESENT,
+        paths=(c.reply_part_path(c.WILDCARD, "id"),),
+        conditional=True,
+        design_ref="§4 X4 · KBR-257",
+        scope=("google_aistudio", "vertex"),
+    ),
+    MutationRow(
+        id="M31",
+        # KBR-59 (T-D10) / KBR-267 — Ollama canonical tool-calling
+        # ``reply.stop_reason`` delta. Ollama's ``/api/chat``
+        # with-tools responses carry ``done_reason: "stop"`` — the
+        # single wire value that covers both CC's ``"stop"`` (the
+        # direct-completion end-turn case) and CC's ``"tool_calls"``
+        # (the tool-calling case). The reader maps ``"stop"`` to
+        # ``end_turn`` per KBR-267's *independent-oracle* rule —
+        # inferring ``tool_use`` from the presence of
+        # ``message.tool_calls`` would violate the rule by reading the
+        # CC side of the comparison into an Ollama projection.
+        #
+        # The delta surfaces when the bridge emits the reply on a
+        # wire that uses a finer stop-reason vocabulary (e.g. CC
+        # translates the Ollama end-turn reply into ``"tool_calls"``
+        # on the agent side because the message had tool calls — so
+        # the CC reader projects ``tool_use`` while the Ollama reader
+        # projects ``end_turn``).
+        #
+        # Trigger reads the wire-level condition: a captured Ollama
+        # reply with ``message.tool_calls`` non-empty AND
+        # ``done_reason == "stop"``. RESPONSE per the ArrangingBy
+        # enumeration update — the scripted recorder owns the input
+        # shape; the corpus does not.
+        site=("kitty/providers/ollama_cloud.py:OllamaCloudAdapter.translate_from_upstream",),
+        trigger=Trigger.OLLAMA_CANONICAL_TOOL_CALLING_REPLY,
+        paths=(c.REPLY_STOP_REASON,),
+        conditional=True,
+        design_ref="§3.2.2 · KBR-267 · KBR-59 comment 3.1",
+        scope=("ollama_cloud",),
+    ),
+    MutationRow(
+        id="M32",
+        # KBR-59 (T-D10) / KBR-267 — Ollama vs Chat Completions
+        # part-ordering delta on rare Thinking+ToolUse replies.
+        # §7.4.1's two-reader-disagree-on-a-part-boundary rule names
+        # the bare-index anchor for this case: when two readers
+        # disagree about a part boundary, the bare-part path is the
+        # address. KBR-267 comment 3.2 records the disagreement:
+        # Ollama projects Text → Thinking → ToolUse → Image (its
+        # canonical reader ordering) while Chat Completions projects
+        # Text → refusal → ToolUse → Thinking (the CC tool-calling
+        # ordering). The two orderings agree on the common
+        # Text+ToolUse case via the empty-content convergence rule —
+        # the *rare* Thinking+ToolUse case is what surfaces a delta.
+        #
+        # Trigger reads the wire-level condition: a captured Ollama
+        # reply with ``message.thinking`` non-empty AND
+        # ``message.tool_calls`` non-empty. RESPONSE per the
+        # ArrangingBy enumeration update. Scope is the Ollama Cloud
+        # route (the only provider carrying the wire shape).
+        #
+        # Co-claim note (registered for the corpus builder): M32's
+        # ``reply.parts[*]`` (2-segment, broad) and M30's
+        # ``reply.parts[*].id`` (3-segment, narrow) co-claim a
+        # tool-call-id delta on a Thinking+ToolUse reply under the
+        # prefix rule. ``_conditional_violations``'s specificity
+        # attribution handles this — when M30 is *triggered* and a
+        # delta lands at ``reply.parts[*].id``, M32 is exempt (M30
+        # is finer). The co-claim is intentional, not double-billing.
+        site=("kitty/providers/ollama_cloud.py:OllamaCloudAdapter.translate_from_upstream",),
+        trigger=Trigger.REPLY_CONTAINS_THINKING_AND_TOOL_USE,
+        paths=(c.reply_part_path(c.WILDCARD),),
+        conditional=True,
+        design_ref="§7.4.1 · §3.2.2 · KBR-267 · KBR-59 comment 3.2",
+        scope=("ollama_cloud",),
+    ),
+    # KBR-309's row, appended after KBR-59's M30/M31/M32 (renamed from M30 to
+    # M33 to keep ids unique; the KBR-271 "register-edit companion sites" lesson).
+    MutationRow(
+        id="M33",
         # KBR-309: drop an agent's ``context_management`` on the translated
         # Messages route. Anthropic's ``context_management`` is a **beta**
         # field — the documented endpoint accepts it only when the request

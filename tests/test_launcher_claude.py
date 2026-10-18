@@ -1,5 +1,6 @@
 """Tests for launchers/claude.py — ClaudeAdapter spawn configuration."""
 
+import tempfile
 import uuid
 
 import pytest
@@ -225,6 +226,28 @@ class TestEnableClaudeAiMcpServers:
         assert "ENABLE_CLAUDEAI_MCP_SERVERS" in _KITTY_INJECTED_KEYS
 
 
+class TestClaudeCodeTmpdir:
+    """KBR-314: the launcher picks Claude Code's temp dir so cross-session
+    messaging's socket dir does not default to ``/``.
+
+    Claude Code's cross-session IPC needs a user- or root-owned socket
+    directory; with neither ``XDG_RUNTIME_DIR`` nor ``CLAUDE_CODE_TMPDIR``
+    usable it falls back to ``/``, which fails the ownership check on
+    sandboxed boxes (``/`` owned by a non-root user), and Claude Code prints
+    a remediation hint at every launch. Setting ``CLAUDE_CODE_TMPDIR`` to the
+    OS temp directory (root-owned ``/tmp`` on Linux, per-user on macOS and
+    Windows) passes the check on every supported platform.
+    """
+
+    def test_env_overrides_carries_claude_code_tmpdir(self):
+        """The override must be the OS temp directory, unconditionally."""
+        adapter = ClaudeAdapter()
+        profile = _make_profile()
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="sk-test")
+
+        assert config.env_overrides["CLAUDE_CODE_TMPDIR"] == tempfile.gettempdir()
+
+
 class TestInjectedKeyListsInSync:
     """AC5.5: the context-window key must be injected AND cleaned up.
 
@@ -245,6 +268,18 @@ class TestInjectedKeyListsInSync:
         from kitty.cli.cleanup_cmd import _KITTY_INJECTED_KEYS
 
         assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in _KITTY_INJECTED_KEYS
+
+    def test_tmpdir_key_in_settings_override_list(self):
+        """The key must be injected into settings.json by prepare_launch."""
+        from kitty.launchers.claude import _SETTINGS_ENV_OVERRIDE_KEYS
+
+        assert "CLAUDE_CODE_TMPDIR" in _SETTINGS_ENV_OVERRIDE_KEYS
+
+    def test_tmpdir_key_in_cleanup_list(self):
+        """The key must be removed by ``kitty cleanup`` after a crash."""
+        from kitty.cli.cleanup_cmd import _KITTY_INJECTED_KEYS
+
+        assert "CLAUDE_CODE_TMPDIR" in _KITTY_INJECTED_KEYS
 
     def test_settings_and_cleanup_lists_are_identical(self):
         """The launcher and the crash-recovery cleaner agree on every key.

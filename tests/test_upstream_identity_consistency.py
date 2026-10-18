@@ -88,9 +88,13 @@ bound the version in ``__init__`` would escape a sweep that built it first.
   value-shape comparison can); and ``bedrock``, whose hook never ships and
   whose contract is observed on the botocore request instead.
 
-The identity *policy* — what each adapter should claim to be — is Q1, and is
-untouched here: this file only requires that whatever an adapter claims, it
-claims it once and does not read it from kitty's release train.
+The identity *consistency* rule (Q1) — that whatever an adapter claims,
+it claims once and does not read it from kitty's release train — is
+untouched here. The file also enforces a **minimum client-version floor**
+(Q1-adjacent, KBR-318) in :class:`TestTheIdentityMeetsOpenAisClientGates`,
+because OpenAI version-gates Codex-backend models by the client identity
+the request carries and a stale identity surfaces as a user-facing 400;
+see that class for the gate's provenance.
 """
 
 from __future__ import annotations
@@ -1877,4 +1881,51 @@ class TestTheBoundaryBetweenHookAndWireIsPinned:
             "a custom-transport adapter cannot join the exemption set "
             "without a wire observation of its own; if it did, this "
             f"guard would fail it. Got {_WIRE_OBSERVED_ELSEWHERE}"
+        )
+
+
+class TestTheIdentityMeetsOpenAisClientGates:
+    """The impersonated CLI version must stay at or above OpenAI's client gates.
+
+    KBR-318. OpenAI version-gates individual models on the Codex backend by
+    the client identity the request carries: GPT-6 Astra requires Codex CLI
+    ``>= 0.153.0`` (ChatGPT community documentation, "Codex && Work
+    GPT-6-ASTRA has a serious model downgrading issue", 2026-10; confirmed
+    empirically — a ``0.128.0``-identity request for ``gpt-6-astra`` was
+    rejected with HTTP 400 and an empty body, and the same request at
+    ``0.154.0`` succeeded). ``CODEX_CLI_VERSION`` was ``0.128.0`` when that
+    gate landed, so the failure surfaced as a user-facing 400 instead of a
+    red CI run.
+
+    **What this guard is, precisely.** A floor, not an early-warning
+    system: it fails when the constant drops below the lowest known gate
+    (a regression or a careless edit), and its assertion message carries
+    the bump instructions. It cannot detect a *new* gate raise — both
+    sides of the comparison are literals in this repository, and live
+    upstream probing is banned for ``tests/`` — so when OpenAI gates a
+    future model behind a newer client, the discovery channel is a
+    user-facing failure traced back here, and the deliberate response is
+    bumping ``CODEX_CLI_VERSION`` in ``src/kitty/codex_identity.py`` and
+    raising this floor with the new gate's provenance cited.
+    """
+
+    #: The lowest client version OpenAI is known to require for any
+    #: Codex-backend model (Astra's gate, KBR-318). Raise when OpenAI
+    #: introduces a higher gate and cite the source in the docstring above.
+    _ASTRA_CLIENT_GATE = (0, 153, 0)
+
+    def test_codex_cli_version_meets_openais_lowest_known_model_gate(self) -> None:
+        """The impersonated version stays at or above the lowest known gate."""
+        parsed = tuple(int(part) for part in _CODEX_CLI_VERSION.split("."))
+        assert len(parsed) == 3, (
+            f"CODEX_CLI_VERSION {_CODEX_CLI_VERSION!r} must be a three-part "
+            "semver-shaped string: the gate comparison and the User-Agent "
+            "format both assume it"
+        )
+        assert parsed >= self._ASTRA_CLIENT_GATE, (
+            f"CODEX_CLI_VERSION {_CODEX_CLI_VERSION!r} is below OpenAI's "
+            f"lowest known client gate {self._ASTRA_CLIENT_GATE} (GPT-6 "
+            "Astra requires Codex CLI >= 0.153.0): model requests gated to "
+            "newer clients will be rejected with HTTP 400. Bump the "
+            "constant in src/kitty/codex_identity.py."
         )
