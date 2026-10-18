@@ -48,7 +48,7 @@ from kitty.auth.oauth_session import OAuthRefreshFailed, OAuthSession
 from kitty.auth.token_transport import CurlTokenTransport
 from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
 from kitty.egress import get_egress
-from kitty.providers.base import ProviderError, WireShape
+from kitty.providers.base import ProviderError, WireShape, parse_retry_after_seconds
 
 # Avoid circular import — only need the parent class methods
 from kitty.providers.openai import OpenAIAdapter
@@ -1386,13 +1386,15 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
     @staticmethod
     def _parse_retry_after(value: object) -> int | None:
-        if value is None:
-            return None
-        try:
-            seconds = int(float(str(value).strip()))
-        except (TypeError, ValueError):
-            return None
-        return max(1, seconds)
+        """Parse a ``Retry-After`` hint, delegating to the shared rule.
+
+        Args:
+            value: The raw header value.
+
+        Returns:
+            Whole seconds, or ``None`` when the value carries no usable hint.
+        """
+        return parse_retry_after_seconds(value)
 
     def _attach_retry_after(self, err: Exception, resp: _CurlResponse) -> None:
         if not isinstance(err, ProviderError) or err.http_status != 429:

@@ -26,3 +26,13 @@ Review round (2026-10-18, PR #294 CI review): read timeouts are now the one clas
 handler answers the translated path's 504 `api_error` envelope without parking or failing over (owner decision:
 mirror the translated Messages path's timeout semantics; a timeout is a slow request, not a sick backend). Recorded
 in SYSTEM_DESIGN §16.1; two L3 tests pin the envelope and the empty health state.
+
+Review round 2 (same day): auth-class relay rejections now advise the Claude Code session (`claude auth login`)
+instead of the shared translator's API-key text; a 403 the classifier calls entitlement reads as a plan denial, and
+the Cloudflare branch keeps the shared message. Usage attribution now works in both stream modes: an Anthropic→
+attribution key mapping feeds `_log_usage` (the raw block's `input_tokens`/`output_tokens` were being read as zeros),
+and the streaming pump reads `message_start`/`message_delta` usage counters from complete SSE lines while forwarding
+bytes untouched — a mid-stream failure still records what it saw. The `Retry-After` parsing rule moved to the shared
+`kitty.providers.base.parse_retry_after_seconds`; both subscription consumers delegate to it. Tests: the 401/403
+envelopes (names `claude auth login`, never `kitty setup`), non-streaming and streaming token attribution with the
+byte-exactness assertions kept, and the existing parser pins through the delegator.

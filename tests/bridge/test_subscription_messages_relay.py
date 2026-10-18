@@ -440,3 +440,189 @@ class TestSubscriptionRelayContext:
                 assert ("POST", aiohttp.client.URL(_UPSTREAM_URL)) not in m.requests
         finally:
             await server.stop_async()
+
+
+#: Upstream SSE bytes carrying usage in both ``message_start`` and the
+#: cumulative ``message_delta`` — the shape the pump must read while
+#: forwarding unchanged.
+_SSE_REPLY_WITH_USAGE = (
+    b"event: message_start\n"
+    b'data: {"type":"message_start","message":{"id":"msg_u","type":"message","role":"assistant",'
+    b'"model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,'
+    b'"usage":{"input_tokens":10,"output_tokens":1}}}\n\n'
+    b"event: content_block_delta\n"
+    b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}\n\n'
+    b"event: message_delta\n"
+    b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},'
+    b'"usage":{"output_tokens":5}}\n\n'
+    b"event: message_stop\n"
+    b'data: {"type":"message_stop"}\n\n'
+)
+
+
+def _make_server_with_usage_log(log_path: object) -> BridgeServer:
+    """Build a relay server with usage logging pointed at ``log_path``.
+
+    Args:
+        log_path: File path the JSONL usage log is written to.
+
+    Returns:
+        A server bound to an ephemeral port, not yet started.
+    """
+    return BridgeServer(
+        adapter=None,
+        provider=AnthropicSubscriptionAdapter(),
+        resolved_key="",
+        host="127.0.0.1",
+        port=0,
+        allow_subscription_relay=True,
+        logging_enabled=True,
+        _usage_log_path=log_path,
+    )
+
+
+def _read_usage_entries(log_path: object) -> list[dict]:
+    """Parse the JSONL usage log into entries.
+
+    Args:
+        log_path: File path the JSONL usage log is written to.
+
+    Returns:
+        One dict per completed entry, in write order.
+    """
+    import json
+    from pathlib import Path
+
+    text = Path(log_path).read_text(encoding="utf-8")  # type: ignore[arg-type]
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+class TestSubscriptionUsageAttribution:
+    """Relay turns record their tokens like every other backend's (R8)."""
+
+    @pytest.mark.asyncio()
+    async def test_non_streaming_relay_records_anthropic_tokens(self, tmp_path: object) -> None:
+        """An Anthropic usage block maps onto the attribution counters."""
+        import asyncio
+        from pathlib import Path
+
+        log_path = Path(tmp_path) / "usage.jsonl"
+        server = _make_server_with_usage_log(log_path)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_UPSTREAM_URL, payload=_UPSTREAM_REPLY)
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_BODY,
+                        headers={"Content-Type": "application/json", **_INBOUND_HEADERS},
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+                    await resp.read()
+            await asyncio.sleep(0)
+        finally:
+            await server.stop_async()
+
+        entries = _read_usage_entries(log_path)
+        assert len(entries) == 1
+        assert entries[0]["input_tokens"] == 10
+        assert entries[0]["output_tokens"] == 5
+
+    @pytest.mark.asyncio()
+    async def test_streaming_relay_records_usage_from_sse_events(self, tmp_path: object) -> None:
+        """The pump reads usage counters while forwarding bytes unchanged."""
+        import asyncio
+        from pathlib import Path
+
+        log_path = Path(tmp_path) / "usage.jsonl"
+        server = _make_server_with_usage_log(log_path)
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    _UPSTREAM_URL,
+                    body=_SSE_REPLY_WITH_USAGE,
+                    headers={"Content-Type": "text/event-stream"},
+                )
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_STREAM_BODY,
+                        headers={"Content-Type": "application/json", **_INBOUND_HEADERS},
+                    ) as resp,
+                ):
+                    assert resp.status == 200, await resp.text()
+                    client_bytes = await resp.content.read()
+                    await asyncio.sleep(0)
+        finally:
+            await server.stop_async()
+
+        # The wire contract is untouched: the client got exactly what Anthropic sent.
+        assert client_bytes == _SSE_REPLY_WITH_USAGE
+
+        entries = _read_usage_entries(log_path)
+        assert len(entries) == 1
+        # input from message_start, cumulative output from message_delta.
+        assert entries[0]["input_tokens"] == 10
+        assert entries[0]["output_tokens"] == 5
+
+
+class TestSubscriptionAuthEnvelope:
+    """Auth-class relay rejections advise the session, never an API key (R7)."""
+
+    async def _envelope_for(self, status: int, body: object) -> tuple[int, dict]:
+        """Drive one relay turn answering ``status``/``body``; return the reply.
+
+        Args:
+            status: The upstream failure status.
+            body: The upstream failure body.
+
+        Returns:
+            The client-facing status and JSON envelope.
+        """
+        server = _make_server()
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_UPSTREAM_URL, status=status, payload=body if isinstance(body, dict) else {})
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_BODY,
+                        headers={"Content-Type": "application/json", **_INBOUND_HEADERS},
+                    ) as resp,
+                ):
+                    return resp.status, await resp.json()
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio()
+    async def test_401_envelope_advises_claude_login_not_an_api_key(self) -> None:
+        """An expired session reads as a session problem, not a key problem."""
+        status, envelope = await self._envelope_for(
+            401, {"error": {"type": "authentication_error", "message": "bad token"}}
+        )
+
+        assert status == 401
+        message = envelope["error"]["message"]
+        assert "claude auth login" in message
+        assert "kitty setup" not in message
+        assert "API key" not in message
+
+    @pytest.mark.asyncio()
+    async def test_403_plan_denial_envelope_reads_as_a_plan_limit(self) -> None:
+        """An entitlement rejection names the plan, not a key rotation."""
+        status, envelope = await self._envelope_for(
+            403, {"error": {"message": "This model requires a subscription"}}
+        )
+
+        assert status == 403
+        message = envelope["error"]["message"]
+        assert "subscription" in message.lower()
+        assert "kitty setup" not in message
+        assert "API key" not in message

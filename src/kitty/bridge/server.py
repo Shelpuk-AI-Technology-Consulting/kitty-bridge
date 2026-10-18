@@ -57,7 +57,13 @@ from kitty.bridge.tool_audit import AUDIT_MARKER, ToolUseAuditor, collect_tool_s
 from kitty.cloudflare import is_cloudflare_block
 from kitty.egress import EgressConfig, should_bypass
 from kitty.providers.anthropic import AnthropicCCStreamConverter
-from kitty.providers.base import ProviderAdapter, ProviderError, UnsupportedModelError, WireShape
+from kitty.providers.base import (
+    ProviderAdapter,
+    ProviderError,
+    UnsupportedModelError,
+    WireShape,
+    parse_retry_after_seconds,
+)
 from kitty.providers.opencode import OpenCodeGoResponsesCCStreamConverter
 
 if TYPE_CHECKING:
@@ -1584,6 +1590,66 @@ def _header_value(value: str) -> str:
     return "".join(ch for ch in folded if ch.isprintable())[:_MAX_HEADER_VALUE_CHARS]
 
 
+def _anthropic_usage_for_attribution(usage: object) -> dict:
+    # pragma: no mutate block
+    """Map an Anthropic usage block onto the attribution counters.
+
+    ``_log_usage`` reads OpenAI-style ``prompt_tokens``/``completion_tokens``;
+    Anthropic names the same counters ``input_tokens``/``output_tokens``, so
+    the raw block would silently record zeros.
+
+    Args:
+        usage: The upstream ``usage`` block from a relay reply.
+
+    Returns:
+        The same counters under the keys ``_log_usage`` reads.
+    """
+    if not isinstance(usage, dict):
+        return {}
+    return {
+        "prompt_tokens": _token_count(usage.get("input_tokens")),
+        "completion_tokens": _token_count(usage.get("output_tokens")),
+    }
+
+
+def _anthropic_sse_usage(line: bytes, usage: dict) -> bool:
+    # pragma: no mutate block
+    """Read one SSE line's usage counters into ``usage``.
+
+    Reads ``message_start`` for input tokens and ``message_delta`` for the
+    cumulative output count; any other line is ignored. Purely local
+    accounting — the forwarded bytes are untouched.
+
+    Args:
+        line: One raw SSE line from the upstream stream.
+        usage: The dict to record counters into.
+
+    Returns:
+        True when the line carried any usage information.
+    """
+    stripped = line.strip()
+    if not stripped.startswith(b"data:"):
+        return False
+    try:
+        event = json.loads(stripped[5:])
+    except ValueError:
+        return False
+    if not isinstance(event, dict):
+        return False
+    event_type = event.get("type")
+    if event_type == "message_start":
+        block = (event.get("message") or {}).get("usage")
+        if isinstance(block, dict) and "input_tokens" in block:
+            usage["prompt_tokens"] = _token_count(block.get("input_tokens"))
+            return True
+    elif event_type == "message_delta":
+        block = event.get("usage")
+        if isinstance(block, dict) and "output_tokens" in block:
+            usage["completion_tokens"] = _token_count(block.get("output_tokens"))
+            return True
+    return False
+
+
 def _token_count(value: object) -> int:
     # pragma: no mutate block
     """Return an upstream token count as an int, treating anything else as zero.
@@ -2011,28 +2077,6 @@ def _is_subscription_provider(provider: object) -> bool:
     if callable(provider_type):
         provider_type = provider_type()
     return provider_type == _SUBSCRIPTION_PROVIDER_TYPE
-
-
-def _parse_retry_after_seconds(value: object) -> int | None:
-    # pragma: no mutate block
-    """Parse an upstream Retry-After value into whole seconds.
-
-    Mirrors :meth:`OpenAISubscriptionAdapter._parse_retry_after`: plain
-    seconds, at least one, anything unparseable refused.
-
-    Args:
-        value: The raw header value.
-
-    Returns:
-        Whole seconds, or None when the value carries no usable hint.
-    """
-    if value is None:
-        return None
-    try:
-        seconds = int(float(str(value).strip()))
-    except (TypeError, ValueError):
-        return None
-    return max(1, seconds)
 
 
 # Per-request backend selection context.  Each request handler calls
@@ -5495,7 +5539,7 @@ class BridgeServer:
             try:
                 return await self._relay_subscription_messages(request, body, await request.read())
             except UpstreamError as exc:
-                error_msg = self._translate_upstream_error(exc.status, exc.body)
+                error_msg = self._subscription_error_message(exc)
                 return web.json_response(
                     {"type": "error", "error": {"type": "api_error", "message": error_msg}},
                     status=exc.status,
@@ -5759,6 +5803,35 @@ class BridgeServer:
             body = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
         return self._error_response(body)
 
+    def _subscription_error_message(self, exc: UpstreamError) -> str:
+        # pragma: no mutate block
+        """Agent-facing message for a relay failure, subscription-aware.
+
+        The shared translator speaks the API-key dialect for 401/403 — a
+        subscription profile has no API key and setup takes none, so its
+        auth-class rejections point at the Claude Code session instead.
+        Everything else keeps the shared translator's message, including the
+        Cloudflare 403 branch, which already disclaims the key.
+
+        Args:
+            exc: The relay failure carrying status and bounded body.
+
+        Returns:
+            The message shown to the agent.
+        """
+        text = exc.body if isinstance(exc.body, str) else ""
+        if exc.status in (401, 403) and not (exc.status == 403 and self._is_cloudflare_block(exc.status, text)):
+            if exc.status == 403 and is_entitlement_error(exc.status, text):
+                return (
+                    "Anthropic rejected this request for your Claude.ai subscription (HTTP 403): "
+                    "the plan does not cover this model or action."
+                )
+            return (
+                f"Your Claude Code session was rejected by Anthropic (HTTP {exc.status}). "
+                "Run `claude auth login` to sign in again, then retry."
+            )
+        return self._translate_upstream_error(exc.status, exc.body)
+
     async def _relay_subscription_messages(self, request: web.Request, body: dict, raw: bytes) -> web.StreamResponse:
         # pragma: no mutate block
         """Relay Claude Code's Messages request to Anthropic byte for byte.
@@ -5934,7 +6007,7 @@ class BridgeServer:
                 raise UpstreamError(
                     status,
                     bounded,
-                    retry_after=_parse_retry_after_seconds(resp.headers.get("Retry-After")),
+                    retry_after=parse_retry_after_seconds(resp.headers.get("Retry-After")),
                 )
             response_headers = {"Content-Type": resp.headers.get("Content-Type", "application/json")}
             request_id = resp.headers.get("request-id")
@@ -5945,7 +6018,7 @@ class BridgeServer:
             except ValueError:
                 parsed = None
             if isinstance(parsed, dict):
-                self._log_usage(parsed.get("usage"))
+                self._log_usage(_anthropic_usage_for_attribution(parsed.get("usage")))
         return web.Response(body=raw_upstream, status=status, headers=response_headers)
 
     async def _relay_subscription_messages_stream(
@@ -5980,7 +6053,7 @@ class BridgeServer:
                 raise UpstreamError(
                     upstream.status,
                     _truncate_for_log(text, _SUBSCRIPTION_MAX_ERROR_CHARS),
-                    retry_after=_parse_retry_after_seconds(upstream.headers.get("Retry-After")),
+                    retry_after=parse_retry_after_seconds(upstream.headers.get("Retry-After")),
                 )
             sr = web.StreamResponse(
                 status=200,
@@ -5994,9 +6067,19 @@ class BridgeServer:
             # A transport-broken stream closed the client's turn without a
             # usable reply: it must not count as a healthy completion.
             stream_failed = False
+            # Usage attribution rides along: complete SSE lines are read for
+            # their usage counters while the forwarded bytes stay untouched.
+            sse_buffer = b""
+            stream_usage: dict = {}
+            usage_seen = False
             try:
                 async for chunk_bytes in upstream.content:
                     await _write_client(sr, chunk_bytes)
+                    sse_buffer += chunk_bytes
+                    while b"\n" in sse_buffer:
+                        line, _, sse_buffer = sse_buffer.partition(b"\n")
+                        if _anthropic_sse_usage(line, stream_usage):
+                            usage_seen = True
             except ClientDisconnectedError:
                 return sr
             except Exception as exc:
@@ -6006,6 +6089,8 @@ class BridgeServer:
                 await sr.write_eof()
             except (ConnectionResetError, BrokenPipeError, OSError):
                 logger.debug("Client disconnected before relay stream EOF")
+        if usage_seen:
+            self._log_usage(stream_usage)
         if not stream_failed and self._backends and self._current_backend_idx >= 0:
             self._mark_backend_healthy(self._current_backend_idx)
         return sr

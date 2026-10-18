@@ -860,4 +860,27 @@ class UnsupportedModelError(ProviderError):
     """
 
 
-__all__ = ["ProviderAdapter", "ProviderError", "UnsupportedModelError"]
+def parse_retry_after_seconds(value: object) -> int | None:
+    # pragma: no mutate block
+    """Parse an upstream ``Retry-After`` header value into whole seconds.
+
+    The one rule every consumer applies — plain seconds form, floored at one
+    second, unparseable values refused — so the cooldown hint cannot drift
+    between the subscription adapters and the relay.
+
+    Args:
+        value: The raw header value.
+
+    Returns:
+        Whole seconds, or ``None`` when the value carries no usable hint.
+    """
+    if value is None:
+        return None
+    try:
+        seconds = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+    return max(1, seconds)
+
+
+__all__ = ["ProviderAdapter", "ProviderError", "UnsupportedModelError", "parse_retry_after_seconds"]
