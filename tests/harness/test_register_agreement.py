@@ -300,7 +300,10 @@ class TestTheParserReadsTheDesignDocument:
 
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 30
+        # KBR-59 (T-D10) lands M30/M31/M32 on top of main's 30 (the 27
+        # pre-KBR-55 rows plus KBR-55's M27/M28/M29): the bridge-level
+        # table goes from 30 to 33.
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 33
         assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 53
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
