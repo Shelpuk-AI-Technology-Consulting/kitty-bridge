@@ -110,6 +110,24 @@ class TestClaudeAdapterSpawnConfig:
 
         assert "ANTHROPIC_AUTH_TOKEN" not in config.env_clear
 
+    def test_subscription_profile_keeps_claude_code_oauth_environment(self):
+        """Subscription launch must not replace Claude Code's local OAuth session."""
+        adapter = ClaudeAdapter()
+        profile = Profile(
+            name="subscription",
+            provider="anthropic_subscription",
+            model="claude-opus",
+            auth_ref=str(uuid.uuid4()),
+        )
+
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="")
+
+        assert config.env_overrides["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
+        assert "ANTHROPIC_API_KEY" not in config.env_overrides
+        assert "ANTHROPIC_AUTH_TOKEN" not in config.env_overrides
+        assert "ANTHROPIC_API_KEY" in config.env_clear
+        assert "ANTHROPIC_AUTH_TOKEN" in config.env_clear
+
 
 class TestClaudeAdapterContextTokens:
     """build_spawn_config propagates the resolved context window (R5)."""

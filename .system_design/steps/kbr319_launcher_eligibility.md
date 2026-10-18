@@ -17,4 +17,9 @@ Centralize the rule that `anthropic_subscription` profiles are usable only by th
 
 ## Implementation notes
 
-Pending.
+Landed on feat/kbr-319-anthropic-subscription. Central `require_launcher_eligible_profile` /
+`filter_launcher_eligible_profiles` (src/kitty/profiles/eligibility.py) gate direct launches before credential
+resolution and filter balancing pools before backend construction, failing closed on empty pools. Subscription launches
+bypass credential resolution and preflight validation; ClaudeAdapter omits and clears both Anthropic credential env
+vars. BridgeServer gained default-deny `allow_subscription_relay`, set only for the Claude launcher. Reviewed:
+code-reviewer APPROVE (R3/R4/R5/R6 + R11).

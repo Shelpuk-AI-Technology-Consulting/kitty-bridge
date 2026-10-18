@@ -2368,7 +2368,9 @@ credential model.
 
 A direct subscription profile may run only under `kitty … claude`. Codex, Gemini, Kilo, default
 profile-first non-Claude routing, and generic bridge mode reject it before credential lookup,
-egress, bridge creation, or child spawn. For a non-Claude balancing launch, Kitty excludes
+egress, bridge creation, or child spawn. A subscription Claude launch sets no `ANTHROPIC_API_KEY`
+and no `ANTHROPIC_AUTH_TOKEN` (and clears both from the child environment); API-key profile
+launches keep setting them. For a non-Claude balancing launch, Kitty excludes
 subscription members before it constructs backend state; remaining members keep their configured
 order and backup flags. No remaining member is a configuration error, not a fallback to an
 unapproved provider. A Claude-launched mixed pool may retry or fail over a raw subscription request
@@ -2380,7 +2382,8 @@ once, validates only enough to return the normal invalid-JSON response, then pos
 using `data=`. It does not call model normalization, a translator, compaction, truncation, provider
 normalization, synthetic upstream authentication, or token refresh. End-to-end incoming headers —
 including Claude Code's OAuth `Authorization`, `anthropic-beta`, `anthropic-version`, and any
-incoming `x-api-key` — retain their values. Kitty never injects `x-api-key`. Authority/Host,
+incoming `x-api-key` — retained when Claude Code sent it; only synthetic injection is forbidden,
+and Kitty never injects `x-api-key`. Authority/Host,
 hop-by-hop headers, and HTTP length/framing are the sole exceptions: they cannot survive the
 localhost-to-Anthropic hop and aiohttp regenerates them. The raw relay is not available through Chat
 Completions, Responses, or Gemini ingress.

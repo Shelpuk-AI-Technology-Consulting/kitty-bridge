@@ -806,6 +806,15 @@ def _launch_target(
         )
 
     profile = backend
+    from kitty.profiles.eligibility import ProfileEligibilityError, require_launcher_eligible_profile
+    from kitty.tui.display import print_error
+
+    try:
+        require_launcher_eligible_profile(profile, getattr(adapter, "name", None))  # type: ignore[arg-type]
+    except ProfileEligibilityError as exc:
+        print_error(str(exc))
+        return 1
+
     return launch(
         adapter=adapter,  # type: ignore[arg-type]
         provider=get_provider(
@@ -845,24 +854,32 @@ def _launch_target_balancing(
     profile_store = ProfileStore()
     resolver = ProfileResolver(profile_store)
     member_profiles = resolver.resolve_balancing(balancing.name)
+    from kitty.profiles.eligibility import filter_launcher_eligible_profiles
+    from kitty.tui.display import print_error
+
+    member_profiles = filter_launcher_eligible_profiles(member_profiles, getattr(adapter, "name", None))
+    if not member_profiles:
+        print_error(
+            f"Balancing profile {balancing.name!r} has no members eligible for {getattr(adapter, 'name', 'bridge')!r}"
+        )
+        return 1
 
     # Build backends list
     backends = []
     for mp in member_profiles:
-        # KBR-87: a corrupt stored value reports cleanly and returns, where
-        # today's missing-key path does.
-        try:
-            key = cred_store.get(mp.auth_ref)  # type: ignore[attr-defined, union-attr]
-        except CredentialError as exc:
-            from kitty.tui.display import print_error
-
-            print_error(str(exc))
-            return 1
-        if not key:
-            from kitty.tui.display import print_error
-
-            print_error(f"No API key found for member profile {mp.name!r}")
-            return 1
+        if mp.provider == "anthropic_subscription":
+            key = ""
+        else:
+            # KBR-87: a corrupt stored value reports cleanly and returns, where
+            # today's missing-key path does.
+            try:
+                key = cred_store.get(mp.auth_ref)  # type: ignore[attr-defined, union-attr]
+            except CredentialError as exc:
+                print_error(str(exc))
+                return 1
+            if not key:
+                print_error(f"No API key found for member profile {mp.name!r}")
+                return 1
         provider = get_provider(mp.provider, mp.provider_config)
         backends.append((provider, key, mp))
 

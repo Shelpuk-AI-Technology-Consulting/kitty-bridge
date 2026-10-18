@@ -16,4 +16,8 @@ Route raw relay failures through the existing backend health state. The failure 
 
 ## Implementation notes
 
-Pending.
+Landed on feat/kbr-319-anthropic-subscription. The relay balancing loop parks failures through the shared precedence
+(cloudflare > entitlement > rate_limit > auth > hard; transport parked by the loop) with Retry-After-honoring
+cooldowns, fails over only within subscription members (`require_subscription` threaded through selection, skipping
+the cooldown gamble per R9), and returns the existing all-unhealthy 503 when none remain. 6 L3 tests in
+tests/bridge/test_subscription_relay_health.py. Reviewed: code-reviewer APPROVE (R9).

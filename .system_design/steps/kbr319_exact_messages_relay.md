@@ -17,4 +17,9 @@ For an eligible subscription backend on `/v1/messages`, retain the incoming JSON
 
 ## Implementation notes
 
-Pending.
+Landed on feat/kbr-319-anthropic-subscription. `_handle_messages` branches to `_relay_subscription_messages` for
+subscription backends (raw bytes via cached `request.read()`, `data=` post, end-to-end headers minus the 10-entry
+stripped set, no `x-api-key` synthesis). Non-streaming success returns upstream bytes verbatim (+ request-id);
+streaming pumps SSE verbatim; failures raise UpstreamError into the Messages-dialect envelope. Other ingress routes
+reject subscription backends with a 400 configuration error. 15 L3 tests in
+tests/bridge/test_subscription_messages_relay.py. Reviewed: code-reviewer APPROVE (R7/R8/R11).

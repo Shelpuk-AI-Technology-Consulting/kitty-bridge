@@ -17,4 +17,8 @@ Add the distinct `anthropic_subscription` provider declaration and a tokenless l
 
 ## Implementation notes
 
-Pending.
+Landed on feat/kbr-319-anthropic-subscription. `read_claude_subscription_status` (src/kitty/auth/claude_subscription.py)
+invokes `claude auth status --json` with a 30 s timeout; accepts only the four allowlisted fields; returns redacted
+reasons for missing binary, failure, timeout, invalid/non-object JSON, logged-out, and wrong-method/empty-type states.
+Profile keeps a UUIDv4 `auth_ref` with no CredentialStore record. 15 L1 tests in tests/test_anthropic_subscription.py.
+Reviewed: code-reviewer APPROVE (R2 coverage + redaction).

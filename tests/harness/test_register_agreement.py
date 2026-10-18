@@ -938,13 +938,14 @@ class TestEveryScopeNamesRealProviders:
     def test_the_registry_read_finds_the_known_providers(self, registry: dict) -> None:
         """The self-check §6.2 requires — a parser regression cannot pass silently.
 
-        The count is pinned (a 24th adapter is a deliberate edit to this test,
-        exactly like the register's 79-row pin) and three members are named,
+        The count is pinned (a 25th adapter is a deliberate edit to this test,
+        exactly like the register's 79-row pin) and four members are named,
         including the file-class-split case the site↔scope check depends on
         (``zai_coding`` -> ``ZaiAnthropicAdapter``, defined in ``zai_anthropic.py``).
         """
-        assert len(registry) == 23
+        assert len(registry) == 24
         assert registry["anthropic"] == "AnthropicAdapter"
+        assert registry["anthropic_subscription"] == "AnthropicSubscriptionAdapter"
         assert registry["openai_subscription"] == "OpenAISubscriptionAdapter"
         assert registry["zai_coding"] == "ZaiAnthropicAdapter"
 

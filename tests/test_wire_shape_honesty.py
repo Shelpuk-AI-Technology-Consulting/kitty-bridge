@@ -196,6 +196,7 @@ def _single_route(model: str = "kitty-test-model") -> _Representation:
 # Every registry key appears, so adding a provider forces a decision here.
 REPRESENTATIVE_MODELS: dict[str, _Representation] = {
     "anthropic": _single_route(),
+    "anthropic_subscription": _single_route(),
     "azure": _single_route(),
     "bedrock": _single_route(),
     "byteplus": _single_route(),

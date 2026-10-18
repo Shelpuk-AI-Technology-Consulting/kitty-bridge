@@ -849,3 +849,33 @@ class TestCorruptionReceivers:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "corrupt" in captured.out + captured.err
+
+    def test_launch_target_balancing_all_subscription_pool_rejected_for_non_claude(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An all-subscription pool has no eligible member for a non-Claude launcher."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        member = SimpleNamespace(
+            name="sub-only",
+            provider="anthropic_subscription",
+            model="claude-opus",
+            auth_ref=str(uuid.uuid4()),
+            provider_config={},
+            backup=False,
+        )
+        _balancing_stubs(monkeypatch, member)
+
+        exit_code = cli_main._launch_target_balancing(
+            object(),
+            SimpleNamespace(name="ci-pool"),
+            SimpleNamespace(get=lambda ref: "sk-test-key"),
+            [],
+        )
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "no members eligible" in captured.out + captured.err
+

@@ -89,13 +89,13 @@ PROVIDER_SECTIONS: list[tuple[str, list[str]]] = [
     (
         "-- Coding Plans / Subscriptions --",
         [
+            "anthropic_subscription",
             "fireworks",
             "kimi",
             "minimax_token",
             "novita",
             "ollama_cloud",
             "openai_subscription",
-            "anthropic_subscription",
             "opencode_go",
             "mimo",
             "zai_coding",

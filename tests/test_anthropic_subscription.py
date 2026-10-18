@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from subprocess import CompletedProcess
 
 import pytest
@@ -162,4 +163,94 @@ def test_read_claude_subscription_status_missing_binary_returns_actionable_reaso
         email=None,
         subscription_type=None,
         reason="Claude Code is not installed or is not on PATH. Install Claude Code, sign in, then try again.",
+    )
+
+
+def test_read_claude_subscription_status_timeout_returns_actionable_reason() -> None:
+    """Bound the status command and explain a hang without leaking output."""
+    seen: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def run_status(*args: object, **kwargs: object) -> CompletedProcess[str]:
+        """Simulate a hung Claude Code status command.
+
+        Args:
+            *args: Process arguments, recorded for the command check.
+            **kwargs: Process keyword arguments, recorded for the timeout check.
+
+        Raises:
+            subprocess.TimeoutExpired: Always, carrying secret-shaped output.
+        """
+        seen.append((args, kwargs))
+        raise subprocess.TimeoutExpired(
+            cmd=["claude", "auth", "status", "--json"],
+            timeout=30,
+            output="secret-stdout",
+            stderr="secret-stderr",
+        )
+
+    status = read_claude_subscription_status(run_status)
+
+    assert seen[0][0] == (["claude", "auth", "status", "--json"],)
+    assert seen[0][1].get("timeout") == 30
+    assert status.available is False
+    assert status.reason == "Claude Code status timed out. Check the Claude Code session, then try again."
+    assert "secret-stdout" not in repr(status)
+    assert "secret-stderr" not in repr(status)
+
+
+@pytest.mark.parametrize("stdout", ['["not-an-object"]', '"just-a-string"', "42"])
+def test_read_claude_subscription_status_non_object_json_returns_actionable_reason(stdout: str) -> None:
+    """Reject non-object status output with the invalid-status explanation."""
+
+    def run_status(*_args: object, **_kwargs: object) -> CompletedProcess[str]:
+        """Return a successful result with non-object JSON output.
+
+        Args:
+            *_args: Ignored process arguments.
+            **_kwargs: Ignored process keyword arguments.
+
+        Returns:
+            A successful process result carrying the parametrized output.
+        """
+        return CompletedProcess(args=["claude"], returncode=0, stdout=stdout, stderr="")
+
+    status = read_claude_subscription_status(run_status)
+
+    assert status.available is False
+    assert stdout not in repr(status)
+    assert status.reason == (
+        "Claude Code returned invalid authentication status. Run `claude auth login`, then try again."
+    )
+
+
+@pytest.mark.parametrize("subscription_type", ["", "   ", 42, None])
+def test_read_claude_subscription_status_bad_subscription_type_returns_actionable_reason(
+    subscription_type: object,
+) -> None:
+    """Reject empty or non-string subscription types as non-subscription sessions."""
+
+    def run_status(*_args: object, **_kwargs: object) -> CompletedProcess[str]:
+        """Return a signed-in result with a bad subscription type.
+
+        Args:
+            *_args: Ignored process arguments.
+            **_kwargs: Ignored process keyword arguments.
+
+        Returns:
+            A successful process result carrying the parametrized type.
+        """
+        return CompletedProcess(
+            args=["claude"],
+            returncode=0,
+            stdout=_status_payload(subscriptionType=subscription_type),
+            stderr="",
+        )
+
+    status = read_claude_subscription_status(run_status)
+
+    assert status.available is False
+    if subscription_type is not None:
+        assert repr(subscription_type) not in repr(status)
+    assert status.reason == (
+        "Claude Code is not using a Claude.ai subscription. Run `claude auth login`, then try again."
     )

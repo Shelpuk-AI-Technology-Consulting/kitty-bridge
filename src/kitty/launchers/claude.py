@@ -289,20 +289,25 @@ class ClaudeAdapter(LauncherAdapter):
         """
         env_overrides = {
             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}",
-            "ANTHROPIC_API_KEY": resolved_key,
-            "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
             "ANTHROPIC_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": profile.model,
             "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         }
+        # Subscription traffic must retain Claude Code's own OAuth identity.
+        if profile.provider != "anthropic_subscription":
+            env_overrides["ANTHROPIC_API_KEY"] = resolved_key
+            env_overrides["ANTHROPIC_AUTH_TOKEN"] = "kitty-bridge-token"
         if context_tokens is not None and context_tokens > 0:
             env_overrides["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context_tokens)
+        env_clear = list(_CONFLICTING_ENV_VARS)
+        if profile.provider == "anthropic_subscription":
+            env_clear.extend(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
         return SpawnConfig(
             cli_args=[],
             env_overrides=env_overrides,
-            env_clear=list(_CONFLICTING_ENV_VARS),
+            env_clear=env_clear,
         )
 
     @property

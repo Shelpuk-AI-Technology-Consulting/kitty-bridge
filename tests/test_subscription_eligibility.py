@@ -56,6 +56,35 @@ def test_require_launcher_eligible_profile_allows_subscription_for_claude() -> N
     require_launcher_eligible_profile(subscription, "claude")
 
 
+def test_launch_async_rejects_subscription_before_credential_resolution() -> None:
+    """Reject a non-Claude direct launch before profile credential lookup."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from kitty.cli.launcher import launch_async
+    from kitty.credentials.file_backend import FileBackend
+    from kitty.credentials.store import CredentialStore
+    from kitty.launchers.codex import CodexAdapter
+    from kitty.providers.anthropic_subscription import AnthropicSubscriptionAdapter
+
+    subscription = _profile("subscription", "anthropic_subscription")
+    backend = MagicMock(spec=FileBackend)
+    credential_store = CredentialStore(backends=[backend])
+
+    exit_code = asyncio.run(
+        launch_async(
+            adapter=CodexAdapter(),
+            provider=AnthropicSubscriptionAdapter(),
+            profile=subscription,
+            cred_store=credential_store,
+            validate=False,
+        )
+    )
+
+    assert exit_code == 1
+    backend.get.assert_not_called()
+
+
 def test_filter_launcher_eligible_profiles_excludes_subscription_and_preserves_members() -> None:
     """Keep the eligible profile order and reserve flags intact."""
     primary = _profile("primary", "openai")

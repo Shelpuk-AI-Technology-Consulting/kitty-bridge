@@ -42,12 +42,14 @@ def read_claude_subscription_status(
         The available subscription details or a user-safe remediation message.
     """
     # Claude Code owns token storage and refresh, so Kitty only asks for status.
+    # The timeout bounds a hung binary; its captured output is dropped unread.
     try:
         result = run_status(
             ["claude", "auth", "status", "--json"],
             check=False,
             capture_output=True,
             text=True,
+            timeout=30,
         )
     except FileNotFoundError:
         return ClaudeSubscriptionStatus(
@@ -55,6 +57,13 @@ def read_claude_subscription_status(
             email=None,
             subscription_type=None,
             reason="Claude Code is not installed or is not on PATH. Install Claude Code, sign in, then try again.",
+        )
+    except subprocess.TimeoutExpired:
+        return ClaudeSubscriptionStatus(
+            available=False,
+            email=None,
+            subscription_type=None,
+            reason="Claude Code status timed out. Check the Claude Code session, then try again.",
         )
 
     # A failed status command does not expose trustworthy session data.

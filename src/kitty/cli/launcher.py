@@ -155,18 +155,30 @@ async def launch_async(
     """
     extra_args = extra_args or []
 
+    # Reject an incompatible launcher before it can resolve any profile credential.
+    from kitty.profiles.eligibility import ProfileEligibilityError, require_launcher_eligible_profile
+
+    try:
+        require_launcher_eligible_profile(profile, adapter.name)
+    except ProfileEligibilityError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
     # 0. Refresh the model-context overrides catalog before anything else.
     # Best-effort and never raises; the bridge must see the newest catalog
     # revision before it starts (R3).
     await model_context_sync.refresh_model_context_overrides()
 
-    # 1. Resolve credential
-    try:
-        resolved_key = cred_store.resolve(profile)
-    except (CredentialNotFoundError, CredentialError) as exc:
-        logger.error("Credential resolution failed: %s", exc)
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    # 1. Subscription profiles relay Claude Code's own OAuth request and have no Kitty credential.
+    if profile.provider == "anthropic_subscription":
+        resolved_key = ""
+    else:
+        try:
+            resolved_key = cred_store.resolve(profile)
+        except (CredentialNotFoundError, CredentialError) as exc:
+            logger.error("Credential resolution failed: %s", exc)
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
     # 2. Fail closed before any network call — a provider that cannot honour
     # the proxy would connect from this machine's own address.
@@ -175,8 +187,8 @@ async def launch_async(
         print(f"Error: {egress_error}", file=sys.stderr)
         return 1
 
-    # 3. Pre-flight API key validation
-    if validate:
+    # 3. API-key validation cannot prove a raw subscription relay and must not send one.
+    if validate and profile.provider != "anthropic_subscription":
         result = await validate_api_key(provider, resolved_key, profile.provider_config, egress=get_egress())
         if not result.valid:
             print(f"Error: {result.reason}", file=sys.stderr)
@@ -204,6 +216,9 @@ async def launch_async(
         # here cannot supply.
         profile_name=profile_name or profile.name,
         _usage_log_path=usage_log_path,
+        # The subscription relay is a Claude Code launch privilege: launcher
+        # eligibility above already refused every other combination.
+        allow_subscription_relay=adapter.name == "claude",
     )
     port = await server.start_async()
     logger.info("Bridge started on port %d", port)

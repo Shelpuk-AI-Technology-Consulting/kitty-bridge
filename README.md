@@ -163,6 +163,25 @@ $ kitty claude
 No API key required — kitty authenticates with your ChatGPT Plus or Pro account through a browser-based OAuth flow. Each
 profile gets its own independent session.
 
+### Example: Use your Claude subscription with Claude Code
+
+```bash
+$ pip install kitty-bridge
+$ kitty setup
+  ? Provider: Anthropic Claude.ai Subscription (Claude Code only)
+  ? Model: claude-opus
+
+$ kitty claude
+  ✓ Bridge running on port <random_port>
+  ✓ Claude Code launched
+  > Hello! How can I help you today?
+```
+
+Sign in to Claude Code first (`claude auth login`) — Kitty checks that local session during setup and never copies or
+stores your OAuth token. This profile works **only with Claude Code**: Kitty relays Claude Code's request to Anthropic
+exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
+rejected subscription account cools down like any other backend and recovers automatically.
+
 ### ChatGPT subscription on a remote or headless machine
 
 The browser login above assumes the browser and the terminal are on the **same machine**. If you run Kitty on a remote
@@ -514,6 +533,7 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 
 | Provider            | Type ID               | Notes                                             |
 |---------------------|-----------------------|---------------------------------------------------|
+| Anthropic Claude.ai Subscription (Claude Code only) | `anthropic_subscription` | Uses your local Claude Code sign-in, no API key |
 | Fireworks FirePass  | `fireworks`           |                                                   |
 | Kimi Code           | `kimi`                |                                                   |
 | Novita AI           | `novita`              |                                                   |

@@ -299,6 +299,72 @@ class TestLaunchSync:
 # ── Test: overrides-catalog refresh hook (AC3.4) ────────────────────────────
 
 
+class TestSubscriptionLaunchCredentialBypass:
+    @pytest.mark.asyncio
+    async def test_subscription_launch_does_not_resolve_credential(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Launch a subscription profile without reading its UUID from CredentialStore."""
+        from kitty.cli.launcher import launch_async
+        from kitty.providers.anthropic_subscription import AnthropicSubscriptionAdapter
+
+        # A leaked parent value must not reach the child: the subscription
+        # spawn clears both credential variables.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "parent-leak")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "parent-leak")
+        profile = Profile(
+            name="subscription",
+            provider="anthropic_subscription",
+            model="claude-opus",
+            auth_ref=str(uuid.uuid4()),
+        )
+        cred_store = _make_cred_store()
+        spawned: list[dict[str, str]] = []
+
+        async def _record(*_cmd, **kwargs):
+            """Capture the child environment and return a completed child.
+
+            Args:
+                *_cmd: Ignored child command arguments.
+                **kwargs: Process keyword arguments including environment.
+
+            Returns:
+                Completed child process stand-in.
+            """
+            spawned.append(kwargs["env"])
+            proc = MagicMock()
+
+            async def _wait() -> int:
+                """Return a successful child status.
+
+                Returns:
+                    Zero exit status.
+                """
+                return 0
+
+            proc.wait = _wait
+            proc.pid = 4242
+            proc.returncode = 0
+            return proc
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            patch("asyncio.create_subprocess_exec", side_effect=_record),
+        ):
+            exit_code = await launch_async(
+                adapter=ClaudeAdapter(),
+                provider=AnthropicSubscriptionAdapter(),
+                profile=profile,
+                cred_store=cred_store,
+                extra_args=[],
+            )
+
+        assert exit_code == 0
+        cred_store._backends[0].get.assert_not_called()
+        assert "ANTHROPIC_API_KEY" not in spawned[0]
+        assert "ANTHROPIC_AUTH_TOKEN" not in spawned[0]
+
+
 class TestLaunchRefreshesOverridesCatalog:
     """launch_async awaits the catalog refresh before the bridge starts."""
 
