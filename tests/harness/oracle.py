@@ -1374,7 +1374,7 @@ def _structural_reply_diff(inbound: Reply, captured: Reply) -> tuple[str, ...]:
       a kind mismatch at an index (two readers that disagree about a
       part boundary report a delta at the boundary and leave the
       fields unaddressed).
-    * ``reply.stop_reason`` — the keyed literal, the M28 anchor.
+    * ``reply.stop_reason`` — the keyed literal, the M31 anchor.
 
     Args:
         inbound: The inbound reply projection.
@@ -1386,7 +1386,7 @@ def _structural_reply_diff(inbound: Reply, captured: Reply) -> tuple[str, ...]:
     """
     deltas: list[str] = []
 
-    # stop_reason — bare keyed literal (M28's anchor). The raw value is
+    # stop_reason — bare keyed literal (M31's anchor). The raw value is
     # skipped above; see the docstring.
     if inbound.stop_reason != captured.stop_reason:
         deltas.append(c.REPLY_STOP_REASON)

@@ -14,6 +14,7 @@ and ``.system_design/steps/20260821_per_session_claude_settings.md``.
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -287,6 +288,38 @@ class TestEnableClaudeAiMcpServersInSessionFile:
         # The user-scope file's top-level key is never read into the session file.
         session_payload = json.loads(Path(prepared).read_text(encoding="utf-8"))
         assert "disableClaudeAiConnectors" not in session_payload
+
+
+class TestClaudeCodeTmpdirInSessionFile:
+    """KBR-314: the temp-dir override reaches the per-session settings file.
+
+    Mirrors :class:`TestEnableClaudeAiMcpServersInSessionFile` for
+    ``CLAUDE_CODE_TMPDIR``: ``build_spawn_config`` emits the env var and
+    ``prepare_launch`` writes it into the session file, so Claude Code's
+    settings-env precedence picks up the bridge's value even when the user
+    has their own ``~/.claude/settings.json``.
+    """
+
+    def test_spawn_config_env_reaches_the_session_file_for_tmpdir(self, tmp_path: Path):
+        """The env var produced by build_spawn_config lands in the session file."""
+        import uuid
+
+        from kitty.profiles.schema import Profile
+
+        settings_path = tmp_path / ".claude" / "settings.json"
+        _write_user_settings(settings_path)
+        adapter = ClaudeAdapter()
+        profile = Profile(
+            name="test-profile",
+            provider="zai_regular",
+            model="glm-5.3",
+            auth_ref=str(uuid.uuid4()),
+        )
+        spawn = adapter.build_spawn_config(profile, bridge_port=10001, resolved_key="sk-test")
+
+        prepared = adapter.prepare_launch(spawn.env_overrides, settings_path=settings_path)
+
+        assert _session_file_env(prepared)["CLAUDE_CODE_TMPDIR"] == tempfile.gettempdir()
 
 
 class TestRoutingWithoutUserSettings:

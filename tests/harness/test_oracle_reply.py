@@ -5,7 +5,7 @@ plan task **T-D10** (KBR-59).
 
 Tests run at ``l1`` (path-default per ``tests/layers.py``). ``l3``
 activation is T-K6's job; the corpus-driven reply matrix is T-D9's
-business and lands after the M27/M28/M29 corpus entries exist.
+business and lands after the M30/M31/M32 corpus entries exist.
 
 **Two test populations, deliberately separated** (the T-W9
 attribution rule — a failing test must name the layer that failed):
@@ -247,7 +247,7 @@ class TestStructuralReplyDiff:
 
     def test_differ_only_in_parts_two_id_yields_one_path(self) -> None:
         """Two replies equal except for ``parts[2].id`` produce a single
-        ``reply.parts[2].id`` path — the M27 anchor."""
+        ``reply.parts[2].id`` path — the M30 anchor."""
         a = _reply(
             parts=(
                 Text(text="x"),
@@ -287,7 +287,7 @@ class TestStructuralReplyDiff:
 
     def test_differ_in_stop_reason_yields_bare_path(self) -> None:
         """Two replies equal except for ``stop_reason`` produce a single
-        ``reply.stop_reason`` path — the M28 anchor (a keyed literal,
+        ``reply.stop_reason`` path — the M31 anchor (a keyed literal,
         no wildcard)."""
         a = _reply(stop_reason="end_turn")
         b = _reply(stop_reason="tool_use")
@@ -296,7 +296,7 @@ class TestStructuralReplyDiff:
     def test_differ_in_part_kind_yields_index_path(self) -> None:
         """Two replies equal except one has a different ``kind`` at
         ``parts[1]`` produce a single ``reply.parts[1]`` path — the
-        M29 bare-index anchor for a kind-boundary disagreement.
+        M32 bare-index anchor for a kind-boundary disagreement.
 
         Index 0 and 2 are deliberately matched in both kinds so
         the diff walks a single boundary, not a rearrangement

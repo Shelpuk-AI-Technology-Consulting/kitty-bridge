@@ -1,6 +1,6 @@
 """Mutmut test-selection equals the §8.2 socket-binding registry.
 
-`.system_design/TEST_SUITE.md` §8.2 enumerates sixteen modules that bind real
+`.system_design/TEST_SUITE.md` §8.2 enumerates seventeen modules that bind real
 sockets or spawn real processes and so are ``l1`` by path default today.
 KBR-290 removes them from **mutmut's** test selection (the Fast job's
 ``pytest -m "l1 or l2"`` selection is unchanged) so the nightly mutation run
@@ -133,8 +133,8 @@ def test_every_registry_module_resolves_against_live_source() -> None:
         assert (REPO_ROOT / path).is_file(), f"registry entry {path!r} does not exist on disk"
 
 
-def test_registry_has_exactly_sixteen_entries() -> None:
-    """The count is fixed by §8.2's enumeration of sixteen modules."""
-    assert len(SOCKET_BINDING_L1_MODULES) == 16, (
-        f"registry has {len(SOCKET_BINDING_L1_MODULES)} entries; §8.2 enumerates sixteen"
+def test_registry_has_exactly_seventeen_entries() -> None:
+    """The count is fixed by §8.2's enumeration of seventeen modules."""
+    assert len(SOCKET_BINDING_L1_MODULES) == 17, (
+        f"registry has {len(SOCKET_BINDING_L1_MODULES)} entries; §8.2 enumerates seventeen"
     )

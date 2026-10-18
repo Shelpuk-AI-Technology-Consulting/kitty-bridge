@@ -107,7 +107,8 @@
   "triggers_met": [
     "adaptive_thinking_keys_present",
     "multiple_system_blocks",
-    "output_config_present"
+    "output_config_present",
+    "thinking_signalled_or_inferred"
   ],
   "triggers_absent": [
     "max_tokens_absent",

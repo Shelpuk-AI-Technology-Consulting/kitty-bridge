@@ -20,7 +20,7 @@ thresholds on. Until that ticket lands, no number here gates anything.
 
 [KBR-290](https://shelpuk.atlassian.net/browse/KBR-290) added one
 `--ignore <path>` row per module in
-`tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the fifteen
+`tests/socket_binding_l1_modules.py::SOCKET_BINDING_L1_MODULES` (the seventeen
 §8.2 socket/process-binding modules) to `[tool.mutmut]
 pytest_add_cli_args_test_selection`, so the nightly mutation run never
 depends on loopback socket timing (the KBR-266 clean-test stall's root

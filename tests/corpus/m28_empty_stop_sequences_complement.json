@@ -1,0 +1,38 @@
+{
+  "id": "m28_empty_stop_sequences_complement",
+  "description": "M28 (G29) complement - Anthropic Messages body carrying a non-empty stop_sequences list; the carry forwards it as-is, so the empty-list omission is provably absent.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). Complement to entry m28_empty_stop_sequences_trigger; the row triggers only on the empty list, so a non-empty `stop_sequences` is the canonical 3.3.2 assertion-2 complement (KBR-186's classification).",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.anthropic.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "m28_empty_stop_sequences_complement.body",
+  "body_sha256": "220082d6de6d03d2707e51099a652a9e6d4fd31673134f52f44093b1899f15ca",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [],
+  "triggers_absent": [
+    "anthropic_parallel_false_omitted",
+    "anthropic_top_k_present",
+    "empty_stop_sequences",
+    "tool_choice_omitted_as_legal_but_unsupported"
+  ]
+}

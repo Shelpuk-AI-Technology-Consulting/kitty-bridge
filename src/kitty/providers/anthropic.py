@@ -427,27 +427,42 @@ class AnthropicAdapter(ProviderAdapter):
         if cc_request.get("_top_k") is not None:
             anthropic["top_k"] = cc_request["_top_k"]
 
-        # Extract system messages → top-level system field
+        # Extract system messages → top-level system field. Two parallel
+        # collections: ``system_parts`` (joined-string form, every body that
+        # ships today produces) and ``system_blocks`` (the same parts as
+        # blocks, with any ``cache_control`` marker in place). The emit
+        # below picks one of three forms, gated on the
+        # ``forwards_thinking_signature`` flag (KBR-228 part B) and the
+        # G43/minimax scope-out (KBR-296).
         system_parts: list[str] = []
+        system_blocks: list[dict] = []
         for msg in cc_request.get("messages", []):
             if msg.get("role") == "system":
                 content = msg.get("content", "")
                 if isinstance(content, str):
                     system_parts.append(content)
+                    system_blocks.append({"type": "text", "text": content})
                 elif isinstance(content, list):
-                    # System content as list of blocks — extract text
+                    # System content as list of blocks — extract text,
+                    # keeping any cache marker on its block.
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
-                            system_parts.append(block["text"])
+                            text = block.get("text", "")
+                            system_parts.append(text)
+                            system_block: dict = {"type": "text", "text": text}
+                            # KBR-308: keep the marker on the CC block so the
+                            # blocks-form emit below can ship it; the join
+                            # would lose it.
+                            if block.get("cache_control") is not None:
+                                system_block["cache_control"] = block["cache_control"]
+                            system_blocks.append(system_block)
                         elif isinstance(block, str):
                             system_parts.append(block)
+                            system_blocks.append({"type": "text", "text": block})
 
-        # KBR-228 part B: on the signature-binding routes the agent's own
-        # system value — blocks and cache breakpoints included — is what the
-        # thinking signatures are bound to, so it is restored verbatim from
-        # the carriage instead of this joined string.  Where the carriage is
-        # absent (a Chat Completions origin) or the upstream is unverified,
-        # today's join stands.
+        # KBR-228 part B: the agent's system value (blocks and markers
+        # included) on signature-binding routes — restored verbatim from
+        # ``_anthropic_system`` instead of a join.
         carried_system = cc_request.get("_anthropic_system")
         if carried_system is not None and self.forwards_thinking_signature:
             if isinstance(carried_system, list):
@@ -456,6 +471,16 @@ class AnthropicAdapter(ProviderAdapter):
                 ]
             else:
                 anthropic["system"] = carried_system
+        # KBR-308: blocks form when any system part carries a marker AND
+        # the upstream is verified — the same gate as the carriage restore
+        # above. On ``minimax_token`` / ``opencode_go``'s Messages-routed
+        # models (forwards_thinking_signature=False) the endpoint rejects
+        # markers on system blocks, so the join stands and the G43 scope-out
+        # is preserved on this route.
+        elif any(b.get("cache_control") is not None for b in system_blocks) and self.forwards_thinking_signature:
+            anthropic["system"] = system_blocks
+        # Joined-string form for everything else: unmarked system, or any
+        # system on an unverified upstream.
         elif system_parts:
             anthropic["system"] = "\n".join(system_parts)
 
@@ -538,9 +563,15 @@ class AnthropicAdapter(ProviderAdapter):
         # has no top-level slot for Anthropic's automatic-caching form. The
         # same value already reached this upstream on attempt 0 (native
         # passthrough ships the raw body verbatim), so restoring it cannot
-        # newly 400 — attempt-0 parity, no gating.
-        if cc_request.get("_cache_control") is not None:
-            anthropic["cache_control"] = cc_request["_cache_control"]
+        # newly 400 — attempt-0 parity, no gating. KBR-308: on the
+        # CC-origin path a raw ``cache_control`` key folds into the same
+        # carriage when the carriage is absent (DQ-B: the carriage is
+        # kitty's own translator's output and wins).
+        top_cc = cc_request.get("_cache_control")
+        if top_cc is None:
+            top_cc = cc_request.get("cache_control")
+        if top_cc is not None:
+            anthropic["cache_control"] = top_cc
 
         # Restore thinking from normalized effort metadata
         if cc_request.get("_thinking_adaptive"):
@@ -642,12 +673,19 @@ class AnthropicAdapter(ProviderAdapter):
             text_block: dict = {"type": "text", "text": text}
             # KBR-296: the joined text block's breakpoint, restored from the
             # message-level carriage (last-marked-wins on the carry side).
-            if msg.get("_cache_control") is not None:
-                text_block["cache_control"] = msg["_cache_control"]
+            # KBR-308: on the CC-origin path the raw assistant-message-object
+            # ``cache_control`` folds in when the carriage is absent (DQ-B).
+            cc_text = msg.get("_cache_control")
+            if cc_text is None:
+                cc_text = msg.get("cache_control")
+            if cc_text is not None:
+                text_block["cache_control"] = cc_text
             content_blocks.append(text_block)
 
         # KBR-296: per-tool_use breakpoints ride an index-keyed message-level
         # carriage; each rebuilt ``tool_use`` block reads its own position.
+        # KBR-308: a raw ``tool_calls[i].cache_control`` on the CC body
+        # folds in when the carriage lacks that index (DQ-B).
         tool_call_cache_controls = msg.get("_tool_call_cache_controls")
         for idx, tc in enumerate(msg.get("tool_calls", [])):
             func = tc.get("function", {})
@@ -657,8 +695,13 @@ class AnthropicAdapter(ProviderAdapter):
                 "name": func.get("name", ""),
                 "input": _safe_json_load_args(func.get("arguments")),
             }
+            tc_cc = None
             if isinstance(tool_call_cache_controls, dict) and idx in tool_call_cache_controls:
-                tool_use_block["cache_control"] = tool_call_cache_controls[idx]
+                tc_cc = tool_call_cache_controls[idx]
+            elif isinstance(tc, dict) and tc.get("cache_control") is not None:
+                tc_cc = tc["cache_control"]
+            if tc_cc is not None:
+                tool_use_block["cache_control"] = tc_cc
             content_blocks.append(tool_use_block)
 
         return {"role": "assistant", "content": content_blocks or ""}
@@ -683,9 +726,14 @@ class AnthropicAdapter(ProviderAdapter):
         # KBR-296: the block's own ``cache_control`` breakpoint rides the
         # internal ``_cache_control`` message key (list-form content
         # ``tool_result.content`` is forwarded verbatim, so any nested
-        # breakpoint rides inside the array without a carriage).
-        if msg.get("_cache_control") is not None:
-            block["cache_control"] = msg["_cache_control"]
+        # breakpoint rides inside the array without a carriage). KBR-308:
+        # on the CC-origin path the raw tool-message-object
+        # ``cache_control`` folds in when the carriage is absent (DQ-B).
+        cc_msg = msg.get("_cache_control")
+        if cc_msg is None:
+            cc_msg = msg.get("cache_control")
+        if cc_msg is not None:
+            block["cache_control"] = cc_msg
         return block
 
     def _translate_user_content(self, msg: dict, cc_request: dict) -> list[dict] | str | None:
@@ -782,9 +830,18 @@ class AnthropicAdapter(ProviderAdapter):
                 "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
             }
             # KBR-296: a carried declaration breakpoint is restored by name;
-            # a name nothing carried simply has no entry.
-            if tool_cache_controls and func.get("name") in tool_cache_controls:
-                anthropic_tool["cache_control"] = tool_cache_controls[func["name"]]
+            # a name nothing carried simply has no entry. KBR-308: on the
+            # CC-origin path, a per-tool ``cache_control`` on the CC tool
+            # object folds into the same lookup when the carriage lacks it
+            # (DQ-B: carriage wins, raw CC shape is the fallback).
+            name = func.get("name")
+            tool_cc = None
+            if tool_cache_controls and name in tool_cache_controls:
+                tool_cc = tool_cache_controls[name]
+            elif isinstance(tool, dict) and tool.get("cache_control") is not None:
+                tool_cc = tool["cache_control"]
+            if tool_cc is not None:
+                anthropic_tool["cache_control"] = tool_cc
             anthropic_tools.append(anthropic_tool)
         return anthropic_tools
 

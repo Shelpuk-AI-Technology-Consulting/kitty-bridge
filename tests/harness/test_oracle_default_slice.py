@@ -111,12 +111,15 @@ _CORPUS_SKIP_TABLE: dict[str, str] = {
         "F3.d conversation.turns[2] dropped on CC adapter from Messages body "
         "carrying a 50 001-char tool_result; new finding, KBR-54 scope addition"
     ),
-    # F3.c: the CC reader residualises messages[N].reasoning_content (no slot).
-    # KBR-285 widened the CC content classifier to refusal/function_call/list content
-    # but did not touch reasoning_content.
+    # (F3.c — the CC reader's missing `reasoning_content` slot — resolved
+    # by KBR-310: the request-direction grammar models the field on assistant
+    # messages as a Thinking part, and `tool_use_and_tool_result` declares
+    # `thinking_signalled_or_inferred` so P8's part-path claim is in scope.
+    # The entry surfaces the remaining F3.a/F3.b drops — context_management
+    # and metadata — which are KBR-309's territory on the CC adapter.)
     "tool_use_and_tool_result": (
-        "F3.c messages[N].reasoning_content residualised by CC reader (no slot); "
-        "new finding, KBR-54 scope addition"
+        "F3.a envelope.extra[context_management] + F3.b envelope.extra[metadata] "
+        "unclaimed on CC adapter; sibling of KBR-54 scope addition, KBR-309 owns"
     ),
     # Framing gap, not a register gap: the entry's Messages body has role 'system'
     # inside messages (forbidden by the Anthropic Messages format — system prompts
@@ -145,6 +148,42 @@ _CORPUS_SKIP_TABLE: dict[str, str] = {
         "calibration gap: entry calibrated to 2.8 M-char static threshold; default "
         "profile's 800 000-char budget makes this a trigger case for M5 (body over "
         "budget); the entry has no oversized tool_result so M3 has nothing to act on"
+    ),
+    # New finding, KBR-55 scope addition (2026-09-24): the Messages→CC carry
+    # drops an Anthropic-defined tool's `type` discriminator (the CC builder
+    # writes `{name, description, parameters}` only) and the CC reader has no
+    # `type` slot, so an inbound `web_search_20250305` projects
+    # `conversation.tools[web_search].type = "web_search_20250305"` while the
+    # captured projection carries `None` — a delta no register row claims
+    # (M16 claims only `cache_control`). The entry's `description` half was a
+    # fixture defect fixed in the entry itself (the carry always writes
+    # `description`, defaulting to `""`); the `type` half is the finding. A
+    # register row for the typed-tool `type` drop is a sibling ticket.
+    "p35_tool_choice_omitted_forcing_anthropic_tool_trigger": (
+        "F3.e conversation.tools[web_search].type dropped on CC adapter from a"
+        " body carrying an Anthropic-defined (typed) tool declaration; no"
+        " register row claims the typed-tool `type` drop — new finding, KBR-55"
+        " scope addition"
+    ),
+}
+
+#: Per-entry expected-delta tuples for entries whose triggers legitimately
+#: fire on the default route. Clean entries (everything not named here)
+#: produce only M1's `PROFILE_SETS_MODEL` rewrite at `envelope.model`; the
+#: two KBR-55 entries below carry REQUEST triggers whose bridge-level sites
+#: (`MessagesTranslator.translate_request` for M28, `carry_tool_choice_and_
+#: metadata` for P35) are reachable on every translated adapter including
+#: `custom_openai`, so the rows' claims fire here exactly as they do on the
+#: curl_cffi route the entries were authored for. `compaction_budget_over`
+#: is asserted inline (M5's tail is profile-dependent); these two are exact.
+_EXPECTED_DELTAS: dict[str, tuple[str, ...]] = {
+    "m28_empty_stop_sequences_trigger": (
+        "envelope.model",
+        "conversation.sampling[stop]",
+    ),
+    "p35_tool_choice_omitted_no_tools_trigger": (
+        "envelope.model",
+        "envelope.extra[tool_choice]",
     ),
 }
 
@@ -445,8 +484,14 @@ class TestCorpusDrivenDefaultSlice:
                     f"the M5-stopped-firing regression); got {len(report.deltas)}"
                 )
             else:
-                # Clean entries: the only delta is M1's PROFILE_SETS_MODEL rewrite.
-                assert report.deltas == ("envelope.model",), (
-                    f"clean entry {entry.id!r}: expected (envelope.model,) from "
-                    f"M1; got {report.deltas!r}"
+                # Per-entry expected deltas (KBR-55): two entries carry REQUEST
+                # triggers whose sites are reachable on the default route (the
+                # bridge-level carry / translator runs on every translated
+                # adapter including `custom_openai`). The corpus entry names
+                # its own expected tuple; clean entries get the same M1-only
+                # assertion.
+                expected = _EXPECTED_DELTAS.get(entry.id, ("envelope.model",))
+                assert report.deltas == expected, (
+                    f"entry {entry.id!r}: expected {expected!r} (per-entry map"
+                    f" for KBR-55 / M1 only otherwise); got {report.deltas!r}"
                 )

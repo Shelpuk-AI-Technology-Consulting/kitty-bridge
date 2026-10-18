@@ -2184,7 +2184,7 @@ def reply_part_path(index: int | str, field_name: str | None = None) -> str:
 
     Symmetric with :func:`part_path` so reply-side register rows can
     address a part field with one helper call rather than string
-    concatenation. KBR-59 / T-D10's ``M27`` (``reply.parts[*].id``)
+    concatenation. KBR-59 / T-D10's ``M30`` (``reply.parts[*].id``)
     is the canonical caller; ``_SHAPES`` in
     ``tests/harness/test_register.py`` lists the corresponding
     ``(reply.parts[*].id, reply.parts[2].id)`` pair.
@@ -2194,7 +2194,7 @@ def reply_part_path(index: int | str, field_name: str | None = None) -> str:
             a row naming every part. M12 does **not** use the
             wildcard — anchored at index 0, because both translators
             substitute one text part into a reply that was empty.
-            M27 uses ``WILDCARD``; M29 uses ``WILDCARD`` for the
+            M30 uses ``WILDCARD``; M32 uses ``WILDCARD`` for the
             bare-index form.
         field_name: Optional field on the part (e.g. ``"id"``). When
             supplied, the path is ``reply.parts[<i>].<field_name>``;

@@ -163,6 +163,72 @@ $ kitty claude
 No API key required — kitty authenticates with your ChatGPT Plus or Pro account through a browser-based OAuth flow. Each
 profile gets its own independent session.
 
+### ChatGPT subscription on a remote or headless machine
+
+The browser login above assumes the browser and the terminal are on the **same machine**. If you run Kitty on a remote
+server (SSH into a CLI-only Ubuntu VM, a container, a dev box) while your browser is on your laptop, the login would
+redirect your laptop's browser to `localhost:1455` — a port that only exists on the server — and the flow would time out.
+
+Kitty handles this automatically. On an SSH session (or on a machine with no display) it switches to a
+**device-code login**, the same flow the OpenAI Codex CLI uses on headless machines:
+
+```bash
+$ kitty auth openai
+
+Sign in to ChatGPT for Kitty:
+
+1. Open this link in a browser on any machine and sign in to your account
+   https://auth.openai.com/codex/device
+
+2. Enter this one-time code (expires in 15 minutes)
+   ABCD-EFGH
+
+Personal ChatGPT Plus/Pro accounts are enabled by default. On Business/Team/Enterprise
+workspaces an admin must enable device-code authentication first
+(chatgpt.com/admin/permissions).
+
+Continue only if you started this login in Kitty. If a website or another
+person gave you this code, cancel.
+
+Sign in at: https://auth.openai.com/codex/device
+One-time code (expires in 15 minutes): ABCD-EFGH
+```
+
+Open the URL on your laptop, enter the code, and Kitty on the server picks the authorization up on its own — no port
+forwarding needed. The last two lines are a plain-text copy of the link and code, for terminals that mangle colours or
+for copy-pasting.
+
+**Notes:**
+
+- The command still requires an interactive terminal — Kitty needs a TTY to print the prompt and read your input. The
+  flow itself runs against `auth.openai.com` from the VM, regardless of where you open the browser.
+
+- Personal ChatGPT Plus/Pro accounts have device-code login enabled by default. On **Business/Team/Enterprise**
+  workspaces an admin must first enable it (ChatGPT admin settings → permissions → device code authentication).
+- Prefer the old browser login anyway (e.g. you already run `ssh -L 1455:localhost:1455 user@server`)? Force it with
+  `kitty auth openai --no-device-auth`. The SSH tunnel must forward **port 1455 specifically** — that exact port is
+  what OpenAI's redirect uses, so it has to be free on the server.
+- Force the device-code login on a desktop with `kitty auth openai --device-auth`.
+
+#### Using GPT-6 Astra with your subscription
+
+[GPT-6 Astra](https://openai.com/index/gpt-6-astra-next-generation-work/) is available on ChatGPT subscriptions
+through the same backend Kitty already uses. After signing in, pick the Astra model when the wizard asks:
+
+```bash
+$ kitty auth openai
+  ... (device-code or browser login as above) ...
+  ? Model name (default: gpt-5.3-codex): gpt-6-astra
+  ? Profile name (default: openai-sub): astra
+
+$ kitty claude
+```
+
+OpenAI rotates the model list on the subscription backend independently of Kitty releases. If `gpt-6-astra` is
+rejected, try the codex-suffixed `gpt-6-astra-codex`, or check which Astra model your ChatGPT plan offers (the model
+picker in the ChatGPT UI or `codex` on a machine where it is installed shows the exact id). `Astra Pro` is on Pro-tier
+subscriptions as `gpt-6-astra-pro`.
+
 ### Example: Use MiMo V2 Pro with Claude Code
 
 ```bash
@@ -532,6 +598,9 @@ That holds for an endpoint carrying a query string too, and the query is kept an
 |----------------------------------------------|-----------------------------------------------------------|
 | `kitty setup`                                | Create your first profile (interactive wizard)            |
 | `kitty profile`                              | Manage profiles (create, edit, delete, set default, list) |
+| `kitty auth openai`                          | Re-authenticate the ChatGPT subscription                  |
+| `kitty auth openai --device-auth`            | ... forcing device-code login (headless machines)         |
+| `kitty auth openai --no-device-auth`         | ... forcing browser login (e.g. behind an SSH tunnel)     |
 | `kitty doctor`                               | Diagnose installation and configuration issues            |
 | `kitty cleanup`                              | Restore agent config files after a crash                  |
 | `kitty bridge`                               | Start a standalone API server                             |

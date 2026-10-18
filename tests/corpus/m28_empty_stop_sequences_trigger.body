@@ -1,0 +1,1 @@
+{"model": "claude-fable-5", "max_tokens": 1024, "stream": false, "system": [{"type": "text", "text": "synthetic for KBR-55 T-D5 - M28 trigger - empty stop_sequences"}], "messages": [{"role": "user", "content": [{"type": "text", "text": "synthetic KBR-55 T-D5"}]}], "stop_sequences": []}

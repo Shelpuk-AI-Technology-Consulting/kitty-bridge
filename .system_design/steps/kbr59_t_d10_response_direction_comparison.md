@@ -18,7 +18,8 @@ sibling entry point `assert_no_unclaimed_reply_mutation` in
 projected through the existing five `ReplyProjection` readers,
 asserting every concrete delta is claimed by a register row whose
 trigger is in `triggers_met`. Lands three new register rows
-**M27/M28/M29** (the first free ids after KBR-195's M21/M22/M23)
+**M30/M31/M32** (the first free ids after KBR-55's M27/M28/M29, which took the ids
+this PR originally claimed)
 that today trip the oracle on deliberate, documented mutations
 that no row claims — the response-direction Gemini `functionCall.id`
 echo (KBR-257), the Ollama canonical tool-calling `reply.stop_reason`
@@ -35,11 +36,14 @@ delta, and the rare Thinking+ToolUse part-ordering delta (KBR-267).
   _claim_matching / _conditional_violations stay untouched (they
   are already path-agnostic). Recorded as decision (b) in the spec.
 
-- **M27/M28/M29, not M21/M22/M23.** KBR-194/195 already own
+- **M30/M31/M32, not M21/M22/M23.** KBR-194/195 already own
   `register.py:1034/1048/1063`; reusing those ids fails
   `test_row_ids_are_unique`,
   `test_no_two_rows_are_indistinguishable`, and
-  `register_disagreements`. Reviewer finding B1.
+  `register_disagreements`. Reviewer finding B1. KBR-55 then landed its
+  G28–G30 rows on the M27/M28/M29 ids before this PR merged, so the reply
+  rows take the next free ids (second round of the same collision,
+  2026-10-18 merge of origin/main).
 
 - **Trigger rename.** `CAPTURED_TOOL_CALL_ID_PRESENT`, not
   `GEMINI_INBOUND_ID_PRESENT` — the trigger reads the *captured* CC
@@ -51,13 +55,13 @@ delta, and the rare Thinking+ToolUse part-ordering delta (KBR-267).
   `test_classification_matches_the_specified_table` (the F1 spec).
   Reviewer finding C1.
 
-- **Narrow scope on every new row.** M27 → `("google_aistudio",
-  "vertex")`; M28/M29 → `("ollama_cloud",)`. Per §3.2.2 ("scope =
+- **Narrow scope on every new row.** M30 → `("google_aistudio",
+  "vertex")`; M31/M32 → `("ollama_cloud",)`. Per §3.2.2 ("scope =
   reachability of site"), the bridge sites that perform the mutation
   live on one provider; broad `ALL_PROVIDERS` overstates the
   reachable set. Reviewer finding C3.
 
-- **M29 trigger is wire-level post-C5.** Ollama
+- **M32 trigger is wire-level post-C5.** Ollama
   `message.thinking` non-empty AND `message.tool_calls` non-empty.
   The complement is a corpus entry the corpus author can write.
 
@@ -117,19 +121,19 @@ discoveries, gate results, review round notes; see KBR-307's
   raises `RuntimeError` at call time (KBR-312 sibling).
 
 - **`c.reply_part_path` extension** (S7): the helper gains an
-  optional `field_name` parameter so M27's anchor reads
+  optional `field_name` parameter so M30's anchor reads
   ``reply.parts[*].id`` from the helper rather than string concat.
 
 - **Three register rows** (`register.py`):
-  - **M27** — Gemini response-direction `functionCall.id` echo
+  - **M30** — Gemini response-direction `functionCall.id` echo
     (KBR-257). Trigger `CAPTURED_TOOL_CALL_ID_PRESENT`,
     `ArrangingBy.RESPONSE`, scope `("google_aistudio", "vertex")`,
     anchored at `reply.parts[*].id`.
-  - **M28** — Ollama canonical tool-calling `reply.stop_reason`
+  - **M31** — Ollama canonical tool-calling `reply.stop_reason`
     delta. Trigger `OLLAMA_CANONICAL_TOOL_CALLING_REPLY`,
     `ArrangingBy.RESPONSE`, scope `("ollama_cloud",)`, anchored at
     `REPLY_STOP_REASON`.
-  - **M29** — Ollama vs CC part ordering on rare
+  - **M32** — Ollama vs CC part ordering on rare
     Thinking+ToolUse replies (KBR-267 comment 3.2). Trigger
     `REPLY_CONTAINS_THINKING_AND_TOOL_USE`, `ArrangingBy.RESPONSE`,
     scope `("ollama_cloud",)`, anchored at `reply.parts[*]`
@@ -137,17 +141,17 @@ discoveries, gate results, review round notes; see KBR-307's
 
 - **Three new `Trigger` members**, each with a wire-level docstring.
   The `ArrangingBy.RESPONSE` enumeration at `register.py:138-140`
-  now lists "M6, M8, M9, M12, M17, M27, M28, M29".
+  now lists "M6, M8, M9, M12, M17, M30, M31, M32".
 
 - **Companion sites in `test_register.py`** (C11/C12): the F1
   dict at line 650 gains the three new triggers; the
-  `len(r.REGISTER) == 80` count pin becomes `83`; the docstring
+  `len(r.REGISTER) == 80` count pin becomes `86`; the docstring
   above (lines 132-156) gains the +3 narrative. The M-row count
-  in `test_register_agreement.py:303` becomes `30` (was 27).
+  in `test_register_agreement.py:303` becomes `33` (was 30 after KBR-55).
 
 - **Two `_SHAPES` entries** in `test_register.py`:
-  `(reply.parts[*].id, reply.parts[2].id)` (M27's anchor),
-  `(reply.parts[*], reply.parts[2])` (M29's anchor).
+  `(reply.parts[*].id, reply.parts[2].id)` (M30's anchor),
+  `(reply.parts[*], reply.parts[2])` (M32's anchor).
 
 - **Sibling tickets filed**: **KBR-311** (SSE stream reassembly,
   High, `Blocks` KBR-59) and **KBR-312** (Bedrock Converse reply
@@ -158,4 +162,20 @@ discoveries, gate results, review round notes; see KBR-307's
   `mypy src` — clean. `lint-imports` — clean.
   `pytest tests/harness/` — 2681 passed, 10 skipped,
   3 deselected, 5 warnings in 193.76s, exit 0.
+
+### 2026-10-18 — merge-conflict resolution (origin/main → PR #285)
+
+KBR-55 landed its G28–G30 rows on the M27/M28/M29 ids while this PR was
+open. Kept main's rows; renumbered the reply rows to **M30/M31/M32**
+(second round of the M21/M22/M23-class id collision). Pins moved:
+`len(r.REGISTER) == 86`, 33 bridge-level live rows, markdown M-count 33.
+Trigger enum and F1 classification table unioned; markdown table and
+register kept row-for-row in the same order; anchor comments in
+`contract.py` / `oracle.py` / `test_oracle_reply.py` renumbered to match.
+
+Gates at the resolution: `ruff check .` clean on tracked files (only the
+untracked local `.tmp/` scratch dir trips it locally), `lint-imports`
+clean, `mypy src/kitty` clean, harness suite 153 passed, full CI sweep
+`pytest -m "l1 or l2" -q -rsfE --strict-markers` — **9235 passed, 35
+skipped, 127 deselected, exit 0**. `regenerate_step_index.py` exit 0.
 
