@@ -225,6 +225,7 @@ _SETTINGS_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "CLAUDE_CODE_TMPDIR",
     "ENABLE_CLAUDEAI_MCP_SERVERS",
 )
 
@@ -270,12 +271,17 @@ class ClaudeAdapter(LauncherAdapter):
     ) -> SpawnConfig:
         """Build the spawn configuration for the Claude Code child process.
 
-        Sets the bridge URL, auth, and model env vars. When ``context_tokens``
-        is a positive number it is also exported as
-        ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` so Claude Code uses the model's
-        real context window instead of its 200K fallback for non-claude
-        models. Setting it for ``claude-*`` models is harmless — Claude Code
-        ignores the variable there.
+        Sets the bridge URL, auth, and model env vars. Always exports
+        ``CLAUDE_CODE_TMPDIR=tempfile.gettempdir()`` so Claude Code's
+        cross-session messaging daemon picks a user- or root-owned socket
+        dir (root-owned ``/tmp`` on Linux, per-user ``TMPDIR`` on macOS,
+        per-user ``%TEMP%`` on Windows); without it the daemon defaults to
+        ``/`` and prints a remediation hint on boxes where ``/`` is neither
+        (KBR-314). When ``context_tokens`` is a positive number it is also
+        exported as ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` so Claude Code uses
+        the model's real context window instead of its 200K fallback for
+        non-claude models. Setting it for ``claude-*`` models is harmless —
+        Claude Code ignores the variable there.
 
         Args:
             profile: Resolved profile with provider, model, and base_url.
@@ -295,6 +301,7 @@ class ClaudeAdapter(LauncherAdapter):
             "ANTHROPIC_DEFAULT_OPUS_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": profile.model,
+            "CLAUDE_CODE_TMPDIR": tempfile.gettempdir(),
             "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         }
         if context_tokens is not None and context_tokens > 0:
