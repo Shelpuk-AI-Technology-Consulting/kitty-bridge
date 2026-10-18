@@ -364,6 +364,43 @@ class TestSubscriptionRelayHealth:
         assert sorted(server._backend_health[idx]["cooldown"] for idx, _kind in parked) == [30, 30]
 
     @pytest.mark.asyncio()
+    async def test_deterministic_400_stops_burning_members_and_surfaces_the_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deterministically-bad body surfaces Anthropic's 400, not a 503."""
+        monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0,))
+        monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_PERIOD", 1.0)
+        backends = [_subscription_member("sub-0"), _subscription_member("sub-1"), _subscription_member("sub-2")]
+        server = _make_server(backends)
+        calls: list = []
+        rejected = (400, {"error": {"type": "invalid_request_error", "message": "model is withdrawn"}}, {})
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    _UPSTREAM_URL,
+                    callback=_scripted_responder([rejected, rejected], calls),
+                    repeat=True,
+                )
+                async with (
+                    aiohttp.ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{port}/v1/messages",
+                        data=_RAW_BODY,
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer sub-token"},
+                    ) as resp,
+                ):
+                    assert resp.status == 400, await resp.text()
+                    payload = await resp.json()
+        finally:
+            await server.stop_async()
+
+        # Two members saw the same 400; the third was not burned.
+        assert len(calls) == 2
+        assert payload["error"]["type"] == "api_error"
+        assert "model is withdrawn" in payload["error"]["message"]
+
+    @pytest.mark.asyncio()
     async def test_success_after_cooldown_restores_health(self) -> None:
         """A recovered member serves again once its cooldown expires."""
         backends = [_subscription_member("sub-only")]
@@ -503,3 +540,4 @@ class TestSubscriptionRelayHealth:
         # Both blips were absorbed on the same member: no parking, no hop.
         assert len(calls) == 3
         assert _parked(server) == []
+        assert server._stats_failovers == 0

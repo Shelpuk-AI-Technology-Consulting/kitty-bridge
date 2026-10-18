@@ -51,3 +51,12 @@ before the handler's 500 envelope. Tests: two-blips-then-success with no parking
 (grace knobs patched instant), and a single-backend call-count pin (initial attempt + one retry per
 grace delay). The SSE line-cap test now asserts the drop's warning via caplog, making the cap
 regression-visible (the round-3 test alone passed with the cap deleted).
+
+Review round 5 (same day): two loop fixes and a strengthened test. The grace retry now `continue`s
+the loop instead of falling through to re-selection — a covered blip retries the **same** member;
+the round-4 code hopped via weighted-random re-selection while the test's identical-per-URL mocks
+hid it (`_stats_failovers == 0` now pins the no-hop). And the F4 guard is mirrored: after two
+members reject the same body with 400, failover stops and the error surfaces through the shared
+envelope helper (`_subscription_error_message_envelope`, now also the handler arm's renderer)
+instead of parking every member into the all-unhealthy 503. Test: two 400s across two members,
+third unburned, Anthropic's status and message surfaced.

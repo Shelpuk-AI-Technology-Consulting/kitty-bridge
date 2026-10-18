@@ -5539,11 +5539,7 @@ class BridgeServer:
             try:
                 return await self._relay_subscription_messages(request, body, await request.read())
             except UpstreamError as exc:
-                error_msg = self._subscription_error_message(exc)
-                return web.json_response(
-                    {"type": "error", "error": {"type": "api_error", "message": error_msg}},
-                    status=exc.status,
-                )
+                return self._subscription_error_message_envelope(exc)
             except asyncio.TimeoutError:
                 # A stalled upstream mirrors the translated Messages path: the
                 # agent gets its 504 envelope and no backend is parked — a
@@ -5825,6 +5821,28 @@ class BridgeServer:
             body = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
         return self._error_response(body)
 
+    def _subscription_error_message_envelope(self, exc: UpstreamError) -> web.Response:
+        # pragma: no mutate block
+        """Render an :class:`UpstreamError` as the agent's error envelope.
+
+        The same shape the handler's subscription branch answers with, so a
+        failure surfaced from inside the relay loop is indistinguishable from
+        one surfaced in single-backend mode.
+
+        Args:
+            exc: The relay failure carrying status and bounded body.
+
+        Returns:
+            The JSON error response carrying the upstream status.
+        """
+        return web.json_response(
+            {
+                "type": "error",
+                "error": {"type": "api_error", "message": self._subscription_error_message(exc)},
+            },
+            status=exc.status,
+        )
+
     def _subscription_error_message(self, exc: UpstreamError) -> str:
         # pragma: no mutate block
         """Agent-facing message for a relay failure, subscription-aware.
@@ -5907,22 +5925,39 @@ class BridgeServer:
                     # window is spent.
                     if not await self._wait_out_transport_blip(exc, grace):
                         raise
+        consecutive_400_count = 0
         while True:
             try:
                 response = await self._relay_subscription_attempt(request, body, raw, url, headers)
             except UpstreamError as exc:
                 self._mark_subscription_unhealthy(exc)
+                # F4: after 2 members reject the same body with 400, stop
+                # burning members — the request itself is bad, and the third
+                # would only add a 300s cooldown to a healthy profile.
+                if exc.status == 400:
+                    consecutive_400_count += 1
+                    if consecutive_400_count >= 2:
+                        logger.warning(
+                            "Subscription request rejected by %d members (400) — "
+                            "stopping failover, surfacing error to client",
+                            consecutive_400_count,
+                        )
+                        return self._subscription_error_message_envelope(exc)
+                else:
+                    consecutive_400_count = 0
             except Exception as exc:
                 # A dropped wire to Anthropic first rides out the same
-                # transport grace every translated route honours; once the
-                # window is spent it is a sick backend: park it as transport
-                # and fail over. Anything that is not a transport blip
-                # propagates untouched.
-                if not await self._wait_out_transport_blip(exc, grace):
-                    if not _is_transport_error(exc):
-                        raise
-                    if self._current_backend_idx >= 0:
-                        self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="transport")
+                # transport grace every translated route honours: retry the
+                # same member while the window lasts. Once the window is
+                # spent it is a sick backend: park it as transport and fail
+                # over. Anything that is not a transport blip propagates
+                # untouched.
+                if await self._wait_out_transport_blip(exc, grace):
+                    continue
+                if not _is_transport_error(exc):
+                    raise
+                if self._current_backend_idx >= 0:
+                    self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="transport")
             else:
                 if self._current_backend_idx >= 0:
                     self._mark_backend_healthy(self._current_backend_idx)
