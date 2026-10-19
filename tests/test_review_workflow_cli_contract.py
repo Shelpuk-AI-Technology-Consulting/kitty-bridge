@@ -560,6 +560,14 @@ print("kitty 9.9.9", flush=True)
             "version ran'; this class pins a step that does not exist"
         )
 
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="the review workflow's step runs on a Linux runner; the pipe "
+        "semantics and the runner's bash flags under test are POSIX claims "
+        "-- on Windows the stub's `#!/usr/bin/env python3` shebang has no "
+        "interpreter to find, so the case would fail for a reason the step "
+        "can never meet in production",
+    )
     def test_the_step_body_survives_a_two_line_version_output(
         self, tmp_path: Path, step_body: str
     ):
