@@ -3,7 +3,7 @@ id: kbr309_messages_cc_extra_drops
 depends_on: [KBR-54, KBR-184, KBR-214, KBR-218, KBR-224, KBR-258, KBR-263]
 ---
 
-# KBR-309 — Messages→CC translation drops `context_management` and `metadata` (no register row)
+# KBR-309 — claim the Messages→CC `context_management` drop (register row M33) and activate M26 for `metadata`
 
 Jira: **KBR-309** ([link](https://shelpuk.atlassian.net/browse/KBR-309)).
 Design: `TEST_SUITE.md` §3.2.1, §3.2.2, §3.3.1b (CC reader's `_PUBLISHED_EXTRA_KEYS`),
@@ -28,22 +28,25 @@ The fix has three parts, none in `src/kitty/`:
     register change. The `tests/harness/test_oracle_driven.py` precedent
     (KBR-307) already includes ALWAYS at its driven-slice call site; T-D4
     simply missed it.
-2. **M27 (new)**: `envelope.extra[context_management]` drop on the translated
-    Messages route. The field is Anthropic **beta** (requires
+2. **Register row M33** (first-drafted M27, renumbered M30 → M33 across the
+    KBR-55 and KBR-59 id collisions — see the merge-conflict note):
+    `envelope.extra[context_management]` drop on the translated Messages
+    route. The field is Anthropic **beta** (requires
     `anthropic-beta: context-management-2025-06-27`); the bridge builds
     upstream headers from scratch and forwards no inbound agent header
     (§4.2 C1), so a KBR-224-style restore would 400 at the upstream. The
     drop is the design posture, not a bug.
-3. **M28 (new)**: the multi-text-part user-turn join collapse. The captured
-    CC body carries one text part whose text differs from the inbound's
-    first text part (`parts[*].text` delta) and whose collection is one
-    shorter (`parts[*]` whole-part delta). KBR-296 deliberately scoped the
-    `carry_cache_control=True` extension to the M9 fallback path; KBR-258 /
-    KBR-263 closed the cache_control follow-ups as register rows rather than
-    a hop-1 expansion, and KBR-309 closes the join's surface deltas the same
-    way. The bare `parts[*]` anchor over-claims (would also claim a *deleted*
-    part — §3.3.1's own falsification case); the trade-off is documented in
-    the row text.
+3. **Parts-join row withdrawn** (first-drafted M28, renamed M31, dropped in
+    `37c282b`). The first draft registered the multi-text-part user-turn
+    join collapse (`parts[*].text` + bare-`parts[*]` deltas). KBR-308 then
+    expanded `carry_cache_control=True` to hop 1, closing the join on every
+    cache_control-bearing multi-part turn — the two `conversation.turns[*]`
+    deltas no longer occur on `plain_turn` / `effort_configured` at all —
+    and the bare `parts[*]` anchor would over-claim a *deleted* part
+    (§3.3.1's own falsification case,
+    `test_oracle_curl_cffi.py::test_inbound_content_survives_while_introduced_is_caught`).
+    With the deltas gone and the anchor net-negative, the row was withdrawn
+    rather than landed.
 
 ## Decisions
 
@@ -54,23 +57,19 @@ The fix has three parts, none in `src/kitty/`:
   KBR-224's" was correct for the *idea* but the natural pattern fails for
   `context_management` without the beta header and is exactly the shape
   KBR-258 / KBR-263 already rejected for the cache_control follow-ups.
-- **M28's bare `parts[*]` anchor.** The user-approved trade. The owner is
-  on record that the alternative (a `carry_cache_control` expansion to
-  hop 1) is KBR-258/KBR-263 territory and resolved as register rows.
-  Equal-anchor co-claim with M3/M4/M8/M17 is the §3.3.1 docstring's third
-  example: those rows are conditional, M28 is not, and the co-claim is
-  exempt from a real bug by construction. Documented in M28's reason cell.
-- **M28's two-site tuple** (`build_user_content_message` + `MessagesTranslator.translate_request`):
-  the row's surface is the join inside `build_user_content_message`, but the
-  join is invoked from `_translate_user_message` inside
-  `MessagesTranslator.translate_request`. The first site names the
-  mutation surface; the second names the translator that drives it.
-  The `site ↔ scope` guard accepts both.
+- **Parts-join row withdrawn rather than anchored.** The first draft carried
+  the user-approved bare-`parts[*]` trade; KBR-308's hop-1
+  `carry_cache_control=True` expansion (landed on main while the PR was
+  open) removed the join's deltas on the slice entries entirely, and the
+  anchor's over-claim on §3.3.1's deleted-part falsification case made the
+  row net-negative — so it was withdrawn instead of landed. KBR-258 /
+  KBR-263's register-row precedent for the cache_control follow-ups
+  stands.
 - **`_EXPECTED_CLAIMED_DELTAS` is per-entry, not a single tuple.** Both
   `plain_turn` and `effort_configured` carry `model: "MiniMax-M3"` while
   the harness profile resolves to `"harness-model"`, so both ship
   `envelope.model` as a delta. The captured body's `MiniMax-M3`-shaped
-  normalisation keeps them identical at ten deltas. Pinning the walk order
+  normalisation keeps them identical at eight deltas. Pinning the walk order
   matters because `_structural_diff` walks deterministically (envelope →
   `envelope.extra` → `conversation.system` → `conversation.turns`), and a
   drift in walk order or claim would turn the tuple into a falsification
@@ -80,7 +79,7 @@ The fix has three parts, none in `src/kitty/`:
   `m6_recovery_oversized_paired`, `m6_recovery_oversized_paired_streaming`,
   `m5_irreducible_single_final_turn`, `no_output_config`,
   `compaction_budget_over`) carry `metadata`, `context_management`, or a
-  multi-text-part user turn; M26 / M27 / M28's claims are dormant on their
+  multi-text-part user turn; M26 / M33's claims are dormant on their
   bodies. Adding ALWAYS flips M26 onto the four entries that need it
   (plain_turn, effort_configured) and is no-op on the rest. Verified by
   re-running the slice: 10 passed / 6 skipped after the revert, identical
@@ -89,20 +88,25 @@ The fix has three parts, none in `src/kitty/`:
 
 ## Companion sites
 
-Six silent companion sites updated alongside the two new rows (KBR-271's
-lesson, recorded in `~/.claude/.../MEMORY.md` "Register-edit companion sites"):
+The companion sites of record after the 2026-10-18 merge of `origin/main` —
+main had already moved to 86 rows / 33 bridge-level (KBR-55's M27–M29 + KBR-59's
+M30–M32); the table records what KBR-309's **landed** row changes against that
+baseline (KBR-271's lesson, recorded in
+`~/.claude/.../MEMORY.md` "Register-edit companion sites"):
 
-| Site | Old | New |
+| Site | Old (at merge base) | New (landed) |
 |---|---|---|
-| `tests/harness/test_register.py:132` docstring | "80 live rows" | "82 live rows" |
-| `tests/harness/test_register.py:135` docstring | "27 bridge-level rows" | "29 bridge-level rows" |
-| `tests/harness/test_register.py:158` count pin | `== 80` | `== 82` |
-| `tests/harness/test_register.py:_SHAPES` | (no `text` entry) | `(part_path(WILDCARD, WILDCARD, "text"), part_path(2, 0, "text"))` |
-| `tests/harness/test_register_agreement.py:303` M-count pin | `== 27` | `== 29` |
-| `tests/harness/test_register_agreement.py:310` unconditional count pin | `== 49` | `== 51` |
-| `.system_design/TEST_SUITE.md` §3.2.1 row-count prose | "Twenty-eight rows… twenty-seven live" | "Thirty rows… twenty-nine live" |
-| `.system_design/TEST_SUITE.md` §3.2.1 table | (no M27 / M28 entries) | M27 + M28 rows |
-| `.system_design/TEST_SUITE.md` §3.2.2 unconditional list at line 275 | (no M27 / M28) | appended `, M27, M28` |
+| `tests/harness/test_register.py` docstrings | "86 live rows" / "33 bridge-level rows" | "87 live rows" / "34 bridge-level rows" |
+| `tests/harness/test_register.py` count pin | `== 86` | `== 87` |
+| `tests/harness/test_register_agreement.py` M-count pin | `== 33` | `== 34` |
+| `tests/harness/test_register_agreement.py` unconditional count pin | `== 51` | `== 52` (main's 51 + M33) |
+| `tests/harness/test_register_agreement.py` unconditional spot-check set | without `"M33"` | with `"M33"` |
+| `tests/harness/register.py` `REGISTER` tuple | 33 bridge-level live + 53 provider-level | M33 row appended after M32 |
+| `.system_design/TEST_SUITE.md` §3.2.1 prose | "thirty-three live" | "thirty-five rows in all / thirty-four live" |
+| `.system_design/TEST_SUITE.md` §3.2.1 table | (no M33) | M33 row appended after M32 |
+| `.system_design/TEST_SUITE.md` §3.2.2 unconditional list | (no M33) | appended `M33` |
+| `tests/harness/test_oracle_default_slice.py` annotations | `M26` | `M26/M33` (module-level overview, `_EXPECTED_CLAIMED_DELTAS` comments) |
+| `tests/harness/test_register.py:_SHAPES` | (no KBR-309 text entry) | unchanged — the first-draft text entry was withdrawn with the parts-join row (the tuple it was added for was itself tautological; `_SHAPES`' own block comment records that) |
 
 The `test_register_agreement.py` `test_register_holds_every_live_row` /
 `test_the_parser_reads_both_tables` /
@@ -141,7 +145,7 @@ Open follow-ups filed separately, deliberately out of scope:
   `system_prompt_over_window_compacts_normally` 400 at ingress) are
   entry-shape issues, not product defects — no ticket.
 - `context_management` beta-header carriage (the rationale that drives
-  M27's drop rather than a KBR-224-style restore) is a separate product
+  M33's drop rather than a KBR-224-style restore) is a separate product
   decision, owned elsewhere.
 
 ## Merge-conflict note (2026-10-18)
@@ -157,7 +161,8 @@ free id), appended last in both the `REGISTER` tuple and the §3.2.1 table.
 All companion sites re-pinned: REGISTER 87 (34 bridge-level live M-rows +
 53 provider-level), markdown M-count 34, unconditional list 52 (main's 51 +
 M33; KBR-59 rows are all conditional), slice annotations `M26/M33`. This step
-file's "M27 (new)" / "M28 (new)" wording above records the first-draft plan;
-the landed row id is M33 and M28 does not exist. **M33 is a request-side row**,
+Row-id history: first-draft M27 → M30 (KBR-55 collision) → **M33**
+(KBR-59 collision, landed); first-draft M28 → M31 → withdrawn. **M33 is a
+request-side row**,
 so the "next reply-side row id" noted in the KBR-59 record moves from M33 to
 **M34** (the KBR-58/T-D9 corpus slice inherits that).

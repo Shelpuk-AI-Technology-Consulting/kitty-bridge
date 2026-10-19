@@ -89,11 +89,16 @@ _WRONG_ROUTE_PATH = "/_intentionally_wrong_path_for_falsification"
 #:
 #: KBR-309 removed `plain_turn` and `effort_configured`: both entries now pass the
 #: oracle with their full claimed-delta tuple pinned by
-#: :data:`_EXPECTED_CLAIMED_DELTAS` below. The four deltas they used to drop —
-#: `envelope.extra[context_management]`, `envelope.extra[metadata]`,
-#: `conversation.turns[0].parts[0].text`, `conversation.turns[0].parts[1]` — are
-#: claimed by M27, M26 (activated by `Trigger.ALWAYS` in `_triggers_met`),
-#: M28's text anchor, and M28's bare-part anchor respectively.
+#: :data:`_EXPECTED_CLAIMED_DELTAS` below. Of the four deltas they used to drop on
+#: the pre-KBR-308 tree — `envelope.extra[context_management]`,
+#: `envelope.extra[metadata]`, `conversation.turns[0].parts[0].text`,
+#: `conversation.turns[0].parts[1]` — the first two are claimed by M33 and M26
+#: (activated by `Trigger.ALWAYS` in `_triggers_met`) respectively. The two
+#: `conversation.turns[0].parts[*]` deltas no longer occur at all: KBR-308
+#: expanded `carry_cache_control=True` to hop 1 and both entries carry
+#: `cache_control` on their multi-text-part user turns, so the join that
+#: produced them never fires (KBR-309's first-draft parts-join row was
+#: withdrawn with the deltas it anchored).
 _CORPUS_SKIP_TABLE: dict[str, str] = {
     # F3.d: the CC adapter drops the tool_result turn on a Messages body carrying a
     # 50 000-char tool_result (both under- and over-limit entries). Likely a pairing-
@@ -185,14 +190,16 @@ _EXPECTED_DELTAS: dict[str, tuple[str, ...]] = {
 
 #: Per-entry expected claimed-delta tuple — KBR-309. Entries whose bodies carry
 #: Claude Code control fields (`output_config`, `thinking`, `context_management`,
-#: `metadata`, multi-part user turns, multiple system blocks) project those fields
-#: as deltas on the CC wire; the register rows P5b/P5d/P5f/M26/M33 claim
-#: them. This dict pins the exact set so a future drift — a new unclaimed field,
+#: `metadata`, multiple system blocks) project those fields as deltas on the CC
+#: wire; the register rows P5b/P5d/P5f/M26/M33 claim them. (The multi-part
+#: user-turn deltas these entries used to surface were closed by KBR-308's
+#: hop-1 `carry_cache_control=True` expansion; no row claims them.) This dict
+#: pins the exact set so a future drift — a new unclaimed field,
 #: a claim withdrawn, a delta appearing or vanishing — fails the slice loudly
 #: instead of passing silently. The walk order matches `_structural_diff`'s
 #: traversal (envelope → envelope.extra → conversation.system → conversation.turns).
 #:
-#: `plain_turn` and `effort_configured` produce the same ten-delta tuple: both
+#: `plain_turn` and `effort_configured` produce the same eight-delta tuple: both
 #: bodies carry `model: "MiniMax-M3"` and the harness profile resolves to
 #: `"harness-model"`, so the model lands as a delta on both. The captured body's
 #: `MiniMax-M3`-shaped normalisation keeps them identical.
