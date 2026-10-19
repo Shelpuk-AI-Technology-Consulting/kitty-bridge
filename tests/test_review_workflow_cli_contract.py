@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 # L2: the subject of this file is an artifact outside `src/kitty` Python code,
 # or a structural scan of source text -- two things edited separately that must
@@ -502,4 +503,126 @@ class TestTheWorkflowStillDrivesThisSurface:
             "the review workflow installs this checkout rather than the released "
             "package. That changes the premise this module is written on — see "
             "its docstring — and `.github/review/rules/ci.md` with it"
+        )
+
+
+class TestTheVersionProbeDoesNotBreakItsOwnPipe:
+    """🔴 The version probe used to exit 120 through its own pipe (KBR-320).
+
+    `Record which bridge version ran` probed
+    ``VERSION=$("$KITTY" --version 2>&1 | head -n 1)``. ``kitty --version``
+    prints two lines -- the banner and the machine version -- so ``head``
+    closing the pipe after the first line left kitty's remaining write and
+    final flush hitting ``BrokenPipeError``. CPython's documented
+    interpreter-cleanup rule turns a stream-flush failure during shutdown
+    into exit status 120 (bpo-5319 / bpo-29130), and the runner invokes
+    step shells as ``bash --noprofile --norc -e -o pipefail``, so the
+    failing pipeline killed the step before its summary line: zero output,
+    exit 120, a red annotation on a merge-gating check. Measured: the
+    exact pipeline returns 120 in 60/60 local runs; three CI runs carried
+    the annotation on 2026-10-18/19.
+
+    The repair captures the whole output before taking the first line, so
+    no writer is ever upstream of an early-closing reader. Two cases pin
+    that: one behavioral, against the step body the workflow actually
+    carries; one static, so the pipe cannot quietly return as a tidying.
+    """
+
+    #: The measured shape of ``kitty --version``: a flushed first line, then
+    #: a second line after a beat. The delay makes the broken pipe
+    #: deterministic -- ``head -n 1`` exits after the first line, so the
+    #: second write lands on a closed pipe exactly as it does in CI, rather
+    #: than racing the writer the way the real invocation does.
+    STUB_KITTY = """\
+#!/usr/bin/env python3
+import time
+
+print("kitty v9.9.9 — launch coding agents through a local API bridge", flush=True)
+time.sleep(0.2)
+print("kitty 9.9.9", flush=True)
+"""
+
+    @pytest.fixture()
+    def step_body(self) -> str:
+        """Return the version step's ``run:`` body from the workflow.
+
+        Raises:
+            AssertionError: When the workflow no longer carries the step,
+                so the cases below would be pinning a body nothing runs.
+        """
+
+        document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        for step in document["jobs"]["review"]["steps"]:
+            if step.get("name") == "Record which bridge version ran":
+                return str(step["run"])
+        raise AssertionError(
+            "the review workflow no longer carries 'Record which bridge "
+            "version ran'; this class pins a step that does not exist"
+        )
+
+    def test_the_step_body_survives_a_two_line_version_output(
+        self, tmp_path: Path, step_body: str
+    ):
+        """The step body, run the way the runner runs it, exits 0 and stamps.
+
+        The runner's shell flags -- ``-e -o pipefail`` -- are reproduced
+        because they are half the mechanism: without ``-e`` the failing
+        pipeline would not abort the script, and the annotation the ticket
+        is about would not exist. ``pythonLocation`` points at a tree whose
+        ``bin/kitty`` is the two-line stub, and ``GITHUB_STEP_SUMMARY`` at
+        a scratch file, so the whole body runs hermetically.
+        """
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "kitty"
+        stub.write_text(self.STUB_KITTY, encoding="utf-8")
+        stub.chmod(0o755)
+
+        summary = tmp_path / "summary.md"
+        script = tmp_path / "step.sh"
+        script.write_text(step_body, encoding="utf-8")
+
+        env = dict(os.environ)
+        env["pythonLocation"] = str(tmp_path)
+        env["GITHUB_STEP_SUMMARY"] = str(summary)
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        assert proc.returncode == 0, (
+            "the version probe still dies on a two-line --version "
+            f"(rc={proc.returncode}); stderr={proc.stderr!r}"
+        )
+        assert "Bridge:" in proc.stdout, proc.stdout
+        stamped = summary.read_text(encoding="utf-8")
+        assert "kitty v9.9.9" in stamped, stamped
+
+    def test_the_probe_leaves_no_writer_upstream_of_head(self, step_body: str):
+        """The version capture must not be piped into any other command.
+
+        Any reader after the probe's pipe -- ``head``, but equally ``tail``
+        or ``sed -n 1p`` -- exits after the line it wanted and closes the
+        pipe under the writer, re-creating the whole mechanism: the writer's
+        remaining output raises ``BrokenPipeError`` and CPython exits 120
+        (KBR-320). So the pin is on the shape -- the ``--version`` capture
+        stands alone -- not on the one reader that carried the bug.
+        """
+
+        probe_lines = [
+            line for line in step_body.splitlines() if "--version" in line
+        ]
+        assert probe_lines, (
+            "the step body no longer probes `kitty --version`; the workflow "
+            "contract this class pins has moved"
+        )
+        piped = [line for line in probe_lines if "|" in line]
+        assert not piped, (
+            "the version capture is piped into another command again; any "
+            "reader that exits after the line it wanted closes the pipe "
+            "under kitty, whose remaining output raises BrokenPipeError and "
+            "exits 120 at interpreter cleanup (KBR-320)"
         )
