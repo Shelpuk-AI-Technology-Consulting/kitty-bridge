@@ -602,14 +602,22 @@ print("kitty 9.9.9", flush=True)
         assert "kitty v9.9.9" in stamped, stamped
 
     def test_the_probe_leaves_no_writer_upstream_of_head(self, step_body: str):
-        """The version capture must not be piped into any other command.
+        """The version capture reaches no early-closing reader this pin can name.
 
-        Any reader after the probe's pipe -- ``head``, but equally ``tail``
-        or ``sed -n 1p`` -- exits after the line it wanted and closes the
-        pipe under the writer, re-creating the whole mechanism: the writer's
-        remaining output raises ``BrokenPipeError`` and CPython exits 120
-        (KBR-320). So the pin is on the shape -- the ``--version`` capture
-        stands alone -- not on the one reader that carried the bug.
+        Three vectors re-create the mechanism -- the writer's remaining
+        output raises ``BrokenPipeError`` and CPython exits 120 (KBR-320) --
+        and each gets its own assertion: a command-line pipe into any reader
+        (``head``, ``tail``, ``sed -n 1p``, …), a process substitution, and
+        a coproc. The last two put the reader on a fresh descriptor where a
+        pipe scan cannot see it, which is why they are asserted directly
+        rather than folded into the ``|`` check.
+
+        ⚠️ The three assertions enumerate shapes, and an unenumerated shape
+        would slip this pin. That is accepted because the behavioural case
+        above is the backstop: it runs the body against the two-line stub,
+        so ANY re-creation of the mechanism -- however it is spelled --
+        turns the stub's second write into a broken pipe and fails on the
+        exit status. This pin is the cheap early signal, not the guarantee.
         """
 
         probe_lines = [
@@ -625,4 +633,17 @@ print("kitty 9.9.9", flush=True)
             "reader that exits after the line it wanted closes the pipe "
             "under kitty, whose remaining output raises BrokenPipeError and "
             "exits 120 at interpreter cleanup (KBR-320)"
+        )
+        # Process substitution and coprocs put the truncating reader on a
+        # fresh descriptor instead of a command-line pipe, so the `|` scan
+        # above cannot see them -- and both re-create the same mechanism.
+        assert ">(" not in step_body, (
+            "the step body carries a process substitution, which would put "
+            "a truncating reader on a fresh descriptor where the pipe scan "
+            "cannot see it; same broken pipe, same exit 120 (KBR-320)"
+        )
+        assert "coproc" not in step_body, (
+            "the step body starts a coproc, which would put a reader on a "
+            "fresh descriptor where the pipe scan cannot see it; same "
+            "broken pipe, same exit 120 (KBR-320)"
         )
