@@ -2453,8 +2453,10 @@ credential model.
 A direct subscription profile may run only under `kitty … claude`. Codex, Gemini, Kilo, default
 profile-first non-Claude routing, and generic bridge mode reject it before credential lookup,
 egress, bridge creation, or child spawn. A subscription Claude launch sets no `ANTHROPIC_API_KEY`
-and no `ANTHROPIC_AUTH_TOKEN` (and clears both from the child environment); API-key profile
-launches keep setting them. For a non-Claude balancing launch, Kitty excludes
+and no `ANTHROPIC_AUTH_TOKEN` (and clears both from the child environment; the session settings file
+additionally pins both empty, because Claude Code merges `--settings` per variable against user
+scope and an omitted key would let a user-scope value — direct Claude Code API use — stand);
+API-key profile launches keep setting them. For a non-Claude balancing launch, Kitty excludes
 subscription members before it constructs backend state; remaining members keep their configured
 order and backup flags. No remaining member is a configuration error, not a fallback to an
 unapproved provider. A Claude-launched mixed pool may retry or fail over a raw subscription request

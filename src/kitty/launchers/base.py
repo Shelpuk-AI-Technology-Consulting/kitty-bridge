@@ -21,11 +21,19 @@ class SpawnConfig:
     2. Unset all keys listed in ``env_clear``.
     3. Apply all ``env_overrides``.
     4. Append ``cli_args`` after the binary name.
+
+    ``settings_env`` never reaches the child process environment: the
+    launcher merges it into the view handed to the adapter's session
+    settings writer (Claude Code's ``--settings`` env block), whose
+    per-variable merge against user scope is a different channel from the
+    process env. A key pinned there can stay out of the child env while
+    still overriding a user-scope settings value.
     """
 
     env_overrides: dict[str, str] = field(default_factory=dict)
     env_clear: list[str] = field(default_factory=list)
     cli_args: list[str] = field(default_factory=list)
+    settings_env: dict[str, str] = field(default_factory=dict)
 
 
 class LauncherAdapter(ABC):

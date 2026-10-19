@@ -34,3 +34,11 @@ Design-review round (same day): `session_detail` (beside the reader) is the one 
 email/subscription-type join happens (was five copies across doctor, profile, and setup flows). The edit flow's
 re-check runs before the model prompt, so a failed check under "Both" aborts before any typed input is discarded
 (test pins that no prompt fires). The edit-flow docstring states the subscription arm's verify-only contract.
+
+CI review round 6 (2026-10-18): the session settings file now pins both credential keys to empty for a subscription
+launch. Claude Code merges `--settings` per variable against user scope, so omitting the keys let a user-scope
+`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` (direct Claude Code API use) survive into the effective launch identity.
+The pins ride a new `SpawnConfig.settings_env` — a session-file-only view the launcher merges over `env_overrides`
+when calling `prepare_launch` — because the process env must not carry the keys at all (`build_child_env` applies
+overrides after `env_clear`, so `env_overrides` cannot be the carrier). Tests pin the settings view, the absence
+from `env_overrides`, and the written file's three keys.

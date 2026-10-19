@@ -254,7 +254,7 @@ async def launch_async(
         # previously handed every agent Claude Code's settings.json.
         try:
             original_settings = adapter.prepare_launch(
-                spawn_config.env_overrides,
+                {**spawn_config.env_overrides, **spawn_config.settings_env},
                 settings_path=settings_path,
             )
         except OSError as exc:
