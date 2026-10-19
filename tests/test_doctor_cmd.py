@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kitty.cli.doctor_cmd import _check_profile, _make_credential_check, run_doctor
+from kitty.auth.claude_subscription import ClaudeSubscriptionStatus
+from kitty.cli.doctor_cmd import _check_profile, _make_credential_check, _make_subscription_check, run_doctor
 from kitty.credentials.file_backend import FileBackend
 from kitty.credentials.store import CredentialStore
 from kitty.profiles.schema import Profile
@@ -166,6 +167,86 @@ class TestDoctorCorruptCredentialReporting:
         assert failures == 1
         captured = capsys.readouterr()
         assert "corrupt" in captured.out + captured.err
+
+
+class TestDoctorSubscriptionProfile:
+    """A subscription profile holds no credential; the doctor checks the session.
+
+    ``_make_credential_check`` resolves every ``auth_ref``, which a subscription
+    profile intentionally lacks — checking it there would report a permanent
+    false failure. Both doctor paths (the checklist loop and ``_check_profile``)
+    must use the Claude Code session reader instead and never touch the store.
+    """
+
+    def _subscription_profile(self, name: str = "sub") -> Profile:
+        return _make_profile(name=name, provider="anthropic_subscription", model="claude-sonnet-4-6")
+
+    def test_make_subscription_check_reports_an_active_session(self) -> None:
+        status = ClaudeSubscriptionStatus(available=True, email="a@b.c", subscription_type="max", reason=None)
+
+        with patch(
+            "kitty.auth.claude_subscription.read_claude_subscription_status",
+            return_value=status,
+        ):
+            passed, message = _make_subscription_check()()
+
+        assert passed is True
+        assert "claude.ai subscription active" in message
+        assert "a@b.c" in message
+
+    def test_make_subscription_check_reports_the_remediation_when_unavailable(self) -> None:
+        status = ClaudeSubscriptionStatus(
+            available=False, email=None, subscription_type=None, reason="Claude Code is not signed in."
+        )
+
+        with patch(
+            "kitty.auth.claude_subscription.read_claude_subscription_status",
+            return_value=status,
+        ):
+            passed, message = _make_subscription_check()()
+
+        assert passed is False
+        assert message == "Claude Code is not signed in."
+
+    def test_check_profile_uses_the_session_check_and_never_the_credential_store(
+        self, store: ProfileStore, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        profile = self._subscription_profile()
+        store.save(profile)
+
+        def _no_credentials(*_args: object, **_kwargs: object) -> str:
+            """Fail the test if the doctor resolves a subscription auth_ref."""
+            raise AssertionError("credential store must not be consulted for a subscription profile")
+
+        status = ClaudeSubscriptionStatus(available=True, email=None, subscription_type="pro", reason=None)
+        with (
+            patch("kitty.credentials.store.CredentialStore.get", side_effect=_no_credentials),
+            patch("kitty.auth.claude_subscription.read_claude_subscription_status", return_value=status),
+        ):
+            failures = _check_profile(store, CredentialStore(backends=[FileBackend()]), profile.name)
+
+        assert failures == 0
+        captured = capsys.readouterr()
+        assert "claude.ai subscription active" in captured.out + captured.err
+
+    def test_run_doctor_checks_the_session_only_for_subscription_members(self, store: ProfileStore) -> None:
+        """A mixed pool resolves credentials once — for the API-key member."""
+        store.save(self._subscription_profile(name="sub"))
+        store.save(_make_profile(name="metered"))
+
+        status = ClaudeSubscriptionStatus(available=True, email=None, subscription_type="pro", reason=None)
+        with (
+            patch("kitty.cli.doctor_cmd.discover_binary", return_value=MagicMock()),
+            # Hermetic against the box's real stored egress gateway, whose
+            # password resolution also reads the credential store.
+            patch("kitty.egress_store.resolve_egress", return_value=None),
+            patch("kitty.credentials.store.CredentialStore.get", return_value="sk-key") as get_mock,
+            patch("kitty.auth.claude_subscription.read_claude_subscription_status", return_value=status),
+        ):
+            exit_code = run_doctor(store)
+
+        assert exit_code == 0
+        assert get_mock.call_count == 1
 
 
 class TestDoctorNoDefault:

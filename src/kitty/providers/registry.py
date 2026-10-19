@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 
 from kitty.providers.anthropic import AnthropicAdapter
+from kitty.providers.anthropic_subscription import AnthropicSubscriptionAdapter
 from kitty.providers.azure import AzureOpenAIAdapter
 from kitty.providers.base import ProviderAdapter
 from kitty.providers.bedrock import BedrockAdapter
@@ -40,6 +41,7 @@ _registry: dict[str, type[ProviderAdapter]] = {
     "openai_subscription": OpenAISubscriptionAdapter,
     "openrouter": OpenRouterAdapter,
     "anthropic": AnthropicAdapter,
+    "anthropic_subscription": AnthropicSubscriptionAdapter,
     "bedrock": BedrockAdapter,
     "azure": AzureOpenAIAdapter,
     "vertex": VertexAIAdapter,

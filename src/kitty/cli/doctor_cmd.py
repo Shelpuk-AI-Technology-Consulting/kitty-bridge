@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from kitty.auth.claude_subscription import session_detail
 from kitty.credentials.file_backend import FileBackend
 from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.launchers.claude import ClaudeAdapter
@@ -76,9 +77,13 @@ def run_doctor(
     # Default profile check
     checks.append(("Default profile", _make_default_profile_check(resolver)))
 
-    # Per-profile credential checks
+    # Per-profile credential checks; subscription profiles hold no credential
+    # record, so their health is the local Claude Code session instead.
     for profile in profiles:
-        checks.append((f"Credentials for {profile.name!r}", _make_credential_check(cred_store, profile)))
+        if profile.provider == "anthropic_subscription":
+            checks.append((f"Claude Code session for {profile.name!r}", _make_subscription_check()))
+        else:
+            checks.append((f"Credentials for {profile.name!r}", _make_credential_check(cred_store, profile)))
 
     checklist = LiveChecklist("kitty doctor")
     failures = checklist.run_checks(checks)
@@ -135,6 +140,27 @@ def _make_default_profile_check(resolver: ProfileResolver):
             return True, default.name
         except NoDefaultProfileError:
             return False, "No default profile set"
+
+    return check
+
+
+def _make_subscription_check():
+    """Create a check function reporting the Claude Code session.
+
+    Returns:
+        A zero-argument callable returning ``(ok, detail)``.
+    """
+
+    def check() -> tuple[bool, str]:
+        from kitty.auth.claude_subscription import read_claude_subscription_status
+
+        status = read_claude_subscription_status()
+        if not status.available:
+            return False, status.reason or "Claude Code subscription is unavailable"
+        detail = session_detail(status)
+        if not detail:
+            return True, "claude.ai subscription active"
+        return True, f"claude.ai subscription active ({detail})"
 
     return check
 
@@ -196,6 +222,24 @@ def _check_profile(store: ProfileStore, cred_store: CredentialStore, name: str) 
     except KeyError:
         print_error(f"  Provider {profile.provider!r}: unknown provider type")
         failures += 1
+
+    # A subscription profile holds no credential record; the session is its
+    # credential. The reader's remediation message is the finding.
+    if profile.provider == "anthropic_subscription":
+        from kitty.auth.claude_subscription import read_claude_subscription_status
+
+        status = read_claude_subscription_status()
+        if status.available:
+            detail = session_detail(status)
+            suffix = f" ({detail})" if detail else ""
+            print_status(f"  Claude Code session for {profile.name!r}: claude.ai subscription active{suffix}")
+        else:
+            print_error(
+                f"  Claude Code session for {profile.name!r}: "
+                f"{status.reason or 'Claude Code subscription is unavailable'}"
+            )
+            failures += 1
+        return failures
 
     # Check credentials (KBR-87: corruption surfaces as a failed check with the
     # corruption message — the diagnostic tool must not crash on the condition

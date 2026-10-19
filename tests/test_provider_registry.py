@@ -62,6 +62,11 @@ class TestGetProvider:
         adapter = get_provider("anthropic")
         assert adapter.provider_type == "anthropic"
 
+    def test_returns_anthropic_subscription_adapter(self):
+        adapter = get_provider("anthropic_subscription")
+        assert adapter.provider_type == "anthropic_subscription"
+        assert adapter.use_native_messages is True
+
     def test_returns_bedrock_adapter(self):
         adapter = get_provider("bedrock")
         assert adapter.provider_type == "bedrock"

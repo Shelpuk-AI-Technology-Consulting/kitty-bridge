@@ -7,6 +7,7 @@ import uuid
 
 import questionary
 
+from kitty.auth.claude_subscription import session_detail
 from kitty.credentials.store import CredentialError, CredentialStore
 from kitty.profiles.schema import _NAME_PATTERN, PROVIDER_LABELS, PROVIDER_SECTIONS, RESERVED_NAMES, Profile
 from kitty.profiles.store import ProfileStore
@@ -85,7 +86,18 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
                 break
             print_error("Base URL is required for this provider")
 
-    if provider_adapter.requires_oauth:
+    if provider == "anthropic_subscription":
+        print_step(2, 7, "Claude Code subscription")
+        from kitty.auth.claude_subscription import read_claude_subscription_status
+
+        status = read_claude_subscription_status()
+        if not status.available:
+            print_error(status.reason or "Claude Code subscription is unavailable")
+            raise ValueError(status.reason or "Claude Code subscription is unavailable")
+        detail = session_detail(status)
+        print_status(f"Using local Claude Code subscription ({detail})")
+        auth_ref = str(uuid.uuid4())
+    elif provider_adapter.requires_oauth:
         print_step(2, 7, "OAuth login")
         from kitty.cli.auth_cmd import run_oauth_for_provider
 
@@ -126,7 +138,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
 
     # Step 3: Model
     print_step(3, 7, "Model selection")
-    _default_models = {"openai_subscription": "gpt-5.3-codex"}
+    _default_models = {"openai_subscription": "gpt-5.3-codex", "anthropic_subscription": "claude-sonnet-4-6"}
     default_model = _default_models.get(provider)
     if default_model:
         model = prompt_text(f"Model (default: {default_model}): ")

@@ -101,6 +101,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import importlib.util
 import inspect
 import json
 import re
@@ -721,9 +722,12 @@ class TestTheSweepLooksAtEverything:
 #: ``User-Agent``, etc.).  The bedrock wire contract is asserted separately
 #: below, on the botocore-prepared request.  A future custom-transport adapter
 #: that also delegates headers must move to this set AND add a wire
-#: observation of its own; the test ``test_only_bedrock_is_exempt_from_the
-#: exact_set_table`` pins that boundary.
-_WIRE_OBSERVED_ELSEWHERE: frozenset[str] = frozenset({"bedrock"})
+#: observation of its own; the test ``test_exempt_set_holds_two_members``
+#: pins that boundary.  ``anthropic_subscription`` is the
+#: second member: the relay forwards the caller's own headers instead of the
+#: hook's, observed wire-level by
+#: ``tests.bridge.test_subscription_messages_relay.TestSubscriptionExactRelay``.
+_WIRE_OBSERVED_ELSEWHERE: frozenset[str] = frozenset({"anthropic_subscription", "bedrock"})
 
 #: The exact header set each wire route must carry — names (casing-exact) and
 #: values, both.  Values are read off the same single sources the adapters
@@ -1853,21 +1857,36 @@ class TestBedrockWireContract:
 
 
 class TestTheBoundaryBetweenHookAndWireIsPinned:
-    """Only ``bedrock`` is exempt from the hook-level exact-set table.
+    """``bedrock`` and ``anthropic_subscription`` are exempt from the hook-level exact-set table.
 
     A future custom-transport adapter that also delegates headers must
     move to the exemption set AND add a wire observation of its own; this
     guard pins the boundary so that does not happen silently.
     """
 
-    def test_only_bedrock_is_exempt_from_the_exact_set_table(self) -> None:
-        """The exemption set is exactly ``{bedrock}`` — no more, no less."""
+    def test_exempt_set_holds_two_members(self) -> None:
+        """The exemption set is exactly ``{anthropic_subscription, bedrock}`` — no more, no less."""
         # The wire observation test must exist for bedrock — otherwise the
         # exemption is decoration (the KBR-8 anti-pattern).
         test_method_names = {name for name in dir(TestBedrockWireContract) if name.startswith("test_")}
         assert "test_bedrock_ships_exactly_botocores_signed_set" in test_method_names, (
             "the bedrock exemption requires a live wire observation; "
             "without it the exemption is decoration"
+        )
+        # Same rule for the subscription relay: its headers are the caller's
+        # own, pinned wire-level by the relay tests, not by the hook table.
+        # Loaded by path — test modules are not a package, so a plain
+        # import cannot see them (precedent: test_step_index.py).
+        relay_spec = importlib.util.spec_from_file_location(
+            "test_subscription_messages_relay",
+            Path(__file__).resolve().parent / "bridge" / "test_subscription_messages_relay.py",
+        )
+        assert relay_spec is not None and relay_spec.loader is not None
+        relay_module = importlib.util.module_from_spec(relay_spec)
+        relay_spec.loader.exec_module(relay_module)
+        relay_tests = {name for name in dir(relay_module.TestSubscriptionExactRelay) if name.startswith("test_")}
+        assert "test_non_streaming_relay_preserves_end_to_end_headers" in relay_tests, (
+            "the subscription exemption requires a live wire observation; without it the exemption is decoration"
         )
 
         # The expected set covers every route *except* the exempt set.
@@ -1877,7 +1896,7 @@ class TestTheBoundaryBetweenHookAndWireIsPinned:
             f"{sorted(_EXPECTED_SETS)} exempt={sorted(_WIRE_OBSERVED_ELSEWHERE)} "
             f"routes={sorted(_ROUTE_IDS)}"
         )
-        assert frozenset({"bedrock"}) == _WIRE_OBSERVED_ELSEWHERE, (
+        assert frozenset({"anthropic_subscription", "bedrock"}) == _WIRE_OBSERVED_ELSEWHERE, (
             "a custom-transport adapter cannot join the exemption set "
             "without a wire observation of its own; if it did, this "
             f"guard would fail it. Got {_WIRE_OBSERVED_ELSEWHERE}"

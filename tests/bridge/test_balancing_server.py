@@ -912,7 +912,9 @@ class TestBalancingAllCustomTransport:
         # the exemption rows in tests/exemptions.py.
         draw = iter(chain([0], repeat(1)))
 
-        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+        def _deterministic_draw(
+            self=server, *, require_streaming: bool = False, require_subscription: bool = False
+        ):
             """Serve the scripted order: the non-stream backend first, then the stream-capable one."""
             idx = next(draw)
             provider, key, profile = self._backends[idx]
@@ -1144,7 +1146,9 @@ class TestBalancingAllCustomTransport:
         # chain([0], repeat(1)) pattern).
         draw = iter(chain([0], repeat(1)))
 
-        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+        def _deterministic_draw(
+            self=server, *, require_streaming: bool = False, require_subscription: bool = False
+        ):
             idx = next(draw)
             provider, key, profile = self._backends[idx]
             return provider, key, profile.model, profile.provider_config or {}, idx
@@ -1184,7 +1188,9 @@ class TestBalancingAllCustomTransport:
         backends, server, stream_provider = self._sibling_pool(self._fake_hello_cc_stream)
         draw = iter(chain([0], repeat(1)))
 
-        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+        def _deterministic_draw(
+            self=server, *, require_streaming: bool = False, require_subscription: bool = False
+        ):
             idx = next(draw)
             provider, key, profile = self._backends[idx]
             return provider, key, profile.model, profile.provider_config or {}, idx
@@ -1216,7 +1222,9 @@ class TestBalancingAllCustomTransport:
         backends, server, stream_provider = self._sibling_pool(self._fake_hello_cc_stream)
         draw = iter(chain([0], repeat(1)))
 
-        def _deterministic_draw(self=server, *, require_streaming: bool = False):
+        def _deterministic_draw(
+            self=server, *, require_streaming: bool = False, require_subscription: bool = False
+        ):
             idx = next(draw)
             provider, key, profile = self._backends[idx]
             return provider, key, profile.model, profile.provider_config or {}, idx

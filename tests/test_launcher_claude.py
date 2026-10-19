@@ -111,6 +111,62 @@ class TestClaudeAdapterSpawnConfig:
 
         assert "ANTHROPIC_AUTH_TOKEN" not in config.env_clear
 
+    def test_subscription_profile_keeps_claude_code_oauth_environment(self):
+        """Subscription launch must not replace Claude Code's local OAuth session."""
+        adapter = ClaudeAdapter()
+        profile = Profile(
+            name="subscription",
+            provider="anthropic_subscription",
+            model="claude-opus",
+            auth_ref=str(uuid.uuid4()),
+        )
+
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="")
+
+        assert config.env_overrides["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
+        # Claude Code merges a --settings env block per variable, so an
+        # omitted key would leave a user-scope value standing. The session
+        # view pins both empty — and only there: the child process env must
+        # not carry the keys at all.
+        assert config.settings_env["ANTHROPIC_API_KEY"] == ""
+        assert config.settings_env["ANTHROPIC_AUTH_TOKEN"] == ""
+        assert "ANTHROPIC_API_KEY" not in config.env_overrides
+        assert "ANTHROPIC_AUTH_TOKEN" not in config.env_overrides
+        assert "ANTHROPIC_API_KEY" in config.env_clear
+        assert "ANTHROPIC_AUTH_TOKEN" in config.env_clear
+
+    def test_subscription_session_file_pins_credential_keys_empty(self, tmp_path):
+        """The session file overrides user-scope credential keys with empty.
+
+        Claude Code merges ``--settings`` per variable against user scope, so
+        a user's ``~/.claude/settings.json`` API key would survive an omitted
+        key and flip the launch to API-key identity. Pinning empty strings in
+        the session file — which outranks user scope — makes the subscription
+        launch authoritative that no key participates.
+        """
+        import json
+
+        adapter = ClaudeAdapter()
+        profile = Profile(
+            name="subscription",
+            provider="anthropic_subscription",
+            model="claude-opus",
+            auth_ref=str(uuid.uuid4()),
+        )
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="")
+
+        from pathlib import Path
+
+        # The launcher merges the settings view over the process-env view.
+        settings_view = {**config.env_overrides, **config.settings_env}
+        session_file = adapter.prepare_launch(settings_view, settings_path=tmp_path)
+        written = json.loads(Path(str(session_file)).read_text(encoding="utf-8"))
+        Path(str(session_file)).unlink()
+
+        assert written["env"]["ANTHROPIC_API_KEY"] == ""
+        assert written["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+        assert written["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
+
 
 class TestClaudeAdapterContextTokens:
     """build_spawn_config propagates the resolved context window (R5)."""

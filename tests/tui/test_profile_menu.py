@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from kitty.auth.claude_subscription import ClaudeSubscriptionStatus
 from kitty.auth.oauth_session import OAuthSession
 from kitty.credentials.file_backend import FileBackend
 from kitty.credentials.store import CredentialStore
@@ -779,6 +780,33 @@ def _mock_run_oauth_for_provider(session: OAuthSession):
 
 
 class TestCreateProfileFlowOAuth:
+    def test_anthropic_subscription_checks_local_session_not_key_prompt(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        """Create a tokenless profile from the existing Claude Code session."""
+        from kitty.auth.claude_subscription import ClaudeSubscriptionStatus
+
+        create = _import_create_profile_flow()
+        with (
+            patch(
+                "kitty.cli.profile_cmd.SelectionMenu.show",
+                return_value=PROVIDER_LABELS["anthropic_subscription"],
+            ),
+            patch(
+                "kitty.auth.claude_subscription.read_claude_subscription_status",
+                return_value=ClaudeSubscriptionStatus(True, "pilot@example.test", "max", None),
+            ) as status_reader,
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["claude-opus", "subscription-profile"]),
+            patch("kitty.cli.profile_cmd.prompt_confirm", side_effect=[True, False]),
+            patch("kitty.cli.profile_cmd.prompt_secret") as prompt_secret,
+        ):
+            profile = create(store, cred_store)
+
+        assert profile.provider == "anthropic_subscription"
+        assert cred_store.get(profile.auth_ref) is None
+        status_reader.assert_called_once_with()
+        prompt_secret.assert_not_called()
+
     def test_oauth_provider_skips_api_key_prompt(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """When provider requires OAuth, no API key prompt appears; OAuth flow runs instead."""
         create = _import_create_profile_flow()
@@ -812,6 +840,27 @@ class TestCreateProfileFlowOAuth:
             profile = create(store, cred_store)
 
         assert profile.model == "gpt-5.3-codex"
+
+    def test_anthropic_subscription_uses_default_model(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        """The subscription prompt offers a Claude default, not the OpenRouter example."""
+        from kitty.auth.claude_subscription import ClaudeSubscriptionStatus
+
+        create = _import_create_profile_flow()
+        with (
+            patch(
+                "kitty.cli.profile_cmd.SelectionMenu.show",
+                return_value=PROVIDER_LABELS["anthropic_subscription"],
+            ),
+            patch(
+                "kitty.auth.claude_subscription.read_claude_subscription_status",
+                return_value=ClaudeSubscriptionStatus(True, "pilot@example.test", "max", None),
+            ),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["", "subscription-profile"]),
+            patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
+        ):
+            profile = create(store, cred_store)
+
+        assert profile.model == "claude-sonnet-4-6"
 
     def test_oauth_provider_session_file_is_accessible(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """Credential store holds a path to an existing session file for OAuth profiles."""
@@ -880,6 +929,121 @@ class TestEditProfileFlowOAuth:
         assert saved is not None
         assert saved.model == "new-model"
         assert saved.auth_ref == old_auth_ref
+
+
+class TestEditProfileFlowSubscription:
+    """A subscription profile's edit flow re-checks the session, never a key.
+
+    The credential option must not offer an API-key prompt: a subscription
+    profile's ``auth_ref`` is a placeholder no launch path resolves, so a
+    stored key would be dead weight. The session lives in Claude Code; the
+    edit flow can only verify it.
+    """
+
+    def _subscription_profile(self, name: str = "sub-prof") -> Profile:
+        return _make_profile(name, provider="anthropic_subscription", model="claude-sonnet-4-6")
+
+    def test_offers_session_recheck_instead_of_api_key(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        """The edit menu names the session re-check, not an API key."""
+        edit = _import_edit_profile_flow()
+        store.save(self._subscription_profile())
+
+        with patch("kitty.cli.profile_cmd.SelectionMenu") as menu_cls:
+            menu_cls.return_value.show.return_value = None  # cancel at the menu
+            edit(store, cred_store, "sub-prof")
+
+        options = menu_cls.call_args.args[1]
+        assert "Re-check Claude Code session" in options
+        assert "API Key" not in options
+
+    def test_unavailable_session_aborts_without_changes(self, store: ProfileStore, cred_store: CredentialStore) -> None:
+        """A failed re-check changes nothing and prompts for no key."""
+        edit = _import_edit_profile_flow()
+        p = self._subscription_profile()
+        store.save(p)
+        status = ClaudeSubscriptionStatus(
+            available=False, email=None, subscription_type=None, reason="Claude Code is not signed in."
+        )
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Re-check Claude Code session"),
+            patch(
+                "kitty.auth.claude_subscription.read_claude_subscription_status",
+                return_value=status,
+            ) as mock_reader,
+            patch("kitty.cli.profile_cmd.prompt_secret") as mock_secret,
+            patch.object(CredentialStore, "set") as mock_set,
+        ):
+            edit(store, cred_store, "sub-prof")
+
+        # The re-check arm itself ran — a vacuous pass here would hide a
+        # regression that silently ignores the selection.
+        mock_reader.assert_called_once()
+        saved = store.get("sub-prof")
+        assert saved is not None
+        assert saved.auth_ref == p.auth_ref
+        assert saved.model == p.model
+        mock_secret.assert_not_called()
+        mock_set.assert_not_called()
+
+    def test_available_session_recheck_keeps_auth_ref_and_stores_nothing(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        """A verified session is reported; no store write and no key rotation."""
+        edit = _import_edit_profile_flow()
+        p = self._subscription_profile()
+        store.save(p)
+        status = ClaudeSubscriptionStatus(available=True, email="a@b.c", subscription_type="max", reason=None)
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Re-check Claude Code session"),
+            patch(
+                "kitty.auth.claude_subscription.read_claude_subscription_status",
+                return_value=status,
+            ) as mock_reader,
+            patch("kitty.cli.profile_cmd.prompt_secret") as mock_secret,
+            patch.object(CredentialStore, "set") as mock_set,
+        ):
+            edit(store, cred_store, "sub-prof")
+
+        mock_reader.assert_called_once()
+        saved = store.get("sub-prof")
+        assert saved is not None
+        assert saved.auth_ref == p.auth_ref
+        mock_secret.assert_not_called()
+        mock_set.assert_not_called()
+
+    def test_both_with_failed_recheck_aborts_before_the_model_prompt(
+        self, store: ProfileStore, cred_store: CredentialStore
+    ) -> None:
+        """'Both' runs the re-check first: a failed check discards no typed input."""
+        edit = _import_edit_profile_flow()
+        p = self._subscription_profile()
+        store.save(p)
+        status = ClaudeSubscriptionStatus(
+            available=False, email=None, subscription_type=None, reason="Claude Code is not signed in."
+        )
+
+        with (
+            patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value="Both"),
+            patch(
+                "kitty.auth.claude_subscription.read_claude_subscription_status",
+                return_value=status,
+            ) as mock_reader,
+            patch("kitty.cli.profile_cmd.prompt_text") as mock_text,
+            patch("kitty.cli.profile_cmd.prompt_secret") as mock_secret,
+            patch.object(CredentialStore, "set") as mock_set,
+        ):
+            edit(store, cred_store, "sub-prof")
+
+        mock_reader.assert_called_once()
+        mock_text.assert_not_called()
+        mock_secret.assert_not_called()
+        mock_set.assert_not_called()
+        saved = store.get("sub-prof")
+        assert saved is not None
+        assert saved.auth_ref == p.auth_ref
+        assert saved.model == p.model
 
 
 # ---------------------------------------------------------------------------

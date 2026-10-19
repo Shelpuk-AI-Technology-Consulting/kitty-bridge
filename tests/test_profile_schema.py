@@ -116,6 +116,7 @@ class TestProfileProviderValidation:
             "openai",
             "openrouter",
             "anthropic",
+            "anthropic_subscription",
             "bedrock",
             "azure",
             "vertex",
