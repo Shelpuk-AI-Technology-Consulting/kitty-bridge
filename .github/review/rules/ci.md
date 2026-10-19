@@ -1,8 +1,8 @@
 # Rule: CI and the review system (`.github/**`)
 
-This directory contains six workflows — `claude-code-review.yml`, `ci.yml`,
-`tests.yml`, `publish.yml`, `model-metadata.yml` and `tmux-disconnect.yml` — plus the
-review system that
+This directory contains seven workflows — `claude-code-review.yml`, `ci.yml`,
+`tests.yml`, `publish.yml`, `model-metadata.yml`, `tmux-disconnect.yml` and
+`mutation-remeasure.yml` — plus the review system that
 `claude-code-review.yml` drives. (The files are **named** rather than counted: a
 count in prose is wrong the moment the next one lands, silently, and nothing
 checks it. A guard holds this list to the recorded set — which is also why the
@@ -27,6 +27,14 @@ Their division of labour is the thing to hold when reviewing a change here:
   checkout with the organisation's kitty credentials, so its egress guarantee is
   a firewall scoped to its test user, not kitty's resolver. Weakening that
   firewall, its self-check, or the job's fork guard is a critical finding.
+- **`mutation-remeasure.yml`** is the manual tool that records the mutation
+  baseline (KBR-272, `TEST_SUITE.md` §8). `workflow_dispatch` with a scope-group
+  input — a single `mutmut run` on `ubuntu-latest` that uploads the `mutants/`
+  tree as an artifact. It is **not** a gate: nothing here calls it; the nightly
+  schedule and per-group thresholds are KBR-91's scope. Its 300-minute cap is
+  sized against KBR-266's recorded numbers in the workflow's own comment.
+  Adding it to `ci-required`'s `needs:` would make every pull request wait on a
+  mutation run — flag such a move.
 
 **The reviewer is reviewing itself here**, so the bar is higher, not lower: a
 defect in this tree degrades or disables review across the repository without

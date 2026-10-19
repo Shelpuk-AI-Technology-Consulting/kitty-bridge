@@ -45,6 +45,9 @@ from kitty.tui.display import print_info
 # neither, and ascii is the floor. Testing only cp1252 would miss that
 # `kitty --version` crashes, because cp1252 happens to contain the one character
 # the banner needs.
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 HOSTILE_ENCODINGS = ("cp1252", "cp437", "ascii")
 
 # Every command a non-interactive caller can reach. `--version` and `--help` are

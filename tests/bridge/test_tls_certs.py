@@ -33,6 +33,9 @@ from .tls_certs import generate_self_signed_cert
 
 # Distinctive enough that finding it in a failure message proves the helper
 # passed openssl's own diagnostics through rather than inventing a summary.
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 _STDERR_SENTINEL = "problems making Certificate Request"
 
 

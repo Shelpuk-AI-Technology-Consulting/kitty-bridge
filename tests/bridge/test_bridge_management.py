@@ -28,6 +28,9 @@ from kitty.bridge.state import BridgeState, write_state
 # ---------------------------------------------------------------------------
 
 
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 class TestBridgeManagementHelpers:
     """Tests for management logic that uses the state file."""
 
