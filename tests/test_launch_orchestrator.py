@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 import sys
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -412,6 +415,216 @@ class _RecordingLauncher(StubLauncher):
         """Record the kwarg, then build the normal stub spawn config."""
         self.seen_context_tokens.append(context_tokens)
         return super().build_spawn_config(profile, bridge_port, resolved_key, context_tokens=context_tokens)
+
+
+# ── Test: balancing-pool spawn identity ─────────────────────────────────────
+
+
+@contextlib.contextmanager
+def _capture_child_env() -> Iterator[tuple[list[dict[str, str]], list[dict]]]:
+    """Capture the environment and session settings of the spawned child process.
+
+    Yields:
+        The lists that receive each spawned child's environment and the content
+        of the session settings file it was pointed at, if any.
+    """
+    spawned: list[dict[str, str]] = []
+    settings_seen: list[dict] = []
+
+    async def _record(*cmd, **kwargs):
+        """Capture the child environment and settings file, return a completed child.
+
+        Args:
+            *cmd: Child command arguments.
+            **kwargs: Process keyword arguments including environment.
+
+        Returns:
+            Completed child process stand-in.
+        """
+        spawned.append(kwargs["env"])
+        # The session settings file is deleted once the child exits, so read
+        # it while the child is being spawned.
+        args = [str(arg) for arg in cmd]
+        if "--settings" in args:
+            settings_path = Path(args[args.index("--settings") + 1])
+            settings_seen.append(json.loads(settings_path.read_text()))
+        proc = MagicMock()
+
+        async def _wait() -> int:
+            """Return a successful child status.
+
+            Returns:
+                Zero exit status.
+            """
+            return 0
+
+        proc.wait = _wait
+        proc.pid = 4242
+        proc.returncode = 0
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=_record):
+        yield spawned, settings_seen
+
+
+def _subscription_member() -> tuple[ProviderAdapter, str, Profile]:
+    """Build the Anthropic subscription member of a balancing pool.
+
+    Returns:
+        The backend tuple (provider, key, profile) of a subscription member.
+    """
+    from kitty.providers.anthropic_subscription import AnthropicSubscriptionAdapter
+
+    profile = Profile(
+        name="subscription",
+        provider="anthropic_subscription",
+        model="claude-opus-5-5",
+        auth_ref=str(uuid.uuid4()),
+    )
+    return AnthropicSubscriptionAdapter(), "", profile
+
+
+class TestMixedPoolSubscriptionSpawnIdentity:
+    """A pool carrying a subscription member spawns the agent with its own identity.
+
+    The raw subscription relay forwards the child's own credentials to Anthropic
+    (KBR-319). A child launched with a synthetic ``ANTHROPIC_API_KEY`` /
+    ``ANTHROPIC_AUTH_TOKEN`` therefore sends those placeholders to Anthropic,
+    which rejects them with 401 — and a pool has no other subscription member
+    to fail over to.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mixed_pool_spawns_without_synthetic_credentials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A pool with a subscription member spawns no synthetic credential variables."""
+        from kitty.cli.launcher import launch_async
+
+        # A leaked parent value must not survive either: the subscription spawn
+        # clears both credential variables, inherited ones included.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "parent-leak")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "parent-leak")
+        api_profile = _make_profile()
+        backends = [(StubProvider(), "sk-first-key", api_profile), _subscription_member()]
+        cred_store = _make_cred_store("sk-first-key")
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            _capture_child_env() as (spawned, settings_seen),
+        ):
+            exit_code = await launch_async(
+                adapter=ClaudeAdapter(),
+                provider=StubProvider(),
+                profile=api_profile,
+                cred_store=cred_store,
+                extra_args=[],
+                validate=False,
+                backends=backends,
+            )
+
+        assert exit_code == 0
+        # The first member's credential is still resolved for the launch itself
+        # (validation, egress) even though the child env must not carry it.
+        cred_store._backends[0].get.assert_called()
+        assert "ANTHROPIC_API_KEY" not in spawned[0]
+        assert "ANTHROPIC_AUTH_TOKEN" not in spawned[0]
+        # The session settings file outranks the process env for Claude Code,
+        # so it must pin both variables empty rather than omit them.
+        assert settings_seen[0]["env"]["ANTHROPIC_API_KEY"] == ""
+        assert settings_seen[0]["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+
+    @pytest.mark.asyncio
+    async def test_subscription_first_pool_matches_direct_launch(self):
+        """A pool led by its subscription member spawns exactly that identity."""
+        from kitty.cli.launcher import launch_async
+
+        api_profile = _make_profile()
+        backends = [_subscription_member(), (StubProvider(), "sk-first-key", api_profile)]
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            _capture_child_env() as (spawned, _settings_seen),
+        ):
+            exit_code = await launch_async(
+                adapter=ClaudeAdapter(),
+                provider=StubProvider(),
+                profile=api_profile,
+                cred_store=_make_cred_store("sk-first-key"),
+                extra_args=[],
+                validate=False,
+                backends=backends,
+            )
+
+        assert exit_code == 0
+        assert "ANTHROPIC_API_KEY" not in spawned[0]
+        assert "ANTHROPIC_AUTH_TOKEN" not in spawned[0]
+        assert spawned[0]["ANTHROPIC_MODEL"] == "claude-opus-5-5"
+
+    @pytest.mark.asyncio
+    async def test_non_claude_adapter_ignores_subscription_member(self):
+        """Only a Claude launch switches spawn identity to a subscription member."""
+        from kitty.cli.launcher import launch_async
+
+        class _ProfileRecordingLauncher(StubLauncher):
+            """StubLauncher that records the profile handed to build_spawn_config."""
+
+            def __init__(self):
+                """Initialize the protocol default and the recording list."""
+                super().__init__()
+                self.seen_profiles: list[Profile] = []
+
+            def build_spawn_config(self, profile, bridge_port, resolved_key, *, context_tokens=None):
+                """Record the profile, then build the normal stub spawn config."""
+                self.seen_profiles.append(profile)
+                return super().build_spawn_config(profile, bridge_port, resolved_key, context_tokens=context_tokens)
+
+        api_profile = _make_profile()
+        launcher = _ProfileRecordingLauncher()
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            _capture_child_env() as (_spawned, _settings_seen),
+        ):
+            exit_code = await launch_async(
+                adapter=launcher,
+                provider=StubProvider(),
+                profile=api_profile,
+                cred_store=_make_cred_store("sk-first-key"),
+                extra_args=[],
+                validate=False,
+                backends=[(StubProvider(), "sk-first-key", api_profile), _subscription_member()],
+            )
+
+        assert exit_code == 0
+        # The launch profile, not the pool's subscription member.
+        assert launcher.seen_profiles[0] is api_profile
+
+    @pytest.mark.asyncio
+    async def test_api_key_pool_keeps_synthetic_credentials(self):
+        """A pool without a subscription member keeps the first member's credential."""
+        from kitty.cli.launcher import launch_async
+
+        api_profile = _make_profile()
+        backends = [(StubProvider(), "sk-first-key", api_profile)]
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            _capture_child_env() as (spawned, _settings_seen),
+        ):
+            exit_code = await launch_async(
+                adapter=ClaudeAdapter(),
+                provider=StubProvider(),
+                profile=api_profile,
+                cred_store=_make_cred_store("sk-first-key"),
+                extra_args=[],
+                validate=False,
+                backends=backends,
+            )
+
+        assert exit_code == 0
+        assert spawned[0]["ANTHROPIC_API_KEY"] == "sk-first-key"
+        assert spawned[0]["ANTHROPIC_AUTH_TOKEN"] == "kitty-bridge-token"
 
 
 class TestLaunchPassesContextTokens:

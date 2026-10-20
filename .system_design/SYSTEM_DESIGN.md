@@ -2460,7 +2460,24 @@ egress, bridge creation, or child spawn. A subscription Claude launch sets no `A
 and no `ANTHROPIC_AUTH_TOKEN` (and clears both from the child environment; the session settings file
 additionally pins both empty, because Claude Code merges `--settings` per variable against user
 scope and an omitted key would let a user-scope value — direct Claude Code API use — stand);
-API-key profile launches keep setting them. For a non-Claude balancing launch, Kitty excludes
+API-key profile launches keep setting them. The same rule governs a Claude-launched balancing
+pool: if the pool contains an `anthropic_subscription` member, `launch_async` builds the spawn
+configuration from the first such member's profile instead of the launch (first-member) profile,
+so the child presents Claude Code's own OAuth identity and the relay forwards real credentials,
+not the synthetic first-member key and placeholder token. The switch is gated on the Claude
+adapter (the same condition that arms the relay), so no other launcher can pick up a subscription
+profile even if a caller hands it one. The child's credentials never authenticate a
+non-subscription member — the translated path builds upstream headers from each member's own
+resolved key — so this is purely an identity switch with one accepted cosmetic effect:
+`ANTHROPIC_MODEL` and the default-model aliases hint the subscription member's model rather than
+the first member's (the bridge still rewrites the request model per selected backend, so routing
+is unaffected). The trade's known failure mode: a mixed pool now rests on a live Claude Code
+session. With an expired or absent session the child either fails with Claude Code's own login
+error, or its token-less request 401s at Anthropic and parks the subscription member as `auth` —
+the terminal 503 then speaks the credential-rejection headline, whose remediation is
+`claude /login`, not a key change (pre-fix, the pool's API-key members still served most
+requests). Recording a subscription-aware headline for that terminal is a deliberate non-goal
+here. For a non-Claude balancing launch, Kitty excludes
 subscription members before it constructs backend state; remaining members keep their configured
 order and backup flags. No remaining member is a configuration error, not a fallback to an
 unapproved provider. A Claude-launched mixed pool may retry or fail over a raw subscription request
@@ -2472,8 +2489,8 @@ once, validates only enough to return the normal invalid-JSON response, then pos
 using `data=`. It does not call model normalization, a translator, compaction, truncation, provider
 normalization, synthetic upstream authentication, or token refresh. End-to-end incoming headers —
 including Claude Code's OAuth `Authorization`, `anthropic-beta`, `anthropic-version`, and any
-incoming `x-api-key` — retained when Claude Code sent it; only synthetic injection is forbidden,
-and Kitty never injects `x-api-key`. Authority/Host,
+incoming `x-api-key`, retained when Claude Code sent it — pass through untouched; only synthetic
+injection is forbidden, and Kitty never injects `x-api-key`. Authority/Host,
 hop-by-hop headers, and HTTP length/framing are the sole exceptions: they cannot survive the
 localhost-to-Anthropic hop and aiohttp regenerates them. The raw relay is not available through Chat
 Completions, Responses, or Gemini ingress.
@@ -2516,6 +2533,16 @@ every balancing member.
 - **Filter a balancing pool before all startup work.** Reading excluded credentials or using an
   excluded first member for the spawn configuration would violate the Claude-only policy even if
   random selection later skipped it.
+- **Spawn a mixed pool from its subscription member's profile.** One child process presents one
+  credential set, and the raw relay forwards exactly what the child sent: a synthetic
+  `ANTHROPIC_AUTH_TOKEN` and a member API key would reach Anthropic and be rejected with 401,
+  parking the member for 900 s — commonly with no other subscription member in the pool to fail
+  over to — a 503 for the client while eight healthy members sat unused. The alternative
+  (injecting the stored credential) is unavailable by construction: Kitty never stores or
+  refreshes OAuth material, so Claude Code's own session is the only identity the subscription
+  member can present. Building the spawn config from the subscription member therefore keeps one
+  rule — "a subscription launch presents Claude Code's identity" — instead of a second,
+  pool-specific auth path in the relay.
 - **Keep raw subscription attempts inside their own balancing subset.** The raw OAuth request has no
   permitted translation/authentication fallback. Allowing it to fail over to an ordinary member
   would silently abandon the byte-exact subscription contract, so a mixed Claude pool can only
@@ -2535,5 +2562,6 @@ every balancing member.
   then exercise subscription-only cooldown/failover, 429 retry hints, entitlement, recovery
   through BridgeServer, and the pre-emission timeout's 504/no-park/no-failover semantics.
 - The step records are `.system_design/steps/kbr319_subscription_profile.md`,
-  `kbr319_launcher_eligibility.md`, `kbr319_exact_messages_relay.md`, and
-  `kbr319_subscription_health.md`; each receives implementation notes when its stage lands.
+  `kbr319_launcher_eligibility.md`, `kbr319_exact_messages_relay.md`,
+  `kbr319_subscription_health.md`, and `balancing_subscription_spawn_identity.md`; each receives
+  implementation notes when its stage lands.
