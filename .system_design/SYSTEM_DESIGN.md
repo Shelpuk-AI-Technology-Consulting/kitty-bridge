@@ -2476,13 +2476,20 @@ than cosmetic: `ANTHROPIC_MODEL` and the default-model aliases now hint the subs
 model. On the translated path the hint is inert — the bridge rewrites the request model to the
 selected backend's — but the raw relay posts the child's bytes unchanged and never normalizes the
 model, so on that path the hint is what determines the model Anthropic receives; that is exactly
-why it had to move. The trade's known failure mode: a mixed pool now rests on a live Claude Code
+why it had to move. A pool that lists several `anthropic_subscription` members hints the first
+one's model: those members share the one session identity, and on the raw path the model travels
+inside the forwarded bytes, so a later member's differing model cannot be honoured — pool
+subscription members should agree on a model. The trade's known failure mode: a mixed pool now
+rests on a live Claude Code
 session. With an expired or absent session the child either fails with Claude Code's own login
 error — in which case no request reaches the bridge at all — or its token-less request 401s at
 Anthropic and parks the subscription member as `auth` —
 the terminal 503 then speaks the credential-rejection headline, whose remediation is
 `claude auth login`, not a key change (pre-fix, the pool's API-key members still served most
-requests). Recording a subscription-aware headline for that terminal is a deliberate non-goal
+requests). The park does not end when the user signs in again: an `auth` park runs a fixed 900 s
+cooldown that only expiry clears, so after `claude auth login` the member rejoins the pool only
+when that cooldown lapses, and the API-key members keep serving until then. Recording a
+subscription-aware headline for that terminal is a deliberate non-goal
 here. For a non-Claude balancing launch, Kitty excludes
 subscription members before it constructs backend state; remaining members keep their configured
 order and backup flags. No remaining member is a configuration error, not a fallback to an

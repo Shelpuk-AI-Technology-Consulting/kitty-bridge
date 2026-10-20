@@ -467,8 +467,11 @@ def _capture_child_env() -> Iterator[tuple[list[dict[str, str]], list[dict]]]:
         yield spawned, settings_seen
 
 
-def _subscription_member() -> tuple[ProviderAdapter, str, Profile]:
-    """Build the Anthropic subscription member of a balancing pool.
+def _subscription_member(model: str = "claude-opus-5-5") -> tuple[ProviderAdapter, str, Profile]:
+    """Build an Anthropic subscription member of a balancing pool.
+
+    Args:
+        model: The model the member's profile carries.
 
     Returns:
         The backend tuple (provider, key, profile) of a subscription member.
@@ -478,7 +481,7 @@ def _subscription_member() -> tuple[ProviderAdapter, str, Profile]:
     profile = Profile(
         name="subscription",
         provider="anthropic_subscription",
-        model="claude-opus-5-5",
+        model=model,
         auth_ref=str(uuid.uuid4()),
     )
     return AnthropicSubscriptionAdapter(), "", profile
@@ -641,6 +644,42 @@ class TestMixedPoolSubscriptionSpawnIdentity:
         assert exit_code == 0
         assert spawned[0]["ANTHROPIC_API_KEY"] == "sk-first-key"
         assert spawned[0]["ANTHROPIC_AUTH_TOKEN"] == "kitty-bridge-token"
+
+    @pytest.mark.asyncio
+    async def test_two_subscription_members_hint_follows_the_first(self):
+        """Several subscription members share one session: the hint follows the first.
+
+        The raw relay forwards the child's bytes, so every subscription member
+        receives the model the child formed. A second member with a different
+        model therefore cannot be honoured — a documented limitation, pinned
+        here so it stays deliberate.
+        """
+        from kitty.cli.launcher import launch_async
+
+        api_profile = _make_profile()
+        backends = [
+            (StubProvider(), "sk-first-key", api_profile),
+            _subscription_member(),
+            _subscription_member(model="claude-sonnet-5-5"),
+        ]
+
+        with (
+            patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
+            _capture_child_env() as (spawned, _settings_seen),
+        ):
+            exit_code = await launch_async(
+                adapter=ClaudeAdapter(),
+                provider=StubProvider(),
+                profile=api_profile,
+                cred_store=_make_cred_store("sk-first-key"),
+                extra_args=[],
+                validate=False,
+                backends=backends,
+            )
+
+        assert exit_code == 0
+        # The first subscription member's model, not the second's.
+        assert spawned[0]["ANTHROPIC_MODEL"] == "claude-opus-5-5"
 
 
 class TestLaunchPassesContextTokens:

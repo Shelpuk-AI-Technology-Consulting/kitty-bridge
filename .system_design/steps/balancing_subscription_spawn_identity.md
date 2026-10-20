@@ -62,7 +62,7 @@ Implemented 2026-10-20 on `fix/balancing-subscription-spawn-identity`.
   member still uses the API-key-dialect headline; a subscription-aware headline
   (remediation `claude auth login`) was recorded in SYSTEM_DESIGN.md §16.1 as a
   deliberate non-goal of this stage.
-- Review rounds (CI bot, two rounds): credential now travels with the spawn
+- Review rounds (CI bot, four rounds): credential now travels with the spawn
   profile (`_select_spawn_profile` returns the pair, so a subscription member
   never carries the first member's key into `build_spawn_config`); the
   subscription-led test launches with the subscription profile itself — the only
@@ -70,3 +70,10 @@ Implemented 2026-10-20 on `fix/balancing-subscription-spawn-identity`.
   test also asserts the model hint; README documents the pool behavior; the
   pre-fix credential is recorded as the first member's real API key (only the
   auth token was synthetic), and the remedy wording is `claude auth login`.
+- Two further limits are recorded rather than fixed: a pool listing several
+  subscription members hints the first one's model (on the raw path the model
+  travels inside the forwarded bytes, so a later member's differing model cannot
+  be honoured — the L1 test `test_two_subscription_members_hint_follows_the_first`
+  pins it), and an `auth` park is a fixed 900 s cooldown that only expiry
+  clears, so `claude auth login` does not put the member back into the pool
+  immediately.
