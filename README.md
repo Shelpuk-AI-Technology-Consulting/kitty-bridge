@@ -163,13 +163,14 @@ $ kitty claude
 No API key required — kitty authenticates with your ChatGPT Plus or Pro account through a browser-based OAuth flow. Each
 profile gets its own independent session.
 
-Like the Claude path below, the Model value is passed through to Codex with your ChatGPT sign-in, and OpenAI rotates that
-list independently of Kitty releases — `gpt-5.3-codex` (the wizard's suggested default), `gpt-5.4` and `gpt-5.5` have all
-retired from it. Current ids at the time of writing: `gpt-6-sol` and `gpt-6-luna` from the GPT-6 generation, plus the
-still-served GPT-5.6 mid-tier `gpt-5.6-terra` — OpenAI's "balance of capability, speed, and cost for everyday work" —
-each tier with a `-pro` variant on Pro subscriptions, and the
-[Astra models](#using-gpt-6-astra-with-your-subscription) documented below. When a name is rejected, the model picker in
-the ChatGPT UI — or `codex` itself — shows the exact live list.
+Like the Claude path below, the Model value goes to Codex with your ChatGPT sign-in (Kitty strips a `vendor/` prefix if
+you typed one), and OpenAI rotates that list independently of Kitty releases — `gpt-5.3-codex` (the wizard's suggested
+default), `gpt-5.4` and `gpt-5.5` have all retired from it. Current ids at the time of writing: `gpt-6-sol`,
+`gpt-6-luna` and the newer `gpt-6.1-sol` from the GPT-6 generation, plus the still-served GPT-5.6 mid-tier
+`gpt-5.6-terra` — OpenAI's ["balance of capability, speed, and cost for everyday
+work"](https://help.openai.com/en/articles/20001354-gpt-6-and-other-models-in-chatgpt) — each tier with a `-pro` variant
+on Pro subscriptions, and the [Astra models](#using-gpt-6-astra-with-your-subscription) documented below. When a name is
+rejected, the model picker in the ChatGPT UI — or `codex` itself — shows the exact live list.
 
 ### Example: Use your Claude subscription with Claude Code
 
@@ -190,11 +191,13 @@ stores your OAuth token. This profile works **only with Claude Code**: Kitty rel
 exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
 rejected subscription account cools down like any other backend and recovers automatically.
 
-The subscription profile relays your request to Anthropic **exactly as typed**, so the Model value must be the exact
-Anthropic model id — dash-separated, no vendor prefix. Current ids: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5`
-(Sonnet 5.5) and `claude-haiku-5-5` (Haiku 5.5); the wizard's suggested default, `claude-sonnet-4-6`, is the previous
-generation and still served. The `vendor/model` names from other providers' catalogs (e.g. `anthropic/claude-opus-5.5`)
-are not valid here, and neither is the dot form — a wrong id is rejected with a model-not-found error.
+The subscription profile hands your Model value to Anthropic after Kitty normalises it — a `vendor/` prefix is dropped
+and dots become dashes — so the catalog names (e.g. `anthropic/claude-opus-5.5`) and the dot form both reach Anthropic
+as the same id. What the value must still do is name a model Anthropic serves; anything else is rejected with a
+model-not-found error. Current ids: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5` (Sonnet 5.5) and
+`claude-haiku-5-5` (Haiku 5.5); the wizard's suggested default, `claude-sonnet-4-6`, is the previous generation and
+still served. The canonical dash-separated id is still what to type — it is the form Anthropic documents, and it
+removes one variable when a request fails.
 
 ### ChatGPT subscription on a remote or headless machine
 
