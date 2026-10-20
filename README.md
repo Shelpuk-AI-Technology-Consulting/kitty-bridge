@@ -165,7 +165,9 @@ profile gets its own independent session.
 
 Like the Claude path below, the Model value is passed through to Codex with your ChatGPT sign-in, and OpenAI rotates that
 list independently of Kitty releases — `gpt-5.3-codex` (the wizard's suggested default), `gpt-5.4` and `gpt-5.5` have all
-retired from it. Current ids at the time of writing: `gpt-6-sol` (frontier) and `gpt-6-luna` (lighter), with the
+retired from it. Current ids at the time of writing: `gpt-6-sol` and `gpt-6-luna` from the GPT-6 generation, plus the
+still-served GPT-5.6 mid-tier `gpt-5.6-terra` — OpenAI's "balance of capability, speed, and cost for everyday work" —
+each tier with a `-pro` variant on Pro subscriptions, and the
 [Astra models](#using-gpt-6-astra-with-your-subscription) documented below. When a name is rejected, the model picker in
 the ChatGPT UI — or `codex` itself — shows the exact live list.
 
