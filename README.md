@@ -164,14 +164,14 @@ No API key required — kitty authenticates with your ChatGPT Plus or Pro accoun
 profile gets its own independent session.
 
 The Model value is sent to OpenAI's subscription backend (Kitty strips a `vendor/` prefix if you typed one — unlike the
-Claude subscription relay below, which is byte-for-byte), and OpenAI rotates that list independently of Kitty releases — `gpt-5.3-codex` (the wizard's suggested
-default), `gpt-5.4` and `gpt-5.5` have all retired from it. Current ids at the time of writing: `gpt-6-sol`,
-`gpt-6-luna` and the newer `gpt-6.1-sol` from the GPT-6 generation, plus the still-served GPT-5.6 generation
-`gpt-5.6-terra` (mid-tier — OpenAI's ["balance of capability, speed, and cost for everyday
-work"](https://help.openai.com/en/articles/20001354-gpt-6-and-other-models-in-chatgpt)) and `gpt-5.6-luna` (lightest),
-each tier with a `-pro` variant
-on Pro subscriptions, and the [Astra models](#using-gpt-6-astra-with-your-subscription) documented below. When a name is
-rejected, the model picker in the ChatGPT UI — or `codex` itself — shows the exact live list.
+Claude subscription relay below, which is byte-for-byte), and OpenAI rotates that list independently of Kitty releases
+— `gpt-5.3-codex` (the wizard's suggested default), `gpt-5.4` and `gpt-5.5` have all retired from it. Current ids at
+the time of writing: `gpt-6-sol`, `gpt-6-luna` and the newer `gpt-6.1-sol` from the GPT-6 generation, plus the
+still-served GPT-5.6 generation `gpt-5.6-terra` (mid-tier — OpenAI's ["balance of capability, speed, and cost for
+everyday work"](https://help.openai.com/en/articles/20001354-gpt-6-and-other-models-in-chatgpt)) and `gpt-5.6-luna`
+(lightest), each tier with a `-pro` variant on Pro subscriptions, and the
+[Astra models](#using-gpt-6-astra-with-your-subscription) documented below. When a name is rejected, the model picker
+in the ChatGPT UI — or `codex` itself — shows the exact live list.
 
 ### Example: Use your Claude subscription with Claude Code
 
