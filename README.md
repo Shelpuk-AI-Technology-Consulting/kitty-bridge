@@ -150,7 +150,7 @@ $ kitty claude
 $ pip install kitty-bridge
 $ kitty setup
   ? Provider: openai_subscription
-  ? Model: gpt-5.4
+  ? Model: gpt-6-sol
 
   Opening browser for OpenAI authentication...
 
@@ -163,13 +163,19 @@ $ kitty claude
 No API key required — kitty authenticates with your ChatGPT Plus or Pro account through a browser-based OAuth flow. Each
 profile gets its own independent session.
 
+Like the Claude path below, the Model value is passed through to Codex with your ChatGPT sign-in, and OpenAI rotates that
+list independently of Kitty releases — `gpt-5.3-codex` (the wizard's suggested default), `gpt-5.4` and `gpt-5.5` have all
+retired from it. Current ids at the time of writing: `gpt-6-sol` (frontier) and `gpt-6-luna` (lighter), with the Astra
+models documented below. When a name is rejected, the model picker in the ChatGPT UI — or `codex` itself — shows the
+exact live list.
+
 ### Example: Use your Claude subscription with Claude Code
 
 ```bash
 $ pip install kitty-bridge
 $ kitty setup
   ? Provider: Anthropic Claude.ai Subscription (Claude Code only)
-  ? Model: claude-opus
+  ? Model: claude-opus-5-5
 
 $ kitty claude
   ✓ Bridge running on port <random_port>
@@ -181,6 +187,12 @@ Sign in to Claude Code first (`claude auth login`) — Kitty checks that local s
 stores your OAuth token. This profile works **only with Claude Code**: Kitty relays Claude Code's request to Anthropic
 exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
 rejected subscription account cools down like any other backend and recovers automatically.
+
+The subscription profile relays your request to Anthropic **exactly as typed**, so the Model value must be the exact
+Anthropic model id — dash-separated, no vendor prefix. Current ids: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5`
+(Sonnet 5.5) and `claude-haiku-5-5` (Haiku 5.5); the wizard's suggested default, `claude-sonnet-4-6`, is the previous
+generation and still served. The `vendor/model` names from other providers' catalogs (e.g. `anthropic/claude-opus-5.5`)
+are not valid here, and neither is the dot form — a wrong id is rejected with a model-not-found error.
 
 ### ChatGPT subscription on a remote or headless machine
 
