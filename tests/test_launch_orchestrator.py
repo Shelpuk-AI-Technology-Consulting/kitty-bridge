@@ -535,10 +535,16 @@ class TestMixedPoolSubscriptionSpawnIdentity:
         assert settings_seen[0]["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
 
     @pytest.mark.asyncio
-    async def test_subscription_first_pool_matches_direct_launch(self):
+    async def test_subscription_first_pool_matches_direct_launch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """A pool led by its subscription member spawns exactly that identity."""
         from kitty.cli.launcher import launch_async
 
+        # Seed the parent env so the "not in env" assertions catch a dropped
+        # env_clear, not just an absent override.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "parent-leak")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "parent-leak")
         api_profile = _make_profile()
         backends = [_subscription_member(), (StubProvider(), "sk-first-key", api_profile)]
 

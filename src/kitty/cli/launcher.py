@@ -123,6 +123,39 @@ def resolve_binary(name: str) -> Path:
     return path
 
 
+def _select_spawn_profile(
+    adapter: LauncherAdapter,
+    profile: Profile,
+    backends: list[tuple[ProviderAdapter, str, Profile]] | None,
+) -> Profile:
+    """Choose the profile the child's spawn configuration is built from.
+
+    A balancing pool carrying an Anthropic subscription member spawns from
+    that member's profile (SYSTEM_DESIGN.md §16.2): the raw relay forwards
+    the child's own credentials verbatim, so a synthetic first-member key
+    would reach Anthropic and be rejected with 401, parking the member with
+    no subscription sibling to fail over to. The switch is gated on the
+    Claude adapter — the same privilege that arms the bridge's raw relay
+    (``allow_subscription_relay``); call sites filter non-Claude pools
+    before launch, so the gate is defense in depth.
+
+    Args:
+        adapter: The launcher adapter about to spawn the child.
+        profile: The launch profile (the pool's first member for balancing).
+        backends: The balancing pool's backend tuples, or ``None``.
+
+    Returns:
+        The first subscription member when a Claude launch carries one,
+        otherwise the launch profile unchanged.
+    """
+    if adapter.name != "claude":
+        return profile
+    for _backend_provider, _backend_key, member in backends or []:
+        if member.provider == "anthropic_subscription":
+            return member
+    return profile
+
+
 async def launch_async(
     adapter: LauncherAdapter,
     provider: ProviderAdapter,
@@ -145,9 +178,9 @@ async def launch_async(
     1. Resolve API key from credential store
     2. Validate API key (pre-flight check)
     3. Start the bridge server
-    4. Build spawn config from adapter (a pool carrying an Anthropic
-       subscription member spawns from that member's profile, so the child
-       presents Claude Code's own OAuth identity on the raw relay)
+    4. Build spawn config from adapter (a Claude-launched pool carrying an
+       Anthropic subscription member spawns from that member's profile, so
+       the child presents Claude Code's own OAuth identity on the raw relay)
     5. Discover the child binary
     6. Prepare agent-specific external config (per-session settings file)
     7. Build the child command and spawn it with signal forwarding
@@ -239,19 +272,8 @@ async def launch_async(
             profile.provider, profile.model, profile.provider_config
         )
 
-    # Build spawn config. A pool carrying an Anthropic subscription member
-    # spawns from that member's profile (SYSTEM_DESIGN.md §16.2): the raw relay
-    # forwards the child's own credentials verbatim, so a synthetic first-member
-    # key would reach Anthropic and be rejected with 401. Only a Claude launch
-    # may use the subscription relay, so the switch is gated on the adapter
-    # (same condition as allow_subscription_relay above); call sites filter
-    # non-Claude pools before launch — this gate is defense in depth.
-    spawn_profile = profile
-    if adapter.name == "claude":
-        for _backend_provider, _backend_key, member in backends or []:
-            if member.provider == "anthropic_subscription":
-                spawn_profile = member
-                break
+    # Build spawn config from the profile the child presents credentials as.
+    spawn_profile = _select_spawn_profile(adapter, profile, backends)
     spawn_config = adapter.build_spawn_config(spawn_profile, port, resolved_key, context_tokens=context_tokens)
 
     # 5. Discover binary
