@@ -163,8 +163,8 @@ $ kitty claude
 No API key required — kitty authenticates with your ChatGPT Plus or Pro account through a browser-based OAuth flow. Each
 profile gets its own independent session.
 
-Like the Claude path below, the Model value goes to Codex with your ChatGPT sign-in (Kitty strips a `vendor/` prefix if
-you typed one), and OpenAI rotates that list independently of Kitty releases — `gpt-5.3-codex` (the wizard's suggested
+The Model value goes to Codex with your ChatGPT sign-in; Kitty strips a `vendor/` prefix if you typed one (unlike the
+Claude subscription relay below, which is byte-for-byte), and OpenAI rotates that list independently of Kitty releases — `gpt-5.3-codex` (the wizard's suggested
 default), `gpt-5.4` and `gpt-5.5` have all retired from it. Current ids at the time of writing: `gpt-6-sol`,
 `gpt-6-luna` and the newer `gpt-6.1-sol` from the GPT-6 generation, plus the still-served GPT-5.6 mid-tier
 `gpt-5.6-terra` — OpenAI's ["balance of capability, speed, and cost for everyday
@@ -191,13 +191,14 @@ stores your OAuth token. This profile works **only with Claude Code**: Kitty rel
 exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
 rejected subscription account cools down like any other backend and recovers automatically.
 
-The subscription profile hands your Model value to Anthropic after Kitty normalises it — a `vendor/` prefix is dropped
-and dots become dashes — so the catalog names (e.g. `anthropic/claude-opus-5.5`) and the dot form both reach Anthropic
-as the same id. What the value must still do is name a model Anthropic serves; anything else is rejected with a
-model-not-found error. Current ids: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5` (Sonnet 5.5) and
-`claude-haiku-5-5` (Haiku 5.5); the wizard's suggested default, `claude-sonnet-4-6`, is the previous generation and
-still served. The canonical dash-separated id is still what to type — it is the form Anthropic documents, and it
-removes one variable when a request fails.
+The subscription profile hands your Model value to Anthropic exactly as typed — the relay is byte-for-byte, and Kitty
+neither rewrites the model nor translates anything else in the request — so the catalog's dot names
+(`anthropic/claude-opus-5.5`) and a `vendor/` prefix are not valid here: both reach Anthropic as typed and are rejected
+with a model-not-found error. What the value must do is name a model Anthropic serves, in the dash-separated id form
+Anthropic documents. Current ids: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5` (Sonnet 5.5) and `claude-haiku-5-5`
+(Haiku 5.5); the wizard's suggested default, `claude-sonnet-4-6`, is the previous generation and still served. The
+dash-separated id is what to type — it is the form Anthropic documents, and it removes one variable when a request
+fails.
 
 ### ChatGPT subscription on a remote or headless machine
 
