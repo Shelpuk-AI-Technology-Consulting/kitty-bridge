@@ -12,11 +12,15 @@ agent from that member's profile, so Claude Code presents its own logged-in OAut
 raw subscription relay. Today `launch_async` builds the spawn configuration from the launch
 profile — the pool's first member — so a mixed pool injects the first member's API key and the
 `kitty-bridge-token` placeholder into the child; the relay forwards both to
-Anthropic — the first member's real API key included, disclosed to a provider
-that never issued it — which rejects them with 401, the subscription member
+Anthropic. When the first member is a non-Anthropic provider, the key is one
+Anthropic never issued, which rejects them with 401, the subscription member
 parks for 900 s, and the
 client sees `503 All 1 backends rejecting the credentials (401/403)` while every API-key member
-of the pool sits healthy but unreachable for that request.
+of the pool sits healthy but unreachable for that request. When the first member is itself an
+`anthropic` key profile, the forwarded key is one Anthropic did issue, so the outcome is not
+established as a 401 — the request may be accepted and the subscription member's share billed to
+that key, a silent variant of the same defect. Either way the child presented a foreign identity
+instead of Claude Code's session.
 
 Requirements, acceptance criteria, and the test plan live in
 `.requirements/20261020T135901Z_balancing_subscription_spawn_identity/REQUIREMENTS.md`; the
@@ -62,14 +66,19 @@ Implemented 2026-10-20 on `fix/balancing-subscription-spawn-identity`.
   member still uses the API-key-dialect headline; a subscription-aware headline
   (remediation `claude auth login`) was recorded in SYSTEM_DESIGN.md §16.1 as a
   deliberate non-goal of this stage.
-- Review rounds (CI bot, four rounds): credential now travels with the spawn
+- Review rounds (CI bot, five rounds): credential now travels with the spawn
   profile (`_select_spawn_profile` returns the pair, so a subscription member
-  never carries the first member's key into `build_spawn_config`); the
+  never carries the first member's key into `build_spawn_config`), and the
+  mixed-pool test records the credential handed to `build_spawn_config`,
+  asserting it is the member's own (empty) key — the pairing is pinned (verified
+  by reverting the pairing and watching the test fail); the
   subscription-led test launches with the subscription profile itself — the only
   shape `_launch_target_balancing` can produce — and the reachable mixed-pool
   test also asserts the model hint; README documents the pool behavior; the
-  pre-fix credential is recorded as the first member's real API key (only the
-  auth token was synthetic), and the remedy wording is `claude auth login`.
+  pre-fix outcome is qualified (a non-Anthropic first member's key is rejected
+  with 401 and parks the member; an `anthropic`-key first member yields a key
+  Anthropic accepts, so the defect there is silent over-billing rather than a
+  503), and the remedy wording is `claude auth login`.
 - Two further limits are recorded rather than fixed: a pool listing several
   subscription members hints the first one's model (on the raw path the model
   travels inside the forwarded bytes, so a later member's differing model cannot

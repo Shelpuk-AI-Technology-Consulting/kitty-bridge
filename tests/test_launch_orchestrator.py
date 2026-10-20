@@ -487,6 +487,20 @@ def _subscription_member(model: str = "claude-opus-5-5") -> tuple[ProviderAdapte
     return AnthropicSubscriptionAdapter(), "", profile
 
 
+class _KeyRecordingClaudeAdapter(ClaudeAdapter):
+    """ClaudeAdapter that records the credential handed to build_spawn_config."""
+
+    def __init__(self):
+        """Initialize the protocol default and the recording list."""
+        super().__init__()
+        self.seen_keys: list[str] = []
+
+    def build_spawn_config(self, profile, bridge_port, resolved_key, *, context_tokens=None):
+        """Record the resolved key, then build the normal Claude spawn config."""
+        self.seen_keys.append(resolved_key)
+        return super().build_spawn_config(profile, bridge_port, resolved_key, context_tokens=context_tokens)
+
+
 class TestMixedPoolSubscriptionSpawnIdentity:
     """A pool carrying a subscription member spawns the agent with its own identity.
 
@@ -511,13 +525,14 @@ class TestMixedPoolSubscriptionSpawnIdentity:
         api_profile = _make_profile()
         backends = [(StubProvider(), "sk-first-key", api_profile), _subscription_member()]
         cred_store = _make_cred_store("sk-first-key")
+        adapter = _KeyRecordingClaudeAdapter()
 
         with (
             patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
             _capture_child_env() as (spawned, settings_seen),
         ):
             exit_code = await launch_async(
-                adapter=ClaudeAdapter(),
+                adapter=adapter,
                 provider=StubProvider(),
                 profile=api_profile,
                 cred_store=cred_store,
@@ -530,6 +545,9 @@ class TestMixedPoolSubscriptionSpawnIdentity:
         # The first member's credential is still resolved for the launch itself
         # (validation, egress) even though the child env must not carry it.
         cred_store._backends[0].get.assert_called()
+        # The credential handed to the spawn config is the subscription member's
+        # own (empty) key, not the launch profile's — the pair travels together.
+        assert adapter.seen_keys == [""]
         assert "ANTHROPIC_API_KEY" not in spawned[0]
         assert "ANTHROPIC_AUTH_TOKEN" not in spawned[0]
         # On the raw subscription path the request reaches Anthropic exactly as

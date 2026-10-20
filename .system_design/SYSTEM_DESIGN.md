@@ -2466,8 +2466,13 @@ configuration from the first such member's profile — paired with that member's
 credential — instead of the launch (first-member) profile, so the child presents Claude Code's
 own OAuth identity and the relay forwards real session credentials. Pre-fix, the child carried
 the first member's real stored API key plus the synthetic placeholder token, and the relay
-forwarded both to Anthropic — disclosing a key issued by one provider to a provider that never
-issued it — which answered 401 and parked the member for 900 s. The switch is gated on the Claude
+forwarded both to Anthropic. When the first member is a non-Anthropic provider, the key is one
+Anthropic never issued: Anthropic answered 401 and parked the member for 900 s — the failure this
+change was raised from. When the first member is itself an `anthropic` API-key profile, the
+forwarded key is one Anthropic did issue, so no 401 follows from it: the request may be accepted
+and the subscription member's share billed to that key — a silent variant of the same defect
+(which credential Anthropic honours when the child presents both a key and the placeholder token
+is not established here). The switch is gated on the Claude
 adapter (the same condition that arms the relay), so no other launcher can pick up a subscription
 profile even if a caller hands it one. The child's credentials never authenticate a
 non-subscription member — the translated path builds upstream headers from each member's own
@@ -2548,9 +2553,11 @@ every balancing member.
   random selection later skipped it.
 - **Spawn a mixed pool from its subscription member's profile.** One child process presents one
   credential set, and the raw relay forwards exactly what the child sent: a synthetic
-  `ANTHROPIC_AUTH_TOKEN` and a member API key would reach Anthropic and be rejected with 401,
-  parking the member for 900 s — commonly with no other subscription member in the pool to fail
-  over to — a 503 for the client while eight healthy members sat unused. The alternative
+  `ANTHROPIC_AUTH_TOKEN` and a member API key would reach Anthropic, where a key Anthropic never
+  issued is rejected with 401 — parking the member for 900 s, commonly with no other subscription
+  member in the pool to fail over to — a 503 for the client while eight healthy members sat
+  unused (an `anthropic` API-key first member instead yields a key Anthropic accepts, so the
+  defect there is silent over-billing rather than a 503; §16.1 records both). The alternative
   (injecting the stored credential) is unavailable by construction: Kitty never stores or
   refreshes OAuth material, so Claude Code's own session is the only identity the subscription
   member can present. Building the spawn config from the subscription member therefore keeps one
