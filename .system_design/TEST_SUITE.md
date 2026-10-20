@@ -143,19 +143,23 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Twenty-eight request-path rows — the original fourteen (M1–M11, M15, M16 and M17), two
+Twenty-nine request-path rows — the original fourteen (M1–M11, M15, M16 and M17), two
 id-synthesis rows added by KBR-195 (M18, M19), six KBR-194 Gemini-side slot drops on
 the Gemini inbound route (M20–M25), KBR-184's M26 (the Anthropic-family `metadata`
-drop, G31), and KBR-271's M9a and M9b (the M9 fallback converter's cache-breakpoint drops,
-G43's register half) — one response-path row (M12), and the routing row **M14** (§3.3.5), which is
-listed here because the destination is a mutation surface the body cannot show. Thirty-one rows
-in all. The former substitution row M13 is **withdrawn** — KBR-5 replaced it with a downstream
-error, so it mutates nothing — leaving **thirty live** bridge-level rows. **KBR-59 (T-D10)** adds
+drop, G31), KBR-271's M9a and M9b (the M9 fallback converter's cache-breakpoint drops,
+G43's register half), KBR-55's M27 (the translated-route `top_k` drop), M28 (the empty
+`stop_sequences` omit), and M29 (the string-form `stop` rewrite), and KBR-309's M33
+(the translated-route `context_management` drop, beta-gated; renamed from M30 after
+KBR-59 took M30/M31/M32) — one response-path
+row (M12), and the routing row **M14** (§3.3.5), which is listed here because the destination
+is a mutation surface the body cannot show. Thirty-two rows in all. The former substitution row
+M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutates nothing —
+leaving **thirty-one live** bridge-level rows. **KBR-59 (T-D10)** adds
 the three response-direction rows **M30, M31, M32** at the table immediately below — a Gemini
 response-direction `functionCall.id` echo, the Ollama canonical tool-calling `reply.stop_reason`
 delta, and the rare Ollama-vs-CC part-ordering disagreement on Thinking+ToolUse replies
-(KBR-257 / KBR-267 comment 3.1 / KBR-267 comment 3.2) — thirty-four rows in all and
-**thirty-three live** bridge-level rows.
+(KBR-257 / KBR-267 comment 3.1 / KBR-267 comment 3.2) — thirty-five rows in all and
+**thirty-four live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -193,6 +197,7 @@ delta, and the rare Ollama-vs-CC part-ordering disagreement on Thinking+ToolUse 
 | M30 | **Carry the upstream CC `tool_calls[].id` onto the emitted Gemini `functionCall.id`** when the upstream carried one; omit when absent | `GeminiTranslator._translate_content` (`kitty/bridge/gemini/translator.py`) | The captured CC reply carries a `tool_calls[].id` | KBR-59 / T-D10 / [KBR-257](https://shelpuk.atlassian.net/browse/KBR-257). The response-direction twin of M18/M19 — same field name, opposite direction. §4 X4 rule: *"emit when present, omit when absent"* (Gemini `FunctionCall.id` is optional per `v1beta`; synthesis stays on the request side, where CC requires an id). Scope is the two Gemini providers (`google_aistudio`, `vertex`). **Not** `NOT_PROJECTABLE` (KBR-195 §8 carries forward): the Gemini reply reader reads `FunctionCall.id` faithfully today (KBR-36, T-A4), so the path is projectable. Anchored at `reply.parts[*].id` (3-segment, the field name) per §3.3.1a — never the bare `reply.parts[*]`, which would also claim a deleted part and is one of §3.3.1's five oracle falsification cases. Renumbered from M27 at the 2026-10-18 merge of origin/main: KBR-55 landed its G28–G30 rows on M27/M28/M29 first. |
 | M31 | Map Ollama `done_reason: "stop"` to `reply.stop_reason = "end_turn"` on the canonical tool-calling exchange | `OllamaCloudAdapter.translate_from_upstream` (`kitty/providers/ollama_cloud.py`) | Captured Ollama reply: `message.tool_calls` non-empty AND `done_reason == "stop"` | KBR-59 / T-D10 / KBR-267 comment 3.1. Ollama's single wire value `"stop"` covers both CC's `"stop"` (text completion) and CC's `"tool_calls"` (tool-calling). `OllamaChatReplyProjection._DONE_REASON_MAP` maps it to `end_turn` per KBR-267's *independent-oracle* rule — inferring `tool_use` from the presence of `message.tool_calls` would read the CC side of the comparison into an Ollama projection. The delta surfaces when the bridge emits on a wire shape using a finer stop-reason vocabulary (CC on the agent side). Anchored at the bare keyed literal `reply.stop_reason`. Scope `("ollama_cloud",)`. Renumbered from M28 at the 2026-10-18 merge of origin/main. |
 | M32 | Order parts Text → Thinking → ToolUse → Image (Ollama reader) vs Text → refusal → ToolUse → Thinking (Chat Completions reader) on rare Thinking+ToolUse replies | `OllamaCloudAdapter.translate_from_upstream` (`kitty/providers/ollama_cloud.py`) | Captured Ollama reply: `message.thinking` non-empty AND `message.tool_calls` non-empty | KBR-59 / T-D10 / KBR-267 comment 3.2. The §7.4.1 "two readers disagree about a part boundary report a delta on every subsequent part" rule, applied to the two readers' ordering of Thinking+ToolUse. Anchored at the bare-collection pattern `reply.parts[*]` — the broad anchor that the rule names. The complement (a reply with Text+ToolUse only) produces identical orderings via the empty-content convergence rule and must not fire this row. Scope `("ollama_cloud",)`. **Co-claim note**: M32 (broad, `reply.parts[*]`) and M30 (narrow, `reply.parts[*].id`) co-claim a tool-call-id delta on a Thinking+ToolUse reply under the prefix rule; `_conditional_violations`'s specificity attribution handles this — when M30 is *triggered* on a Thinking+ToolUse reply's id-bearing delta, M32 is exempt (M30 is finer). The corpus builder is told explicitly so the co-claim is not a surprise. Renumbered from M29 at the 2026-10-18 merge of origin/main. |
+| M33 | **Drop an agent's `context_management` on the translated Messages route** — hop 1 never reads the field, so it never reaches any CC wire | `MessagesTranslator.translate_request` (`kitty/bridge/messages/translator.py`) | Provider does not declare `use_native_messages` | KBR-309. Anthropic's `context_management` is a **beta** field — the documented endpoint accepts it only when the request carries `anthropic-beta: context-management-2025-06-27` (fetched 2026-09-24). The bridge builds upstream headers from scratch and forwards no inbound agent header (§4.2 C1), so a KBR-224-style restore would 400 at the upstream without beta-header carriage. The drop is the design posture, not a bug; restoring it is a separate product decision gated on beta-header support. P23 lists the same wire key at the same address, but P23's policy point is the `openai_subscription` Responses allowlist; this row names the Messages→CC translation's own policy point. Scope = `_TRANSLATED_MESSAGES_ADAPTERS` (M16's scope). Renumbered from M30 at the 2026-10-18 merge of origin/main: KBR-59's response-direction rows took M30/M31/M32 first (the KBR-55 renumber precedent). |
 
 #### 3.2.2 Provider-level
 
@@ -282,7 +287,7 @@ is still owed — T-G9.
 **Conditional rows are the point.** Every row whose trigger is a condition must be provably
 *inert* when that condition is absent — the sharpest form of "unless absolutely necessary", and
 what §3.3.2 assertion 2 tests, with the trigger complements §3.3.4 requires. M1, M2, M9a, M9b, M10, M14, M15, M16, P1,
-M20, M21, M22, M23, M24, M25, M26, M27, M29,
+M20, M21, M22, M23, M24, M25, M26, M27, M29, M33,
 P6, P9a, P9b, P9c, P9e, P9f, P9g, P9h, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P23, P24, P26, P27, P28, P29, P30, P31, P32, P36, P37, P38 and P43 are
 unconditional by design and are exempt from that assertion.
 

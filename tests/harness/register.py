@@ -1461,6 +1461,33 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         design_ref="§7.4.1 · §3.2.2 · KBR-267 · KBR-59 comment 3.2",
         scope=("ollama_cloud",),
     ),
+    # KBR-309's row, appended after KBR-59's M30/M31/M32 (renamed from M30 to
+    # M33 to keep ids unique; the KBR-271 "register-edit companion sites" lesson).
+    MutationRow(
+        id="M33",
+        # KBR-309: drop an agent's ``context_management`` on the translated
+        # Messages route. Anthropic's ``context_management`` is a **beta**
+        # field — the documented endpoint accepts it only when the request
+        # carries ``anthropic-beta: context-management-2025-06-27``
+        # (platform.claude.com/docs/en/build-with-claude/context-editing,
+        # fetched 2026-09-24). The bridge builds upstream headers from
+        # scratch and forwards no inbound agent header (§4.2 C1), so a
+        # KBR-224-style restore would 400 at the upstream. The drop is the
+        # design posture, not a bug; beta-header carriage is a separate
+        # product decision.
+        #
+        # P23's ``_CODEX_DROPPED_CONTROL_FIELDS`` lists ``context_management``
+        # at the same wire-key address, but P23 is ``openai_subscription``-
+        # specific (the Responses allowlist is the policy point there). The
+        # Messages → CC translation has its own policy point — the
+        # translator, which never reads the field — and this row names it.
+        site=("kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.extra_path("context_management"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1b",
+        scope=_TRANSLATED_MESSAGES_ADAPTERS,
+    ),
 )
 
 # --------------------------------------------------------------------------
