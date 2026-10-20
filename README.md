@@ -196,8 +196,10 @@ neither rewrites the model nor translates anything else in the request — so th
 catalog (`src/kitty/providers/model_metadata.json`, refreshed from OpenRouter — e.g. `anthropic/claude-opus-5.5`) and a
 `vendor/` prefix are not valid here: both reach Anthropic as typed and are rejected with a model-not-found error. What
 the value must do is name a model Anthropic serves, in the dash-separated id form Anthropic documents. Current ids at
-the time of writing: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5` (Sonnet 5.5) and `claude-haiku-5-5` (Haiku 5.5);
-the wizard's suggested default, `claude-sonnet-4-6`, is the previous generation and still served. The dash-separated id
+the time of writing: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5` (Sonnet 5.5), `claude-haiku-5-5` (Haiku 5.5) and
+`claude-fable-5-1` (Fable 5.1 — included on paid plans, but drawing from a separate allowance of 50% of your weekly
+usage limits rather than the general pool); the wizard's suggested default, `claude-sonnet-4-6`, is the previous
+generation and still served. The dash-separated id
 is what to type — it is the form Anthropic documents, and it removes one variable when a request fails. Anthropic's
 model documentation (https://platform.claude.com/docs/en/models/overview) and the model list inside a Claude Code
 session show the live set.
