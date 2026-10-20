@@ -150,7 +150,7 @@ $ kitty claude
 $ pip install kitty-bridge
 $ kitty setup
   ? Provider: openai_subscription
-  ? Model: gpt-5.4
+  ? Model: gpt-6-sol
 
   Opening browser for OpenAI authentication...
 
@@ -163,13 +163,23 @@ $ kitty claude
 No API key required — kitty authenticates with your ChatGPT Plus or Pro account through a browser-based OAuth flow. Each
 profile gets its own independent session.
 
+The Model value is sent to OpenAI's subscription backend (Kitty strips a `vendor/` prefix if you typed one — unlike the
+Claude subscription relay below, which is byte-for-byte), and OpenAI rotates that list independently of Kitty releases
+— `gpt-5.3-codex` (the wizard's suggested default), `gpt-5.4` and `gpt-5.5` have all retired from it. Current ids at
+the time of writing: `gpt-6-sol`, `gpt-6-luna` and the newer `gpt-6.1-sol` from the GPT-6 generation, plus the
+still-served GPT-5.6 generation `gpt-5.6-terra` (mid-tier — OpenAI's ["balance of capability, speed, and cost for
+everyday work"](https://help.openai.com/en/articles/20001354-gpt-6-and-other-models-in-chatgpt)) and `gpt-5.6-luna`
+(lightest), each tier with a `-pro` variant on Pro subscriptions, and the
+[Astra models](#using-gpt-6-astra-with-your-subscription) documented below. When a name is rejected, the model picker
+in the ChatGPT UI — or `codex` itself — shows the exact live list.
+
 ### Example: Use your Claude subscription with Claude Code
 
 ```bash
 $ pip install kitty-bridge
 $ kitty setup
   ? Provider: Anthropic Claude.ai Subscription (Claude Code only)
-  ? Model: claude-opus
+  ? Model: claude-opus-5-5
 
 $ kitty claude
   ✓ Bridge running on port <random_port>
@@ -181,6 +191,20 @@ Sign in to Claude Code first (`claude auth login`) — Kitty checks that local s
 stores your OAuth token. This profile works **only with Claude Code**: Kitty relays Claude Code's request to Anthropic
 exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
 rejected subscription account cools down like any other backend and recovers automatically.
+
+The subscription profile hands your Model value to Anthropic exactly as typed — the relay is byte-for-byte, and Kitty
+neither rewrites the model nor translates anything else in the request — so the dot names from Kitty's bundled model
+catalog (`src/kitty/providers/model_metadata.json`, refreshed from OpenRouter — e.g. `anthropic/claude-opus-5.5`) and a
+`vendor/` prefix are not valid here: both reach Anthropic as typed and are rejected with a model-not-found error. What
+the value must do is name a model Anthropic serves, in the dash-separated id form Anthropic documents. Current ids at
+the time of writing: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5` (Sonnet 5.5), `claude-haiku-5-5` (Haiku 5.5)
+and `claude-fable-5-1` (Fable 5.1 — included on paid plans, but drawing from a separate allowance of 50% of your
+weekly usage limits rather than the general pool); the wizard's suggested default, `claude-sonnet-4-6`, is the
+previous generation and still served. The dash-separated id is what to type — it is the form Anthropic documents, and
+it removes one variable when a request fails. Anthropic's model documentation
+(https://platform.claude.com/docs/en/models/overview) and the model list inside a Claude Code session show the live
+set; the paid-plan inclusion (and the Fable 50% carve-out) is documented in
+[Anthropic's Fable article](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
 
 ### ChatGPT subscription on a remote or headless machine
 
