@@ -507,8 +507,10 @@ class TestMixedPoolSubscriptionSpawnIdentity:
     The raw subscription relay forwards the child's own credentials to Anthropic
     (KBR-319). A child launched with the first member's real API key and the
     synthetic ``ANTHROPIC_AUTH_TOKEN`` placeholder therefore sends both to
-    Anthropic, which rejects them with 401 — and a pool has no other
-    subscription member to fail over to.
+    Anthropic, where a key Anthropic never issued is rejected with 401 — and a
+    pool has no other subscription member to fail over to. (An ``anthropic``
+    API-key first member instead hands Anthropic a key it accepts: the same
+    defect, silent over-billing rather than a 401.)
     """
 
     @pytest.mark.asyncio

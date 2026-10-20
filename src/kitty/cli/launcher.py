@@ -134,8 +134,10 @@ def _select_spawn_profile(
     A balancing pool carrying an Anthropic subscription member spawns from
     that member's profile (SYSTEM_DESIGN.md §16.2): the raw relay forwards
     the child's own credentials verbatim, so the first member's real API key
-    would reach Anthropic and be rejected with 401, parking the member with
-    no subscription sibling to fail over to. The switch is gated on the
+    would reach Anthropic — a key Anthropic never issued is rejected with 401,
+    parking the member with no subscription sibling to fail over to, while an
+    ``anthropic`` API-key first member's key is one Anthropic accepts and bills
+    instead (the same defect, silent). The switch is gated on the
     Claude adapter — the same privilege that arms the bridge's raw relay
     (``allow_subscription_relay``); call sites filter non-Claude pools
     before launch, so the gate is defense in depth. The credential travels
