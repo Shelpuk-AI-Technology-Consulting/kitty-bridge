@@ -855,7 +855,37 @@ jobs:
           set -uo pipefail
           KITTY="${pythonLocation:-}/bin/kitty"
           if [ -x "$KITTY" ]; then
-            VERSION=$("$KITTY" --version 2>&1 | head -n 1)
+            # 🔴 KBR-320. Capture the whole output, THEN take the first line.
+            # The probe used to pipe into `head -n 1`, and `kitty --version`
+            # prints TWO lines -- the banner, then the machine version. head
+            # exits after the first line and closes the pipe, so kitty's
+            # second write (or its interpreter-shutdown flush) raised
+            # BrokenPipeError, and CPython's documented cleanup rule turns a
+            # stream-flush failure at shutdown into exit status 120, not 1
+            # (bpo-5319 / bpo-29130). Measured: the exact pipeline returns
+            # 120 in 60/60 local runs; under the runner's
+            # `bash --noprofile --norc -e -o pipefail` -- the runner's `-e`
+            # is what turned the failing pipeline into the abort; this
+            # script's own `set -uo pipefail` does not carry it -- the step
+            # died before its summary line: zero output, exit 120, on runs
+            # 39161761143, 39174082633 and 39239198146 (2026-10-18/19).
+            # `continue-on-error` keeps the job alive; the red annotation is
+            # the damage, and it is what KBR-319's triage conflated with the
+            # merge-gating failure. It is kept after the fix as
+            # belt-and-braces: a probe that fails for some future reason
+            # composes into the review path rather than killing the job.
+            # Capturing first gives kitty a reader that stays open until it
+            # exits, so there is no broken pipe to convert into an exit
+            # code, and a kitty that exits non-zero still aborts the step
+            # deliberately -- that is the bad-release visibility
+            # `rules/ci.md` keeps this step for. The first line is the
+            # human banner; the machine version is line 2 -- either
+            # identifies the release. The E2BIG prompt-size mechanism
+            # recorded at `Build review prompt` is a DIFFERENT failure with
+            # its own guard (its incidents predate that guard; the budget
+            # sits below the measured threshold), not this one.
+            VERSION_OUT=$("$KITTY" --version 2>&1)
+            VERSION=${VERSION_OUT%%$'\n'*}
           else
             VERSION="not installed"
           fi
