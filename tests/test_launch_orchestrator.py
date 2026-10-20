@@ -488,10 +488,10 @@ class TestMixedPoolSubscriptionSpawnIdentity:
     """A pool carrying a subscription member spawns the agent with its own identity.
 
     The raw subscription relay forwards the child's own credentials to Anthropic
-    (KBR-319). A child launched with a synthetic ``ANTHROPIC_API_KEY`` /
-    ``ANTHROPIC_AUTH_TOKEN`` therefore sends those placeholders to Anthropic,
-    which rejects them with 401 — and a pool has no other subscription member
-    to fail over to.
+    (KBR-319). A child launched with the first member's real API key and the
+    synthetic ``ANTHROPIC_AUTH_TOKEN`` placeholder therefore sends both to
+    Anthropic, which rejects them with 401 — and a pool has no other
+    subscription member to fail over to.
     """
 
     @pytest.mark.asyncio
@@ -529,6 +529,9 @@ class TestMixedPoolSubscriptionSpawnIdentity:
         cred_store._backends[0].get.assert_called()
         assert "ANTHROPIC_API_KEY" not in spawned[0]
         assert "ANTHROPIC_AUTH_TOKEN" not in spawned[0]
+        # On the raw subscription path the request reaches Anthropic exactly as
+        # the child formed it, so the hint is that member's model.
+        assert spawned[0]["ANTHROPIC_MODEL"] == "claude-opus-5-5"
         # The session settings file outranks the process env for Claude Code,
         # so it must pin both variables empty rather than omit them.
         assert settings_seen[0]["env"]["ANTHROPIC_API_KEY"] == ""
@@ -546,7 +549,10 @@ class TestMixedPoolSubscriptionSpawnIdentity:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "parent-leak")
         monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "parent-leak")
         api_profile = _make_profile()
-        backends = [_subscription_member(), (StubProvider(), "sk-first-key", api_profile)]
+        sub_provider, _sub_key, sub_profile = _subscription_member()
+        # Production shape: the launch profile IS the pool's first member.
+        backends = [(sub_provider, _sub_key, sub_profile), (StubProvider(), "sk-first-key", api_profile)]
+        cred_store = _make_cred_store("sk-first-key")
 
         with (
             patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
@@ -555,14 +561,16 @@ class TestMixedPoolSubscriptionSpawnIdentity:
             exit_code = await launch_async(
                 adapter=ClaudeAdapter(),
                 provider=StubProvider(),
-                profile=api_profile,
-                cred_store=_make_cred_store("sk-first-key"),
+                profile=sub_profile,
+                cred_store=cred_store,
                 extra_args=[],
                 validate=False,
                 backends=backends,
             )
 
         assert exit_code == 0
+        # Direct-launch parity: a subscription-led launch resolves no credential.
+        cred_store._backends[0].get.assert_not_called()
         assert "ANTHROPIC_API_KEY" not in spawned[0]
         assert "ANTHROPIC_AUTH_TOKEN" not in spawned[0]
         assert spawned[0]["ANTHROPIC_MODEL"] == "claude-opus-5-5"
@@ -590,7 +598,7 @@ class TestMixedPoolSubscriptionSpawnIdentity:
 
         with (
             patch("kitty.cli.launcher.discover_binary", return_value=Path(sys.executable)),
-            _capture_child_env() as (_spawned, _settings_seen),
+            _capture_child_env() as (spawned, _settings_seen),
         ):
             exit_code = await launch_async(
                 adapter=launcher,
@@ -605,6 +613,8 @@ class TestMixedPoolSubscriptionSpawnIdentity:
         assert exit_code == 0
         # The launch profile, not the pool's subscription member.
         assert launcher.seen_profiles[0] is api_profile
+        # The credential stays paired with the launch profile it belongs to.
+        assert spawned[0]["STUB_KEY"] == "sk-first-key"
 
     @pytest.mark.asyncio
     async def test_api_key_pool_keeps_synthetic_credentials(self):

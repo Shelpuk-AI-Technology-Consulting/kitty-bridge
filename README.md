@@ -292,6 +292,23 @@ kitty my-pool codex
 When you run this, each request goes to a random healthy member. If MiniMax returns an error, kitty silently retries on
 Novita or Z.AI — your agent never sees the failure.
 
+### Subscription members in a pool
+
+A pool can mix an [Anthropic subscription profile](#example-use-your-claude-subscription-with-claude-code) with
+API-key profiles. Kitty relays subscription traffic exactly as your agent formed it, so a pool containing a
+subscription member starts Claude Code **from that member**: for it, the agent presents your own logged-in Anthropic
+session — never another member's API key. Three things follow:
+
+- **Sign in first.** The pool's subscription member works only while your Claude Code session is live. If it has
+  expired, that member's request is rejected with a credential error (503, `Retry-After` countdown) until you run
+  `claude auth login` — a key change does not help. The pool's API-key members keep serving meanwhile.
+- **`ANTHROPIC_MODEL` follows the subscription member.** Claude Code's startup model hint (and the default-model
+  aliases) come from the subscription member rather than the pool's first member. For API-key members this is only a
+  hint — kitty rewrites the request model to the selected member's; the subscription member receives the model
+  exactly as your agent formed it.
+- **Non-Claude agents skip it.** Other launchers (or a balancing pool used by them) ignore subscription members, as
+  described above — the subscription member only participates under Claude Code.
+
 ### Backup members
 
 Sometimes you don't want a member to carry its share of the traffic — you want it held in reserve. Mark a profile as a

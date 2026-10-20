@@ -126,34 +126,38 @@ def resolve_binary(name: str) -> Path:
 def _select_spawn_profile(
     adapter: LauncherAdapter,
     profile: Profile,
+    resolved_key: str,
     backends: list[tuple[ProviderAdapter, str, Profile]] | None,
-) -> Profile:
-    """Choose the profile the child's spawn configuration is built from.
+) -> tuple[Profile, str]:
+    """Choose the profile — and its credential — the spawn config is built from.
 
     A balancing pool carrying an Anthropic subscription member spawns from
     that member's profile (SYSTEM_DESIGN.md §16.2): the raw relay forwards
-    the child's own credentials verbatim, so a synthetic first-member key
+    the child's own credentials verbatim, so the first member's real API key
     would reach Anthropic and be rejected with 401, parking the member with
     no subscription sibling to fail over to. The switch is gated on the
     Claude adapter — the same privilege that arms the bridge's raw relay
     (``allow_subscription_relay``); call sites filter non-Claude pools
-    before launch, so the gate is defense in depth.
+    before launch, so the gate is defense in depth. The credential travels
+    with the profile — a subscription member carries none — so the pair can
+    never diverge at the ``build_spawn_config`` call site.
 
     Args:
         adapter: The launcher adapter about to spawn the child.
         profile: The launch profile (the pool's first member for balancing).
+        resolved_key: The credential resolved for the launch profile.
         backends: The balancing pool's backend tuples, or ``None``.
 
     Returns:
-        The first subscription member when a Claude launch carries one,
-        otherwise the launch profile unchanged.
+        The profile to build the spawn configuration from, together with the
+        credential that belongs to it.
     """
     if adapter.name != "claude":
-        return profile
-    for _backend_provider, _backend_key, member in backends or []:
+        return profile, resolved_key
+    for _backend_provider, backend_key, member in backends or []:
         if member.provider == "anthropic_subscription":
-            return member
-    return profile
+            return member, backend_key
+    return profile, resolved_key
 
 
 async def launch_async(
@@ -273,8 +277,8 @@ async def launch_async(
         )
 
     # Build spawn config from the profile the child presents credentials as.
-    spawn_profile = _select_spawn_profile(adapter, profile, backends)
-    spawn_config = adapter.build_spawn_config(spawn_profile, port, resolved_key, context_tokens=context_tokens)
+    spawn_profile, spawn_key = _select_spawn_profile(adapter, profile, resolved_key, backends)
+    spawn_config = adapter.build_spawn_config(spawn_profile, port, spawn_key, context_tokens=context_tokens)
 
     # 5. Discover binary
     binary_path = resolve_binary(adapter.binary_name)
