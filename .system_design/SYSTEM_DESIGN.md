@@ -2478,7 +2478,8 @@ selected backend's — but the raw relay posts the child's bytes unchanged and n
 model, so on that path the hint is what determines the model Anthropic receives; that is exactly
 why it had to move. The trade's known failure mode: a mixed pool now rests on a live Claude Code
 session. With an expired or absent session the child either fails with Claude Code's own login
-error, or its token-less request 401s at Anthropic and parks the subscription member as `auth` —
+error — in which case no request reaches the bridge at all — or its token-less request 401s at
+Anthropic and parks the subscription member as `auth` —
 the terminal 503 then speaks the credential-rejection headline, whose remediation is
 `claude auth login`, not a key change (pre-fix, the pool's API-key members still served most
 requests). Recording a subscription-aware headline for that terminal is a deliberate non-goal

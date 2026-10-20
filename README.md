@@ -301,7 +301,8 @@ session — never another member's API key. Three things follow:
 
 - **Sign in first.** The pool's subscription member works only while your Claude Code session is live. If it has
   expired, that member's request is rejected with a credential error (503, `Retry-After` countdown) until you run
-  `claude auth login` — a key change does not help. The pool's API-key members keep serving meanwhile.
+  `claude auth login` — a key change does not help. The pool's API-key members keep serving meanwhile,
+  unless Claude Code itself stops at its login prompt — then nothing reaches the bridge until you sign in.
 - **`ANTHROPIC_MODEL` follows the subscription member.** Claude Code's startup model hint (and the default-model
   aliases) come from the subscription member rather than the pool's first member. For API-key members this is only a
   hint — kitty rewrites the request model to the selected member's; the subscription member receives the model
