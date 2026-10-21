@@ -38,3 +38,13 @@ spellings ride the suffix-spelling table. Requirements review
 step-3 wording, the untested `minimax_token` pair, the remote-cache
 isolation caveat, gate ordering, the provider-dialect comment, the rollout
 sentence — are all applied to the requirements doc and tests.
+
+PR #301 review round 1 (CI bot, 2026-10-22, 3 findings, all addressed):
+(1) §17.4's "EXPECTED_CATALOG equality with the shipped file" had no
+implementing test — `TestShippedCatalogMatchesExpectations` now asserts the
+shipped file equals `EXPECTED_CATALOG` in both directions (proven to fail on
+a dropped `:free` pin before being restored); (2) §17.2's collision-rejection
+sentence now scopes the wholesale rejection to the synced cache, with the
+packaged catalog held by CI instead; (3) §17.1's catalog summary no longer
+calls every key cloud-native. Merge with main (PR #299) resolved the
+SYSTEM_DESIGN.md tail conflict; the context-window path was untouched.

@@ -2596,7 +2596,9 @@ every balancing member.
   `get_balancing_min_context_tokens` (pool budget = the smallest member
   window). Both catalogs and the default live here.
 - `src/kitty/providers/model_context_overrides.json` — the git-tracked pin
-  catalog: cloud-native model id → verified context window in tokens.
+  catalog: model id → verified context window in tokens — cloud-native ids
+  for most models, plus the OpenRouter-dialect `minimax-m3.1-flash:free`
+  (§17.3 D3).
 - `src/kitty/providers/model_metadata.json` — the OpenRouter-generated
   table, refreshed wholesale by `scripts/script_update_model_metadata_table.py`
   (needs `OPENROUTER_API_KEY`; the script never writes the pin catalog).
@@ -2614,8 +2616,9 @@ every balancing member.
 (`_match_catalog` / `_resolve_catalog`): exact lowercase id, a
 `/`-delimited suffix in either direction (`gpt-4o` finds `openai/gpt-4o`;
 `z-ai/glm-5.2` finds `glm-5.2`), then one first-segment strip retry. An
-ambiguous match is terminal, never retried; a catalog whose keys share a
-final segment is rejected wholesale rather than loaded.
+ambiguous match is terminal, never retried; a **synced** catalog whose keys
+share a final segment is rejected wholesale rather than loaded — the packaged
+catalog is loaded as shipped, and CI holds its tail uniqueness instead.
 
 The budget feeds `BridgeServer._get_max_context_chars` (per-request
 request-size budget, chars = tokens × 4, capped at `_MAX_REQUEST_CHARS`,

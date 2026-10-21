@@ -110,6 +110,26 @@ class TestPackagedCatalogEntries:
         assert get_model_context_tokens(provider, model, None) == expected
 
 
+class TestShippedCatalogMatchesExpectations:
+    """The shipped overrides file is exactly the reviewed pin set, both ways.
+
+    The resolution tests prove pin→file (each expected value resolves from the
+    shipped catalog) but nothing held the reverse: a row dropped from the
+    shipped file goes unnoticed as soon as the metadata table can satisfy the
+    lookup — the exact D3 undo this file exists to prevent — and an
+    unreviewed extra row is caught by nothing at all. Full dict equality
+    closes both directions in one assertion.
+    """
+
+    def test_shipped_file_equals_the_reviewed_catalog(self):
+        import json
+
+        from kitty.providers.model_context import _OVERRIDES_PATH
+
+        shipped = json.loads(_OVERRIDES_PATH.read_text(encoding="utf-8"))
+        assert shipped == EXPECTED_CATALOG
+
+
 class TestPackagedCatalogSuffixSpelling:
     """Vendor-prefixed spellings resolve via the suffix rule to the same value."""
 
