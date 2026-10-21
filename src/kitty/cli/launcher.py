@@ -123,6 +123,45 @@ def resolve_binary(name: str) -> Path:
     return path
 
 
+def _select_spawn_profile(
+    adapter: LauncherAdapter,
+    profile: Profile,
+    resolved_key: str,
+    backends: list[tuple[ProviderAdapter, str, Profile]] | None,
+) -> tuple[Profile, str]:
+    """Choose the profile — and its credential — the spawn config is built from.
+
+    A balancing pool carrying an Anthropic subscription member spawns from
+    that member's profile (SYSTEM_DESIGN.md §16.2): the raw relay forwards
+    the child's own credentials verbatim, so the first member's real API key
+    would reach Anthropic — a key Anthropic never issued is rejected with 401,
+    parking the member with no subscription sibling to fail over to, while an
+    ``anthropic`` API-key first member's key is one Anthropic accepts and bills
+    instead (the same defect, silent). The switch is gated on the
+    Claude adapter — the same privilege that arms the bridge's raw relay
+    (``allow_subscription_relay``); call sites filter non-Claude pools
+    before launch, so the gate is defense in depth. The credential travels
+    with the profile — a subscription member carries none — so the pair can
+    never diverge at the ``build_spawn_config`` call site.
+
+    Args:
+        adapter: The launcher adapter about to spawn the child.
+        profile: The launch profile (the pool's first member for balancing).
+        resolved_key: The credential resolved for the launch profile.
+        backends: The balancing pool's backend tuples, or ``None``.
+
+    Returns:
+        The profile to build the spawn configuration from, together with the
+        credential that belongs to it.
+    """
+    if adapter.name != "claude":
+        return profile, resolved_key
+    for _backend_provider, backend_key, member in backends or []:
+        if member.provider == "anthropic_subscription":
+            return member, backend_key
+    return profile, resolved_key
+
+
 async def launch_async(
     adapter: LauncherAdapter,
     provider: ProviderAdapter,
@@ -145,7 +184,9 @@ async def launch_async(
     1. Resolve API key from credential store
     2. Validate API key (pre-flight check)
     3. Start the bridge server
-    4. Build spawn config from adapter
+    4. Build spawn config from adapter (a Claude-launched pool carrying an
+       Anthropic subscription member spawns from that member's profile, so
+       the child presents Claude Code's own OAuth identity on the raw relay)
     5. Discover the child binary
     6. Prepare agent-specific external config (per-session settings file)
     7. Build the child command and spawn it with signal forwarding
@@ -237,8 +278,9 @@ async def launch_async(
             profile.provider, profile.model, profile.provider_config
         )
 
-    # Build spawn config
-    spawn_config = adapter.build_spawn_config(profile, port, resolved_key, context_tokens=context_tokens)
+    # Build spawn config from the profile the child presents credentials as.
+    spawn_profile, spawn_key = _select_spawn_profile(adapter, profile, resolved_key, backends)
+    spawn_config = adapter.build_spawn_config(spawn_profile, port, spawn_key, context_tokens=context_tokens)
 
     # 5. Discover binary
     binary_path = resolve_binary(adapter.binary_name)
