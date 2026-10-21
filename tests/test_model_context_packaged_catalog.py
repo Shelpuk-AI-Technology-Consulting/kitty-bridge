@@ -22,6 +22,17 @@ Verified sources (2026-08, via Kindly Web Search):
 - ``glm-5.2``: OpenRouter ``z-ai/glm-5.2`` = 1,048,576.
 - ``deepseek-v4-flash``: OpenRouter ``deepseek/deepseek-v4-flash`` FAQ
   ("1,048,576 token context window") for the canonical API name.
+- ``MiniMax-M3.1-Flash`` (verified 2026-10-21): MiniMax API overview
+  ("1,000,000-token context window", input + output combined) and the
+  platform's Anthropic-API compatibility page (the endpoint supports
+  ``MiniMax-M3.1-Flash`` and ``MiniMax-M3``).
+- ``minimax-m3.1-flash:free`` (verified 2026-10-21): OpenRouter
+  ``minimax/minimax-m3.1-flash:free`` ("1,000,000 token context window");
+  no unsuffixed paid listing exists on OpenRouter. The key is
+  OpenRouter-dialect (not the cloud-native ``MiniMax-M3.1-Flash``): a bare
+  profile spelling exact-matches it, and a vendor-prefixed query reaches it
+  through the key-as-suffix rule — the first-segment strip retry is never
+  needed.
 """
 
 from __future__ import annotations
@@ -40,18 +51,25 @@ pytestmark = pytest.mark.l2
 EXPECTED_CATALOG: dict[str, int] = {
     "qwen3.8-max": 1_000_000,
     "MiniMax-M3": 1_048_576,
+    "MiniMax-M3.1-Flash": 1_000_000,
+    "minimax-m3.1-flash:free": 1_000_000,
     "glm-5.3": 1_048_576,
     "glm-5.3-flash": 1_048_576,
     "glm-5.2": 1_048_576,
     "deepseek-v4-flash": 1_048_576,
 }
 
-# The catalog is provider-agnostic: the same cloud-native model name is used
-# across Qwen Cloud, MiniMax Coding Plan, Z.AI coding plan, DeepSeek cloud,
-# and custom Anthropic-compatible endpoints.
+# The catalog is provider-agnostic: every cloud-native key resolves under any
+# provider name (provider is log-only). Most entries are the cloud-native
+# name shared across Qwen Cloud, MiniMax Coding Plan, Z.AI coding plan,
+# DeepSeek cloud, and custom Anthropic-compatible endpoints; the OpenRouter
+# entry (``minimax-m3.1-flash:free``) is OpenRouter-dialect and only
+# OpenRouter actually serves it, but it still resolves under any provider
+# via exact match.
 PROVIDER_VARIANTS = (
     "qwen_cloud",
     "minimax_coding_plan",
+    "minimax_token",
     "zai_coding",
     "deepseek",
     "custom_anthropic",
@@ -100,6 +118,9 @@ class TestPackagedCatalogSuffixSpelling:
         [
             ("qwen/qwen3.8-max", 1_000_000),
             ("minimax/MiniMax-M3", 1_048_576),
+            ("minimax/MiniMax-M3.1-Flash", 1_000_000),
+            ("minimax/minimax-m3.1-flash", 1_000_000),
+            ("minimax/minimax-m3.1-flash:free", 1_000_000),
             ("z-ai/glm-5.3", 1_048_576),
             ("z-ai/glm-5.3-flash", 1_048_576),
             ("z-ai/glm-5.2", 1_048_576),

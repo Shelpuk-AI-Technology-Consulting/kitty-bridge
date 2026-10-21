@@ -2537,3 +2537,70 @@ every balancing member.
 - The step records are `.system_design/steps/kbr319_subscription_profile.md`,
   `kbr319_launcher_eligibility.md`, `kbr319_exact_messages_relay.md`, and
   `kbr319_subscription_health.md`; each receives implementation notes when its stage lands.
+
+
+## 17. Model context-window resolution
+
+### 17.1 Components
+
+- `src/kitty/providers/model_context.py` — the two resolution entry points,
+  `get_model_context_tokens` (single backend) and
+  `get_balancing_min_context_tokens` (pool budget = the smallest member
+  window). Both catalogs and the default live here.
+- `src/kitty/providers/model_context_overrides.json` — the git-tracked pin
+  catalog: cloud-native model id → verified context window in tokens.
+- `src/kitty/providers/model_metadata.json` — the OpenRouter-generated
+  table, refreshed wholesale by `scripts/script_update_model_metadata_table.py`
+  (needs `OPENROUTER_API_KEY`; the script never writes the pin catalog).
+- `src/kitty/providers/model_context_sync.py` — fetches the pin catalog from
+  the repo's raw GitHub URL at most once per 24 h and caches it at
+  `REMOTE_OVERRIDES_CACHE_PATH`; a valid, collision-free cache replaces the
+  packaged catalog wholesale, so a merged pin reaches existing installs
+  without a release.
+
+### 17.2 The precedence chain and the matcher
+
+`get_model_context_tokens` resolves in order: pin catalog →
+`provider_config["context_window"]` → metadata table →
+`DEFAULT_CONTEXT_TOKENS` (200,000). Both catalogs share one matcher
+(`_match_catalog` / `_resolve_catalog`): exact lowercase id, a
+`/`-delimited suffix in either direction (`gpt-4o` finds `openai/gpt-4o`;
+`z-ai/glm-5.2` finds `glm-5.2`), then one first-segment strip retry. An
+ambiguous match is terminal, never retried; a catalog whose keys share a
+final segment is rejected wholesale rather than loaded.
+
+The budget feeds `BridgeServer._get_max_context_chars` (per-request
+request-size budget, chars = tokens × 4, capped at `_MAX_REQUEST_CHARS`,
+driving compaction and oversized-request handling) and the launcher's
+`build_spawn_config` (the window the agent is told about).
+
+### 17.3 Decisions, and why
+
+| ID  | Decision                                                                                                                                                                             | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | A pin catalog outranks both the metadata table and a hand-written `provider_config["context_window"]`, with the shadowed setting announced at INFO (`_log_shadowed_context_window`)   | OpenRouter's metadata drifts on refresh, and operator-written windows go stale silently — KBR-151 sized a conversation from a window the model does not have. The pin is the reviewed, source-verified value; INFO (not WARNING) because the precedence is deliberate visibility, not an alarm (KBR-170).                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| D2  | Pin values follow the per-model verified upstream value, not a power-of-two convention                                                                                               | `MiniMax-M3` is pinned 1,048,576 because OpenRouter reports 1,048,576 for it; `MiniMax-M3.1-Flash` and its `:free` variant are pinned 1,000,000 because MiniMax's API overview and OpenRouter both report 1,000,000 for that model (verified 2026-10-21). Rounding either way would embed a wrong number.                                                                                                                                                                                                                                                                                                                                                                                                               |
+| D3  | The OpenRouter `:free` spelling gets its own pin key (`minimax-m3.1-flash:free`) instead of relying on the metadata table                                                            | OpenRouter serves M3.1 Flash only as `minimax/minimax-m3.1-flash:free`; the matcher's suffix rule is `/`-delimited and never crosses the `:free` suffix, and the packaged metadata snapshot predates the model, so without the key the OpenRouter path resolves the 200k default and compacts ~5× too early. A metadata refresh would sweep in dozens of unrelated entries behind an API key for one row of value; the owner chose the two-key pin (2026-10-21). Cost, accepted: until the snapshot is refreshed the `:free` pin is the only source for that spelling, so removing it must be accompanied by a refresh — the pinning test makes the pin's presence explicit either way.                                            |
+| D4  | Pins use the bare cloud-native id, not the OpenRouter `vendor/id` form                                                                                                               | The bare key resolves exact matches (Anthropic-dialect paths: custom endpoints, coding plans) and vendor-prefixed queries alike through the suffix rule, so one row serves every path that names the model natively; a prefixed key would serve only the one dialect. The `:free` suffix is part of OpenRouter's id, not a vendor prefix, so it cannot be stripped by the first-segment retry — it stays in the key.                                                                                                                                                                                                                                                                                                        |
+
+### 17.4 Verification
+
+- `tests/test_model_context.py` — synthetic-data precedence, matcher,
+  collision-rejection and remote-cache tests (L1).
+- `tests/test_model_context_packaged_catalog.py` — the real packaged
+  catalogs: `EXPECTED_CATALOG` equality with the shipped file, the
+  provider-variant matrix, vendor-prefixed and `:free` suffix spellings, and
+  tail uniqueness over both catalogs (L2). Every `EXPECTED_CATALOG` entry
+  carries its verified sources in the module docstring with a date.
+- `tests/test_model_context_sync.py` — remote-cache replacement, TTL, and
+  failure fall-through to the packaged catalog.
+
+### 17.5 Known limits (recorded, not fixed here)
+
+- A model absent from both catalogs resolves 200,000; the resolver logs the
+  fall-back once per model (`_log_default_fallback`) rather than per request.
+- The metadata snapshot is refreshed manually; between refreshes new
+  OpenRouter-only models (including new `:free` variants) resolve the default
+  unless pinned.
+- The runtime sync fetches over the network; a machine that never reaches
+  GitHub runs on the packaged catalog indefinitely.
