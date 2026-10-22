@@ -1,6 +1,8 @@
 {
   "qwen3.8-max": 1000000,
   "MiniMax-M3": 1048576,
+  "MiniMax-M3.1-Flash": 1000000,
+  "minimax-m3.1-flash:free": 1000000,
   "glm-5.3": 1048576,
   "glm-5.3-flash": 1048576,
   "glm-5.2": 1048576,
