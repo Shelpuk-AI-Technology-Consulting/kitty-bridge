@@ -17,8 +17,11 @@ Verified sources (2026-08, via Kindly Web Search):
 - ``glm-5.3-flash``: Z.AI developer docs
   (https://docs.z.ai/guides/vlm/glm-5.3-flash) — "Context Length: 1M", and
   "Text parameters are consistent with GLM-5.3, with support for a 1M-token
-  context window". Absent from model_metadata.json, so without this entry it
-  falls back to DEFAULT_CONTEXT_TOKENS (200k) — a five-fold under-estimate.
+  context window". Absent from model_metadata.json when pinned, so without
+  the entry it fell back to DEFAULT_CONTEXT_TOKENS (200k) — a five-fold
+  under-estimate; the table has since gained ``z-ai/glm-5.3-flash``
+  (1,048,576), and the pin is what keeps that window stable across the
+  weekly refresh.
 - ``glm-5.2``: OpenRouter ``z-ai/glm-5.2`` = 1,048,576.
 - ``deepseek-v4-flash``: OpenRouter ``deepseek/deepseek-v4-flash`` FAQ
   ("1,048,576 token context window") for the canonical API name.
@@ -66,6 +69,14 @@ EXPECTED_CATALOG: dict[str, int] = {
 # entry (``minimax-m3.1-flash:free``) is OpenRouter-dialect and only
 # OpenRouter actually serves it, but it still resolves under any provider
 # via exact match.
+#
+# Rows split into registered provider types (``_PROVIDER_TYPES`` in
+# ``profiles/schema.py``: ``zai_coding``, ``minimax_token``,
+# ``custom_anthropic``) and descriptive service names (``qwen_cloud``,
+# ``minimax_coding_plan``, ``deepseek`` — these name the service a profile
+# would talk to, not a type kitty registers). The service rows are
+# historical and kept as-is: they are free of the assertion because the
+# provider argument reaches only log records, so every row resolves alike.
 PROVIDER_VARIANTS = (
     "qwen_cloud",
     "minimax_coding_plan",
@@ -156,9 +167,13 @@ class TestPackagedCatalogSuffixSpelling:
 class TestPackagedCatalogPriority:
     """The packaged catalog outranks provider_config and the default.
 
-    Catalog-vs-metadata precedence cannot be distinguished with the shipped
-    catalog because every pinned value currently equals its metadata value;
-    that precedence is pinned with synthetic data in ``test_model_context.py``
+    The two MiniMax M3.1 Flash entries have no metadata counterpart, so for
+    those rows the shipped catalog alone already distinguishes
+    catalog-over-metadata: without the pins their spellings resolve the 200k
+    default, since the metadata table cannot answer them at all. The other
+    pinned rows still coincide with their metadata value, so precedence for
+    a coincident row stays pinned with synthetic data in
+    ``test_model_context.py``
     (``TestLocalOverrides.test_override_beats_metadata_exact_and_suffix``).
     """
 

@@ -48,3 +48,14 @@ sentence now scopes the wholesale rejection to the synced cache, with the
 packaged catalog held by CI instead; (3) §17.1's catalog summary no longer
 calls every key cloud-native. Merge with main (PR #299) resolved the
 SYSTEM_DESIGN.md tail conflict; the context-window path was untouched.
+
+PR #301 review round 2 (CI bot, 2026-10-22, 3 findings, all addressed,
+docs-only): (1) §17.5's "refreshed manually" was false — `model-metadata.yml`
+refreshes the table weekly via cron and opens a PR; §17.5 now says so;
+(2) the PROVIDER_VARIANTS comment now names which rows are registered
+provider types (`zai_coding`, `minimax_token`, `custom_anthropic`) and which
+are descriptive service names (`qwen_cloud`, `minimax_coding_plan`,
+`deepseek`); (3) two stale module-docstring statements corrected —
+`z-ai/glm-5.3-flash` has since appeared in the metadata table, and the two
+M3.1 pins now lack metadata counterparts, which makes the shipped data
+itself distinguish catalog-over-metadata for them.

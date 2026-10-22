@@ -2650,8 +2650,8 @@ driving compaction and oversized-request handling) and the launcher's
 
 - A model absent from both catalogs resolves 200,000; the resolver logs the
   fall-back once per model (`_log_default_fallback`) rather than per request.
-- The metadata snapshot is refreshed manually; between refreshes new
-  OpenRouter-only models (including new `:free` variants) resolve the default
-  unless pinned.
+- The metadata snapshot is refreshed weekly by `model-metadata.yml` (which
+  opens a pull request); between refreshes new OpenRouter-only models
+  (including new `:free` variants) resolve the default unless pinned.
 - The runtime sync fetches over the network; a machine that never reaches
   GitHub runs on the packaged catalog indefinitely.
