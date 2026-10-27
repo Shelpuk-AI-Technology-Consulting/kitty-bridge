@@ -490,11 +490,11 @@ def _run_bridge(
 ) -> None:
     """Run bridge mode — start OpenAI-compatible API server without launching agent."""
     import asyncio
-    import signal
     import sys
     from contextlib import suppress
 
     from kitty.bridge.server import BridgeServer
+    from kitty.bridge.shutdown import install_stop_signal_handlers
     from kitty.egress import get_egress as _get_egress
     from kitty.egress_guard import egress_block_reason
     from kitty.profiles.schema import BalancingProfile
@@ -580,9 +580,7 @@ def _run_bridge(
 
         # Set up graceful shutdown
         stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, stop_event.set)
-        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+        install_stop_signal_handlers(asyncio.get_running_loop(), stop_event)
 
         try:
             await stop_event.wait()
@@ -609,10 +607,10 @@ def _run_bridge_balancing(
 ) -> None:
     """Run bridge mode with a balancing profile — random selection across healthy members."""
     import asyncio
-    import signal
     import sys
 
     from kitty.bridge.server import BridgeServer
+    from kitty.bridge.shutdown import install_stop_signal_handlers
     from kitty.egress import get_egress as _get_egress
     from kitty.egress_guard import egress_block_reason
     from kitty.profiles.resolver import ProfileResolver
@@ -685,9 +683,7 @@ def _run_bridge_balancing(
         )
 
         stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, stop_event.set)
-        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+        install_stop_signal_handlers(asyncio.get_running_loop(), stop_event)
 
         try:
             await stop_event.wait()

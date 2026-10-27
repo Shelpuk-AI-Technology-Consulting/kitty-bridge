@@ -10,11 +10,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import signal
 import sys
 from pathlib import Path
 
 from kitty.bridge.server import BridgeServer
+from kitty.bridge.shutdown import install_stop_signal_handlers
 
 
 def main() -> None:
@@ -179,9 +179,7 @@ def main() -> None:
         await model_context_sync.refresh_model_context_overrides()
         await server.start_async()
         stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, stop_event.set)
-        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+        install_stop_signal_handlers(asyncio.get_running_loop(), stop_event)
 
         try:
             await stop_event.wait()
