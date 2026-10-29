@@ -23,8 +23,10 @@ model or translation changes.
 
 ## To Be
 
-- The 400's upstream body reaches the debug log bounded and redacted on every
-  custom-transport stream failure (`<no body>` when empty).
+- The 400's upstream body reaches the debug log bounded (500 chars) on every
+  custom-transport stream failure; empty and absent bodies log nothing (the
+  body is carried as-is, not redacted — a 400 body can echo request material,
+  which is why it is DEBUG-only).
 - Probe evidence recorded under the requirements folder names the cause.
 - The follow-up fix lands behind a pinning test.
 
