@@ -652,7 +652,12 @@ class OllamaCloudAdapter(ProviderAdapter):
         return result
 
     def map_error(self, status_code: int, body: dict) -> Exception:
-        """Map an Ollama HTTP error to ProviderError."""
+        """Map an Ollama HTTP error to ProviderError.
+
+        The bounded body rides along as ``upstream_body`` (sibling of the
+        OpenAI subscription adapter): a body whose ``message`` field is empty
+        renders bare, and the structured body is what diagnoses it.
+        """
         if not isinstance(body, dict):
             err = ProviderError(f"Ollama Cloud error {status_code}: {body}")
             err.http_status = status_code
@@ -661,4 +666,5 @@ class OllamaCloudAdapter(ProviderAdapter):
         msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)
         err = ProviderError(f"Ollama Cloud error {status_code}: {msg}")
         err.http_status = status_code
+        err.upstream_body = self._bounded_upstream_body(body)
         return err

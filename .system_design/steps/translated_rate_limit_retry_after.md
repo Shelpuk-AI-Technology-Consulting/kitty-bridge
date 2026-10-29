@@ -37,3 +37,13 @@ Requirements and the test plan live in
   collapse the post-exhaustion empty ladder (`_EMPTY_RETRY_DELAYS`/`_EMPTY_FINAL_DELAYS`)
   following `test_chat_completions_non_streaming_empty_hold.py`'s pattern; every scenario parks
   both members (or uses one), so no assertion depends on weighted-selection order.
+
+## Implementation notes — review round 2 (2026-10-29)
+
+- The shared parser now caps the hint at one hour (`parse_retry_after_seconds`,
+  `_RETRY_AFTER_HINT_CAP = 3600` in `providers/base.py`): a broken `Retry-After: 86400` header
+  parks a member 3600 s, not a day; a genuinely long limit re-parks on its next 429. Pinned at
+  both layers (parser unit test + hinted-429 integration test).
+- Sibling plain arms on the other three routes remain out of scope as recorded above (owner
+  sign-off at development time); the cap, being in the shared parser, covers them the day their
+  hints are wired.

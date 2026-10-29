@@ -233,3 +233,44 @@ class TestNonStreamingRetryAfter:
         # Single-backend pools cap hard-failure cooldowns at 30 s (§6.1); the
         # hint path above must bypass that cap, the hintless path must not.
         assert _cooldowns(server)["solo"][0] == 30
+
+
+class TestHintUpperBound:
+    """A provider hint parks no longer than the shared cap (review 2026-10-29)."""
+
+    @pytest.fixture
+    def fast_empty_ladder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Collapse the post-exhaustion empty ladder's 20 s/40 s sleeps.
+
+        Args:
+            monkeypatch: pytest monkeypatch fixture.
+        """
+        monkeypatch.setattr(server_module, "_EMPTY_RETRY_DELAYS", [0.01, 0.01])
+        monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
+
+    def test_parser_caps_the_hint_at_one_hour(self) -> None:
+        """``parse_retry_after_seconds`` bounds its result to ``[1, 3600]``."""
+        from kitty.providers.base import parse_retry_after_seconds
+
+        assert parse_retry_after_seconds("86400") == 3600
+        assert parse_retry_after_seconds("3600") == 3600
+        assert parse_retry_after_seconds("42") == 42
+        assert parse_retry_after_seconds("0.5") == 1
+        assert parse_retry_after_seconds("-5") == 1
+        assert parse_retry_after_seconds("soon") is None
+        assert parse_retry_after_seconds(None) is None
+
+    @pytest.mark.asyncio()
+    async def test_huge_hint_parks_the_member_for_the_cap(self, fast_empty_ladder: None) -> None:
+        """``Retry-After: 86400`` parks the member 3600 s, not a day."""
+        server = _server([_plain_member("solo", "api0.example.com")])
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api0.example.com/v1/messages", **_rate_limit({"Retry-After": "86400"}), repeat=True)
+                resp = await _post_messages(port, stream=False)
+                assert resp.status == 429, await resp.text()
+        finally:
+            await server.stop_async()
+
+        assert _cooldowns(server)["solo"] == (3600, "rate_limit")

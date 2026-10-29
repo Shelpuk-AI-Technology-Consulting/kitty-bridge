@@ -29,6 +29,10 @@ _SERVER = Path(server_module.__file__)
 #: picked up the branch, a missing one means drift.
 _EXPECTED_SITES = 4
 
+#: The non-streaming twin: the balancing walk parks the member and logs
+#: the body where the failure is handled (review 2026-10-29).
+_EXPECTED_WALK_SITES = 1
+
 
 class TestFailureBodyDebugLog:
     """The shared helper renders the body at DEBUG, and only when present."""
@@ -77,6 +81,48 @@ class TestAllFourSitesLogTheBody:
             f"expected {_EXPECTED_SITES} custom-transport warning sites, found {warning_sites}"
         )
         assert paired_sites == warning_sites, f"{warning_sites - paired_sites} warning site(s) skip the DEBUG body log"
+
+    def test_balancing_walk_logs_the_body_before_parking(self) -> None:
+        """The non-streaming walk's generic failure arm carries the body too.
+
+        The walk logs ``Backend attempt ... failed`` per attempt; the body
+        call must follow it in the same handler, so a non-streaming
+        custom-transport dispatch failure is as diagnosable as a streaming
+        one (review 2026-10-29).
+        """
+        tree = ast.parse(_SERVER.read_text(encoding="utf-8"))
+        walk_sites = 0
+        paired_walk_sites = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name != "_request_with_retry_balancing":
+                continue
+            for sub in ast.walk(node):
+                if not isinstance(sub, ast.Try):
+                    continue
+                for handler in sub.handlers:
+                    body_texts = [
+                        s.value.args[0].value
+                        for s in handler.body
+                        if isinstance(s, ast.Expr)
+                        and isinstance(s.value, ast.Call)
+                        and isinstance(s.value.func, ast.Attribute)
+                        and s.value.func.attr == "info"
+                        and s.value.args
+                        and isinstance(s.value.args[0], ast.Constant)
+                        # The generic arm only: custom-transport failures land
+                        # here (the UpstreamError and refusal arms have their
+                        # own handlers with other wordings).
+                        and "failed (%s), retrying" in str(s.value.args[0].value)
+                    ]
+                    if not body_texts:
+                        continue
+                    walk_sites += 1
+                    if any(_is_failure_body_log(s) for s in handler.body):
+                        paired_walk_sites += 1
+        assert walk_sites == _EXPECTED_WALK_SITES, f"expected one walk failure arm, found {walk_sites}"
+        assert paired_walk_sites == walk_sites, "the walk's failure arm skips the DEBUG body log"
 
 
 def _is_custom_transport_warning(stmt: ast.stmt) -> bool:

@@ -1420,9 +1420,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             The provider error carrying status text and bounded body.
         """
         err = self._map_error_by_status(status_code, body)
-        # Bounded here so no consumer can log the raw body unbounded; the
-        # empty-body case carries no diagnostic and stays None.
-        err.upstream_body = json.dumps(body, ensure_ascii=False)[:500] if body else None
+        err.upstream_body = self._bounded_upstream_body(body)
         return err
 
     def _map_error_by_status(self, status_code: int, body: dict) -> ProviderError:

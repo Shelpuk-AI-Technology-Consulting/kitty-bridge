@@ -77,3 +77,23 @@ duplicating it.
 - Tests: `tests/bridge/test_mixed_pool_subscription_failover.py` (14: selection matrix 7,
   crossing 7). Deterministic via `random.seed(1)` (plain member drawn first) where order
   matters; ladder sleeps patched per the empty-hold test pattern.
+
+## Implementation notes — review round 2 (2026-10-29, owner direction: address relevant findings)
+
+- Empty-response terminals cross too: all five Messages empty terminals (streaming plain
+  exhaustion, custom-transport exhaustion, native streaming ladder exhaustion, both non-streaming
+  gates) offer `_relay_last_resort` before the 502 terminal — they are pre-emission walk-exhaustion
+  points like the error terminals. A count guard pins one crossing call per handler
+  (`_handle_messages` 3, `_stream_messages` 5).
+- Crossing failures render the relay's envelope from every arm via `_relay_failure_envelope`
+  (arrival path deduped onto it): a stall answers 504 on the non-streaming arm AND the streaming
+  plain arm — the latter previously leaked into the dispatch-loop catch-all and surfaced as a
+  mangled 502 (found by the new parity test, not by the review, which had marked the streaming
+  arms safe). Non-transport failures still propagate.
+- Recovery-hold finding rebutted with evidence: the candidates pass computing
+  `AllBackendsUnhealthyError.retry_after` admits the member under `allow_subscription=True`
+  (server.py:2495's skip is three-condition and does not fire), so the hold DOES wait for a
+  member recovering inside the 300 s window — pinned by
+  `TestRecoveryHoldVisibility::test_hold_waits_for_the_subscription_member_recovery` (900/120 park
+  → one 120 s hold → recovery). No code change; the finding's premise was a misread of the
+  triple-negative condition.

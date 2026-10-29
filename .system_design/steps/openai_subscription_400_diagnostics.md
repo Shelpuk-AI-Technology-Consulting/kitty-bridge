@@ -50,3 +50,16 @@ model or translation changes.
   carriage, 500-char bound, empty-body None) and the drift guard (3).
 - Probe + evidence-based correction remain open (owner-action; the probe is what settles
   model id vs request shape vs session).
+
+## Implementation notes — review round 2 (2026-10-29)
+
+- Body carriage widened to the custom-transport siblings: `BedrockAdapter.map_error` and
+  `OllamaCloudAdapter.map_error` attach the bounded body via the new shared
+  `ProviderAdapter._bounded_upstream_body` (the 500-char bound lives in one place;
+  `OpenAISubscriptionAdapter` was moved onto it). Both siblings are `use_custom_transport`
+  providers, so their stream failures reach the same four DEBUG sites.
+- Non-streaming twin wired: the balancing walk's generic failure arm
+  (`_request_with_retry_balancing`, the arm that parks the member) calls the helper after its
+  `Backend attempt ... failed` INFO line; an AST guard pins the pairing. Other routes'
+  single-backend non-stream raises stay uncovered — recorded, not accidental.
+- Step "To Be" wording corrected the same day (bound-only, as-is carriage, silent on empty).

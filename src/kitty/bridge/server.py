@@ -5601,48 +5601,11 @@ class BridgeServer:
                 )
             try:
                 return await self._relay_subscription_messages(request, body, await request.read())
-            except UpstreamError as exc:
-                return self._subscription_error_message_envelope(exc)
-            except asyncio.TimeoutError:
-                # A stalled upstream mirrors the translated Messages path: the
-                # agent gets its 504 envelope and no backend is parked — a
-                # timeout is a slow request, not a sick backend.
-                logger.error("Upstream POST timed out after %ds for the subscription relay", _STREAM_READ_TIMEOUT)
-                return web.json_response(
-                    {
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": (
-                                f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). "
-                                "Try /clear to reduce context size."
-                            ),
-                        },
-                    },
-                    status=504,
-                )
             except Exception as exc:
-                # Single-backend mode has no relay loop, so a dropped wire to
-                # Anthropic would otherwise surface as the middleware's
-                # bridge-shaped 500. Balancing parks and fails over inside the
-                # loop; here there is no backend to park, and the agent gets
-                # the same api_error envelope the translated non-streaming arm
-                # answers for a generic failure. This arm sits last: the
-                # timeout above must keep its own answer. Anything that is not
-                # a transport blip is a bug and propagates untouched.
-                if not _is_transport_error(exc):
+                envelope = self._relay_failure_envelope(exc)
+                if envelope is None:
                     raise
-                logger.warning("Subscription relay transport failure: %s", exc)
-                return web.json_response(
-                    {
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": "Upstream connection to Anthropic failed. Check the network and try again.",
-                        },
-                    },
-                    status=500,
-                )
+                return envelope
 
         try:
             _normalize_messages_request(body)
@@ -5698,7 +5661,19 @@ class BridgeServer:
                 # nothing before this point). Both error arms cross — a walk
                 # whose last attempt is a custom-transport member re-raises a
                 # ProviderError, which must cross like an UpstreamError would.
-                relay_response = await self._relay_last_resort(request, body)
+                try:
+                    relay_response = await self._relay_last_resort(request, body)
+                except Exception as relay_exc:
+                    # The crossing applied and the relay attempt itself
+                    # failed: the relay's own envelope wins (§16) — a stall
+                    # 504s like the arrival path instead of landing in the
+                    # function-level 500 internal-error handler (review
+                    # 2026-10-29). A non-transport failure is a bug and
+                    # propagates untouched.
+                    envelope = self._relay_failure_envelope(relay_exc)
+                    if envelope is None:
+                        raise
+                    return envelope
                 if relay_response is not None:
                     return relay_response
                 if isinstance(exc, UpstreamError):
@@ -5743,6 +5718,14 @@ class BridgeServer:
                         "empty-response terminal",
                         self._active_provider.provider_type,
                     )
+                    # §16: this terminal is a pre-emission walk-exhaustion
+                    # point like the error terminals — every translated
+                    # member answered empty and nothing reached the client —
+                    # so the subscription relay is offered before it (review
+                    # 2026-10-29).
+                    relay_response = await self._relay_last_resort(request, body)
+                    if relay_response is not None:
+                        return relay_response
                     return web.json_response(
                         {
                             "type": "error",
@@ -5782,6 +5765,11 @@ class BridgeServer:
                     "empty-response terminal",
                     self._active_provider.provider_type,
                 )
+                # §16: pre-emission walk exhaustion — offer the relay before
+                # the terminal (review 2026-10-29).
+                relay_response = await self._relay_last_resort(request, body)
+                if relay_response is not None:
+                    return relay_response
                 return web.json_response(
                     {
                         "type": "error",
@@ -5981,6 +5969,63 @@ class BridgeServer:
             logger.debug("Last-resort crossing could not read the original bytes", exc_info=True)
             return None
         return await self._relay_subscription_messages(request, body, raw)
+
+    def _relay_failure_envelope(self, exc: Exception) -> web.Response | None:
+        """Render the relay's terminal envelope for a failed relay attempt.
+
+        One implementation of the arrival path's handler chain, shared with
+        the crossing sites (§16: the crossing reuses the relay's terminal
+        envelopes): an upstream status surfaces the provider's envelope, a
+        stall the 504 envelope with the /clear hint, and a dropped wire the
+        connection-failed envelope. A non-transport failure is a bug and
+        gets ``None`` so the caller re-raises it untouched.
+
+        Args:
+            exc: The failure raised by the relay attempt.
+
+        Returns:
+            The envelope response, or ``None`` when the failure is not one
+            the relay owns.
+        """
+        if isinstance(exc, UpstreamError):
+            return self._subscription_error_message_envelope(exc)
+        if isinstance(exc, asyncio.TimeoutError):
+            # A stalled upstream mirrors the translated Messages path: the
+            # agent gets its 504 envelope and no backend is parked — a
+            # timeout is a slow request, not a sick backend.
+            logger.error("Upstream POST timed out after %ds for the subscription relay", _STREAM_READ_TIMEOUT)
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": (
+                            f"Upstream provider timed out ({_STREAM_READ_TIMEOUT}s). "
+                            "Try /clear to reduce context size."
+                        ),
+                    },
+                },
+                status=504,
+            )
+        if _is_transport_error(exc):
+            # Single-backend mode has no relay loop, so a dropped wire to
+            # Anthropic would otherwise surface as the middleware's
+            # bridge-shaped 500. Balancing parks and fails over inside the
+            # loop; here there is no backend to park, and the agent gets
+            # the same api_error envelope the translated non-streaming arm
+            # answers for a generic failure.
+            logger.warning("Subscription relay transport failure: %s", exc)
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": "Upstream connection to Anthropic failed. Check the network and try again.",
+                    },
+                },
+                status=500,
+            )
+        return None
 
     async def _relay_subscription_messages(self, request: web.Request, body: dict, raw: bytes) -> web.StreamResponse:
         # pragma: no mutate block
@@ -6597,7 +6642,12 @@ class BridgeServer:
                             # plain-POST twin's `empty_no_finish` branch:
                             # the judge guarantees nothing was emitted, so
                             # `sr is None` and the bare-JSON response is
-                            # legal (§5.3 S8).
+                            # legal (§5.3 S8). The walk is exhausted and
+                            # nothing reached the client, so the subscription
+                            # relay is offered first (§16, review 2026-10-29).
+                            relay_response = await self._relay_last_resort(request, body)
+                            if relay_response is not None:
+                                return relay_response
                             return _make_error_response(
                                 {
                                     "type": "error",
@@ -7139,7 +7189,17 @@ class BridgeServer:
                                 # has reached the client (sr is None is the
                                 # pre-emission invariant); cross into the raw relay.
                                 if sr is None:
-                                    relay_response = await self._relay_last_resort(request, body)
+                                    # The relay's own envelope wins when the
+                                    # crossing fails (§16) — a stall must not
+                                    # leak into the dispatch-loop's catch-all,
+                                    # which mangles it (review 2026-10-29).
+                                    try:
+                                        relay_response = await self._relay_last_resort(request, body)
+                                    except Exception as relay_exc:
+                                        envelope = self._relay_failure_envelope(relay_exc)
+                                        if envelope is None:
+                                            raise
+                                        return envelope
                                     if relay_response is not None:
                                         return relay_response
                                 error_msg = self._translate_upstream_error(upstream.status, error_body)
@@ -7336,6 +7396,11 @@ class BridgeServer:
                                 # only the marker added; a malformed one cannot be delivered, and the
                                 # body falls back to kitty's own upstream-error wording (Q9), never to
                                 # the empty-reply message that would misreport what happened.
+                                # Pre-emission walk exhaustion: the subscription relay is offered
+                                # before the terminal (§16, review 2026-10-29).
+                                relay_response = await self._relay_last_resort(request, body)
+                                if relay_response is not None:
+                                    return relay_response
                                 if usable_payload is not None:
                                     exhaustion_error = {
                                         **usable_payload,
@@ -7842,6 +7907,11 @@ class BridgeServer:
                                     attempt + 1,
                                     message_id,
                                 )
+                                # Pre-emission walk exhaustion: the subscription relay is
+                                # offered before the terminal (§16, review 2026-10-29).
+                                relay_response = await self._relay_last_resort(request, body)
+                                if relay_response is not None:
+                                    return relay_response
                                 return _make_error_response(
                                     {
                                         "type": "error",
@@ -8037,8 +8107,16 @@ class BridgeServer:
                             if sr is None:
                                 # §16 last resort: same crossing as the plain
                                 # arm's terminal — the walk is exhausted with
-                                # nothing written to the client.
-                                relay_response = await self._relay_last_resort(request, body)
+                                # nothing written to the client. The relay's
+                                # own envelope wins when the crossing fails
+                                # (§16, review 2026-10-29).
+                                try:
+                                    relay_response = await self._relay_last_resort(request, body)
+                                except Exception as relay_exc:
+                                    envelope = self._relay_failure_envelope(relay_exc)
+                                    if envelope is None:
+                                        raise
+                                    return envelope
                                 if relay_response is not None:
                                     return relay_response
                                 return _make_error_response(error_data, status=_last_error_status)
@@ -9585,6 +9663,11 @@ class BridgeServer:
                     n_backends,
                     exc,
                 )
+                # Non-streaming twin of the four streaming sites: a
+                # custom-transport dispatch failure here is the same silent
+                # diagnostic (review 2026-10-29) — the body reaches the DEBUG
+                # log where the walk parks the member.
+                BridgeServer._log_custom_transport_failure_body(exc)
 
         # KBR-5: every backend has been tried and at least one found nothing
         # left to send. Raised here, above the final empty-response retries,

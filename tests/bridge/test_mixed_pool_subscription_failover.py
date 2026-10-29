@@ -15,10 +15,14 @@ directory (``tests/layers.py`` maps only ``tests/integration/`` away).
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import json
 import random
 import time
 import uuid
+from pathlib import Path
+from types import SimpleNamespace
 
 import aiohttp
 import pytest
@@ -236,6 +240,22 @@ def _relay_calls(m: aioresponses) -> list:
     return [call for (method, url), calls in m.requests.items() for call in calls if str(url) == _UPSTREAM_URL]
 
 
+@pytest.fixture
+def fast_ladders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Collapse every retry ladder's sleeps to nothing.
+
+    The non-streaming walk backs off in real time (500s retry internally
+    at 1/2/4s, then the empty ladder at 20/40s); the crossing under test
+    fires only after exhaustion, so the waits buy the test nothing.
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr(server_module, "_EMPTY_RETRY_DELAYS", [0.01, 0.01])
+    monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
+
+
 class TestSelectionVisibility:
     """Translated selections skip subscription members unless asked (R1/R2)."""
 
@@ -297,21 +317,6 @@ class TestSelectionVisibility:
 
 class TestLastResortCrossing:
     """An exhausted translated Messages walk crosses into the raw relay (R4-R7)."""
-
-    @pytest.fixture
-    def fast_ladders(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Collapse every retry ladder's sleeps to nothing.
-
-        The non-streaming walk backs off in real time (500s retry internally
-        at 1/2/4s, then the empty ladder at 20/40s); the crossing under test
-        fires only after exhaustion, so the waits buy the test nothing.
-
-        Args:
-            monkeypatch: pytest monkeypatch fixture.
-        """
-        monkeypatch.setattr(server_module, "_BACKOFF_BASE", 0.01)
-        monkeypatch.setattr(server_module, "_EMPTY_RETRY_DELAYS", [0.01, 0.01])
-        monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
 
     @pytest.mark.asyncio()
     async def test_streaming_exhausted_plain_walk_crosses_to_relay(self) -> None:
@@ -490,3 +495,203 @@ class TestLastResortCrossing:
                     assert (await resp.json())["content"][0]["text"] == "Hi"
         finally:
             await server.stop_async()
+
+
+class TestCrossingFailureEnvelopes:
+    """A relay attempt that fails inside the crossing renders the relay's envelope."""
+
+    @staticmethod
+    def _stall_relay(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the relay attempt itself stall.
+
+        Args:
+            monkeypatch: pytest monkeypatch fixture.
+        """
+
+        async def _raise_timeout(self: BridgeServer, request, body, raw):  # noqa: ANN001
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(BridgeServer, "_relay_subscription_messages", _raise_timeout)
+
+    @pytest.mark.asyncio()
+    async def test_stalled_crossing_answers_504_on_non_streaming(
+        self, monkeypatch: pytest.MonkeyPatch, fast_ladders: None
+    ) -> None:
+        """The non-streaming crossing's own stall 504s — not 500 internal_error (review 2026-10-29)."""
+        random.seed(1)  # deterministic backend selection: plain-0 (the 500ing member) first
+        self._stall_relay(monkeypatch)
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_APIKEY_URL, status=500, body=json.dumps({"error": "translated-walk-failure"}), repeat=True)
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_BODY,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 504, body_text
+                    assert "timed out" in body_text
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio()
+    async def test_stalled_crossing_answers_504_on_streaming(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The streaming arm keeps its 504 for a stalled crossing (parity pin)."""
+        random.seed(1)
+        self._stall_relay(monkeypatch)
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_APIKEY_URL, status=500, body=json.dumps({"error": "translated-walk-failure"}), repeat=True)
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_STREAM_BODY,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 504, body_text
+                    assert "timed out" in body_text
+        finally:
+            await server.stop_async()
+
+
+class TestEmptyTerminalCrossing:
+    """The Messages empty terminals are pre-emission exhaustion points: they cross (§16)."""
+
+    @pytest.mark.asyncio()
+    async def test_non_streaming_empty_terminal_crosses_to_relay(self, fast_ladders: None) -> None:
+        """Every translated member answers empty; the relay serves the turn (review 2026-10-29)."""
+        random.seed(1)  # deterministic backend selection: plain-0 (the emptying member) first
+        empty_reply = {
+            "id": "msg_empty",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 0},
+        }
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_APIKEY_URL, status=200, body=json.dumps(empty_reply), repeat=True)
+                m.post(_UPSTREAM_URL, status=200, body=json.dumps(_UPSTREAM_REPLY))
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_BODY,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 200, body_text
+                    assert (await resp.json())["content"][0]["text"] == "Hi"
+                assert len(_relay_calls(m)) == 1
+        finally:
+            await server.stop_async()
+
+    @pytest.mark.asyncio()
+    async def test_streaming_empty_ladder_crosses_to_relay(self, fast_ladders: None) -> None:
+        """A CC-shaped inbound whose streams never carry content crosses at the S11 terminal."""
+        random.seed(1)
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        cc_stream_body = (
+            b'{\n  "model" : "test-model",\n  "messages" : [ { "role" : "user", "content" : "Hello" } ],\n'
+            b'  "max_tokens" : 8,\n  "stream" : true\n}'
+        )
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_APIKEY_URL, status=200, body=b"data: [DONE]\n\n", repeat=True)
+                m.post(_UPSTREAM_URL, body=_SSE_REPLY, headers={"Content-Type": "text/event-stream"})
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=cc_stream_body,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 200, body_text
+                    assert "Hi" in body_text
+                assert len(_relay_calls(m)) == 1
+        finally:
+            await server.stop_async()
+
+    def test_every_messages_empty_terminal_precedes_a_crossing(self) -> None:
+        """Drift guard: each Messages handler offers the relay before its empty terminals.
+
+        Counting the ``_relay_last_resort`` calls per handler pins the wiring:
+        ``_handle_messages`` carries the non-stream error terminal plus two
+        empty terminals; ``_stream_messages`` carries the plain error
+        terminal, the custom-arm terminal, and three empty terminals.
+        """
+        tree = ast.parse(Path(server_module.__file__).read_text(encoding="utf-8"))
+        counts = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in (
+                "_handle_messages",
+                "_stream_messages",
+            ):
+                counts[node.name] = sum(
+                    1
+                    for sub in ast.walk(node)
+                    if isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "_relay_last_resort"
+                )
+        assert counts == {"_handle_messages": 3, "_stream_messages": 5}
+
+
+class TestRecoveryHoldVisibility:
+    """The recovery hold's window sees the subscription member (review 2026-10-29)."""
+
+    @pytest.mark.asyncio()
+    async def test_hold_waits_for_the_subscription_member_recovery(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Translated members park 900 s, the member 120 s: the hold waits for the member.
+
+        Falsifies the review's cell: the all-unhealthy raise's
+        ``retry_after`` is the minimum over the candidates pass, and that
+        pass admits the member when ``allow_subscription`` was requested —
+        so ``_select_backend_or_hold`` holds 120 s and recovers into the
+        member instead of answering 503 immediately.
+        """
+        clock = {"now": 1000.0}
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(server_module.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(server_module, "_recovery_hold_jitter", lambda: 0.0)
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        _park(server, 0, 900)
+        _park(server, 1, 120)
+        result = await server._select_backend_or_hold(_connected_request())
+        assert result is None, "the hold must wait for the member's 120 s recovery, not 503"
+        assert sleeps == [120.0]
+
+    @pytest.mark.asyncio()
+    async def test_hold_skips_when_only_beyond_window_recoveries_remain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every recovery beyond 300 s (member included) still answers at once."""
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: 1000.0)
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        _park(server, 0, 900)
+        _park(server, 1, 400)
+        result = await server._select_backend_or_hold(_connected_request())
+        assert isinstance(result, AllBackendsUnhealthyError)
+        assert result.retry_after == 400
+
+
+def _connected_request() -> object:
+    """Return a request stub whose transport reports a connected client.
+
+    Returns:
+        A stand-in with the ``transport.is_closing`` shape the hold polls.
+    """
+    return SimpleNamespace(transport=SimpleNamespace(is_closing=lambda: False))

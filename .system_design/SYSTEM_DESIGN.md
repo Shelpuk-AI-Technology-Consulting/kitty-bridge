@@ -1122,7 +1122,11 @@ length depends on the kind: `rate_limit` from the provider's own retry hint,
 parsed from `Retry-After` on the raw-subscription path, the Messages plain
 streaming arm, the Messages custom arm, and the shared non-streaming
 classification when the header is present (numeric seconds only; an HTTP-date
-or absent header takes `backend_cooldown`, default 300 s); `hard`/`cloudflare`
+or absent header takes `backend_cooldown`, default 300 s). The parsed hint is
+capped at one hour (`parse_retry_after_seconds`, 2026-10-29 review): a broken
+upstream header can no longer bench a member for a day, while a genuinely long
+rate limit still gets a real cooldown — the member re-parks on its next 429,
+costing one request per cap period; `hard`/`cloudflare`
 from `backend_cooldown` (default 300 s; capped at 30 s for a
 one-backend pool), `transport`/`stream` on an escalating ladder, `auth` for 900 s,
 `entitlement` for 24 h. On request arrival `_select_backend()` picks among healthy
@@ -2520,11 +2524,20 @@ surface before any byte has reached the client, the bridge selects the healthy s
 member and serves the ORIGINAL inbound bytes through the raw relay
 (`_relay_last_resort`). The crossing is pre-emission-only (the post-emission rule stands),
 exists only on the Messages terminals (streaming plain transport, streaming custom transport,
-non-streaming from both of its error arms), reuses the relay's loop with its confinement, health
+non-streaming from both of its error arms) and on the Messages empty-response terminals — the
+five points where every translated member answered content-less and nothing has reached the
+client (streaming plain and custom exhaustion, native streaming ladder exhaustion, and both
+non-streaming gates; a count guard pins one crossing call per terminal, review 2026-10-29) —
+reuses the relay's loop with its confinement, health
 classifier, and terminal envelopes intact, and is structurally unreachable from Chat Completions,
 Responses, and Gemini ingress, whose failovers never see the member. When the crossed relay
 attempt itself fails, the client receives the relay's own envelope — the translated walk's last
-error is discarded. The crossing serves the original bytes, so any compaction the translated walk
+error is discarded. Every crossing site renders that envelope through one shared helper
+(`_relay_failure_envelope`: upstream status → provider envelope, stall → the 504
+`api_error` envelope with the /clear hint, transport blip → the connection-failed envelope,
+anything else → a bug that propagates), so a stalled crossing answers 504 from every arm —
+including the non-streaming arm and the streaming plain arm, whose stall previously leaked into
+the dispatch-loop's catch-all and surfaced as a mangled 502 (review 2026-10-29). The crossing serves the original bytes, so any compaction the translated walk
 performed is discarded: a request that only fit after compaction may be rejected by Anthropic on
 size — an accepted trade-off, deliberate rather than accidental (relaying rewritten bytes would
 end the byte-exact contract §16 exists to keep). Three companion disciplines keep the exclusion
