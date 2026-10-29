@@ -32,7 +32,7 @@ model or translation changes.
 
 ## Verification
 
-- L1 error-rendering unit (present/empty/non-JSON/oversized, redaction), L3
+- L1 error-rendering unit (present/empty/non-JSON/oversized, 500-char bound), L3
   stream-failure logging, probe evidence, full sweep.
 
 ## Implementation notes (2026-10-29, diagnostic half delivered)

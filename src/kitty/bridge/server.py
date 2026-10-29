@@ -2772,6 +2772,13 @@ class BridgeServer:
         if failure_kind == "transport":
             health["transport_error_count"] = health.get("transport_error_count", 0) + 1
             health["stream_error_count"] = 0
+        elif failure_kind == "rate_limit":
+            # A hinted rate-limit park says "upstream is throttling", not "the
+            # stream broke": it must not feed the stream-error escalation
+            # ladder, or a member flapping 429s would have its next transient
+            # stream failure parked for a doubled cooldown (review round 3).
+            health["stream_error_count"] = 0
+            health["transport_error_count"] = 0
         elif failure_kind == "stream" or (cooldown is not None and cooldown <= self._backend_cooldown):
             health["stream_error_count"] = health.get("stream_error_count", 0) + 1
             health["transport_error_count"] = 0

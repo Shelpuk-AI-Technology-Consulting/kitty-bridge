@@ -414,7 +414,7 @@ class TestMessagesCustomArmRetryAfter:
                     call
                     for (method, url), calls in m.requests.items()
                     for call in calls
-                    if "api.anthropic.com" in str(url)
+                    if str(url) == "https://api.anthropic.com/v1/messages"
                 ]
         finally:
             await server.stop_async()
