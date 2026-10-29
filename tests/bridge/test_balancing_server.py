@@ -913,7 +913,11 @@ class TestBalancingAllCustomTransport:
         draw = iter(chain([0], repeat(1)))
 
         def _deterministic_draw(
-            self=server, *, require_streaming: bool = False, require_subscription: bool = False
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
         ):
             """Serve the scripted order: the non-stream backend first, then the stream-capable one."""
             idx = next(draw)
@@ -1147,7 +1151,11 @@ class TestBalancingAllCustomTransport:
         draw = iter(chain([0], repeat(1)))
 
         def _deterministic_draw(
-            self=server, *, require_streaming: bool = False, require_subscription: bool = False
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
         ):
             idx = next(draw)
             provider, key, profile = self._backends[idx]
@@ -1189,7 +1197,11 @@ class TestBalancingAllCustomTransport:
         draw = iter(chain([0], repeat(1)))
 
         def _deterministic_draw(
-            self=server, *, require_streaming: bool = False, require_subscription: bool = False
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
         ):
             idx = next(draw)
             provider, key, profile = self._backends[idx]
@@ -1223,7 +1235,11 @@ class TestBalancingAllCustomTransport:
         draw = iter(chain([0], repeat(1)))
 
         def _deterministic_draw(
-            self=server, *, require_streaming: bool = False, require_subscription: bool = False
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
         ):
             idx = next(draw)
             provider, key, profile = self._backends[idx]

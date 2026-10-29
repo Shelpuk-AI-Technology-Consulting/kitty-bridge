@@ -970,7 +970,13 @@ class TestResponsesEmptyVerdictAfterContent:
         # without ever exercising the ladder.
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = server._backends[idx]
@@ -1234,7 +1240,13 @@ class TestGeminiEmptyVerdictAfterContent:
         # Pin the draw: backend-0 first (empty), then backend-1 (full).
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = server._backends[idx]
@@ -1316,7 +1328,13 @@ class TestGeminiEmptyVerdictAfterContent:
         # backend-1 (full). Same pattern as the pure-empty control above.
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = server._backends[idx]

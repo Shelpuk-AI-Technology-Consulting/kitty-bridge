@@ -825,7 +825,13 @@ class TestEmptyResponseBalancing:
         # Simpler: just monkey-patch _select_backend to pick backends in order
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = self._backends[idx]
@@ -874,7 +880,13 @@ class TestEmptyResponseBalancing:
         # Force deterministic backend selection: backend-0 first, then backend-1
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = self._backends[idx]
@@ -1169,7 +1181,13 @@ class TestNoFinishEmptyStream:
         # Force deterministic backend selection: backend-0, then backend-1, then backend-0 again.
         _pick = iter([0, 1, 0])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = self._backends[idx]
@@ -1301,7 +1319,13 @@ class TestNoFinishEmptyStream:
         server = _make_balancing_server(2)
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = self._backends[idx]
@@ -1476,7 +1500,13 @@ class TestD3TruncationBeforeContent:
         server = _make_balancing_server(2)
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = self._backends[idx]
@@ -1556,7 +1586,13 @@ class TestD3TruncationBeforeContent:
         server = _make_balancing_server(2)
         _pick = iter([0, 1, 1, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = self._backends[idx]
@@ -1719,7 +1755,13 @@ class TestResponsesNoFinishEmptyStream:
         server = _make_balancing_server(2)
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = self._backends[idx]
@@ -1906,7 +1948,13 @@ class TestGeminiNoFinishEmptyStream:
         server = _make_balancing_server(2)
         _pick = iter([0, 1])
 
-        def _fixed_select(self=server):
+        def _fixed_select(
+            self=server,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             """Select backends in the scripted order, without the weighted draw."""
             idx = next(_pick)
             provider, key, profile = self._backends[idx]

@@ -836,6 +836,11 @@ class ProviderError(Exception):
     is_cloudflare = False
     http_status: int = 0
     retry_after: int | None = None
+    #: Bounded, JSON-encoded upstream body the bridge renders at DEBUG —
+    #: the exception text folds only the provider's ``message`` field, so an
+    #: empty one would otherwise leave a log line with nothing after the
+    #: colon (2026-10-29 diagnosis). ``None`` when there is no body.
+    upstream_body: str | None = None
 
 
 class UnsupportedModelError(ProviderError):

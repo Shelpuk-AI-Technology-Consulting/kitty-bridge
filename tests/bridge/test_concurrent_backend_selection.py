@@ -221,7 +221,13 @@ class TestProviderConfigContextIsolation:
         # knows which config it must still be seeing after its await.
         selection_order = iter([0, 1])
 
-        def _pinned_backend(self, *, require_streaming: bool = False, require_subscription: bool = False):
+        def _pinned_backend(
+            self,
+            *,
+            require_streaming: bool = False,
+            require_subscription: bool = False,
+            allow_subscription: bool = False,
+        ):
             provider, key, profile = self._backends[next(selection_order)]
             return provider, key, profile.model, profile.provider_config, 0
 

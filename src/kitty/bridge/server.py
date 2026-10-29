@@ -2352,7 +2352,11 @@ class BridgeServer:
         return _backend_context.get(_EMPTY_CTX)
 
     def _get_next_backend(
-        self, *, require_streaming: bool = False, require_subscription: bool = False
+        self,
+        *,
+        require_streaming: bool = False,
+        require_subscription: bool = False,
+        allow_subscription: bool = False,
     ) -> tuple[ProviderAdapter, str, str | None, dict, int]:
         # pragma: no mutate block
         """Select a healthy backend at random, weighted by past reliability.
@@ -2374,6 +2378,15 @@ class BridgeServer:
             require_subscription: Exclude backends that are not subscription
                 relays, so a raw subscription request never fails over to
                 an API-key translation path.
+            allow_subscription: Admit subscription relays into a translated
+                selection. Defaults to False: subscription members carry no
+                stored credential, so a translated dispatch to one answers a
+                guaranteed 401 (§16, 2026-10-29 diagnosis). Only the arrival
+                pick (:meth:`_select_backend_or_hold`) sets this, so the
+                round-robin can land on the member and the raw relay engages.
+                The ``require_subscription`` and ``allow_subscription``
+                filters are exclusive by intent: exactly one admission rule
+                applies per selection.
 
         Returns:
             ``(provider, resolved_key, model, provider_config, backend_index)``.
@@ -2400,6 +2413,11 @@ class BridgeServer:
                 if require_streaming and not provider.use_custom_transport:
                     continue
                 if require_subscription and not _is_subscription_provider(provider):
+                    continue
+                # §16: a translated selection never lands on a subscription
+                # member — its stored key is empty by construction, so the
+                # dispatch could only answer a guaranteed 401.
+                if not require_subscription and not allow_subscription and _is_subscription_provider(provider):
                     continue
                 if health["healthy"]:
                     healthy_indices.append(idx)
@@ -2474,6 +2492,8 @@ class BridgeServer:
                     continue
                 if require_subscription and not _is_subscription_provider(provider):
                     continue
+                if not require_subscription and not allow_subscription and _is_subscription_provider(provider):
+                    continue
                 health = self._backend_health[idx]
                 failed_at = health["failed_at"]
                 remaining = 0
@@ -2511,7 +2531,16 @@ class BridgeServer:
                     pool = [i for i in range(n) if _is_subscription_provider(self._backends[i][0])]
                     idx = random.choice(pool)
                 else:
-                    idx = random.randint(0, n - 1)
+                    # §16: the gamble is bound by the same visibility as the
+                    # passes above — a fully-cooled mixed pool raises rather
+                    # than dispatching the member through an API-key path.
+                    pool = [
+                        i for i in range(n) if allow_subscription or not _is_subscription_provider(self._backends[i][0])
+                    ]
+                    if not pool:
+                        self._stats_all_unhealthy += 1
+                        raise AllBackendsUnhealthyError(backend_status, 0, recoverable=False)
+                    idx = random.choice(pool)
             backend = self._backends[idx]
             provider, key, profile = backend
             return provider, key, profile.model, profile.provider_config, idx  # type: ignore[union-attr]
@@ -2623,7 +2652,10 @@ class BridgeServer:
             with.
         """
         try:
-            self._select_backend()
+            # The arrival pick admits the subscription member (§16): the
+            # round-robin may land on it, engaging the raw relay on Messages
+            # and the routes' own rejections elsewhere.
+            self._select_backend(allow_subscription=True)
             return None
         except AllBackendsUnhealthyError as exc:
             pending = exc
@@ -2654,7 +2686,7 @@ class BridgeServer:
             if self._client_gone(request):
                 return pending
             try:
-                self._select_backend()
+                self._select_backend(allow_subscription=True)
                 logger.info(
                     "Backend recovered after %.0fs recovery hold; proceeding",
                     time.monotonic() - arrival,
@@ -2756,9 +2788,25 @@ class BridgeServer:
             failure_kind,
         )
 
-    def _any_healthy_backend(self, *, require_streaming: bool = False, require_subscription: bool = False) -> bool:
+    def _any_healthy_backend(
+        self,
+        *,
+        require_streaming: bool = False,
+        require_subscription: bool = False,
+        allow_subscription: bool = False,
+    ) -> bool:
         # pragma: no mutate block
-        """Check if there's at least one healthy backend remaining."""
+        """Check whether a visible healthy backend remains.
+
+        Args:
+            require_streaming: Exclude providers without custom streaming support.
+            require_subscription: Consider subscription relays only.
+            allow_subscription: Admit subscription relays for an arrival pick.
+
+        Returns:
+            True when a backend visible under the same filters as the paired
+            :meth:`_select_backend` is healthy or its cooldown has expired.
+        """
         if not self._backends:
             return False
         for idx, health in enumerate(self._backend_health):
@@ -2768,6 +2816,11 @@ class BridgeServer:
             if require_streaming and not provider.use_custom_transport:
                 continue
             if require_subscription and not _is_subscription_provider(provider):
+                continue
+            # Same visibility as the paired selection: a guard that passes on
+            # a member the selection will refuse turns the exclusion into an
+            # uncaught AllBackendsUnhealthyError (§16).
+            if not require_subscription and not allow_subscription and _is_subscription_provider(provider):
                 continue
             if health["healthy"]:
                 return True
@@ -3202,7 +3255,11 @@ class BridgeServer:
         return None
 
     def _select_backend(
-        self, *, require_streaming: bool = False, require_subscription: bool = False
+        self,
+        *,
+        require_streaming: bool = False,
+        require_subscription: bool = False,
+        allow_subscription: bool = False,
     ) -> _BackendContext:
         # pragma: no mutate block
         """Select next backend and set active fields for the current request.
@@ -3210,7 +3267,11 @@ class BridgeServer:
         When require_streaming is True, only selects backends whose provider
         overrides stream_request() from the base ProviderAdapter. When
         require_subscription is True, only selects subscription backends, so
-        a raw subscription request never crosses into an API-key path.
+        a raw subscription request never crosses into an API-key path. By
+        default (``allow_subscription=False``) a translated selection skips
+        subscription backends entirely — they carry no stored credential and
+        cannot authenticate a translated dispatch (§16); only the arrival
+        pick admits them.
 
         Returns a dict with ``provider``, ``key``, ``model``, and ``idx``
         that can be used for assertion / testing.  Production code should
@@ -3220,6 +3281,7 @@ class BridgeServer:
         provider, key, model, provider_config, backend_idx = self._get_next_backend(
             require_streaming=require_streaming,
             require_subscription=require_subscription,
+            allow_subscription=allow_subscription,
         )
         self._active_provider = provider
         self._active_key = key
@@ -4347,6 +4409,7 @@ class BridgeServer:
                         await self._active_provider.stream_request(cc_request, _collect)
                     except Exception as exc:
                         logger.warning("Custom-transport stream failed: %s", exc)
+                        BridgeServer._log_custom_transport_failure_body(exc)
                         if self._backends and self._current_backend_idx >= 0:
                             kind = self._provider_error_failure_kind(exc)
                             self._mark_backend_unhealthy(
@@ -5629,13 +5692,21 @@ class BridgeServer:
             except CompactionFailedError:
                 # Must precede `except Exception`, which would render a 500.
                 return self._compaction_failed_response(style="anthropic")
-            except UpstreamError as exc:
-                error_msg = self._translate_upstream_error(exc.status, exc.body)
-                return web.json_response(
-                    {"type": "error", "error": {"type": "api_error", "message": error_msg}},
-                    status=exc.status,
-                )
             except Exception as exc:
+                # §16 last resort: the translated walk is exhausted and the
+                # error would surface pre-emission (non-streaming writes
+                # nothing before this point). Both error arms cross — a walk
+                # whose last attempt is a custom-transport member re-raises a
+                # ProviderError, which must cross like an UpstreamError would.
+                relay_response = await self._relay_last_resort(request, body)
+                if relay_response is not None:
+                    return relay_response
+                if isinstance(exc, UpstreamError):
+                    error_msg = self._translate_upstream_error(exc.status, exc.body)
+                    return web.json_response(
+                        {"type": "error", "error": {"type": "api_error", "message": error_msg}},
+                        status=exc.status,
+                    )
                 error_msg = self._custom_transport_error_message(exc)
                 return web.json_response(
                     {"type": "error", "error": {"type": "api_error", "message": error_msg}},
@@ -5872,42 +5943,60 @@ class BridgeServer:
             )
         return self._translate_upstream_error(exc.status, exc.body)
 
+    async def _relay_last_resort(self, request: web.Request, body: dict) -> web.StreamResponse | None:
+        # pragma: no mutate block
+        """Cross an exhausted translated Messages walk into the raw relay.
+
+        The overflow role a mixed pool's subscription member exists to play
+        (§16): when every translated attempt has failed and the error would
+        surface before any byte has reached the client, the healthy member is
+        selected and the ORIGINAL inbound bytes are relayed under Claude
+        Code's own headers. The relay keeps all of its semantics — byte
+        preservation, confinement to subscription members, the shared health
+        classifier, and its own terminal envelopes when it fails too.
+
+        Args:
+            request: The inbound client request (raw bytes are re-read from
+                aiohttp's cache, never re-parsed from ``body``).
+            body: The parsed inbound body, used only for the stream flag and
+                the upstream URL.
+
+        Returns:
+            The relay's response, or ``None`` when the crossing does not
+            apply: single-backend mode, the relay forbidden, no healthy
+            member, or the original bytes unreadable.
+        """
+        if not self._backends or self._subscription_relay_forbidden():
+            return None
+        if not self._any_healthy_backend(require_subscription=True):
+            return None
+        self._select_backend(require_subscription=True)
+        logger.info(
+            "Crossing translated → subscription relay (last resort): member %s",
+            self._backends[self._current_backend_idx][2].name,
+        )
+        try:
+            raw = await request.read()
+        except Exception:
+            logger.debug("Last-resort crossing could not read the original bytes", exc_info=True)
+            return None
+        return await self._relay_subscription_messages(request, body, raw)
+
     async def _relay_subscription_messages(self, request: web.Request, body: dict, raw: bytes) -> web.StreamResponse:
         # pragma: no mutate block
         """Relay Claude Code's Messages request to Anthropic byte for byte.
 
-        No model rewriting, translation, normalization, compaction,
-        truncation, synthetic authentication, or token refresh touches the
-        request: the shipped bytes are the inbound bytes, and the shipped
-        headers are the inbound end-to-end headers. A successful reply is
-        returned as received. Failures raise :class:`UpstreamError` carrying
-        status, a bounded body, and the parsed ``Retry-After`` hint so the
-        existing backend-health classifier judges them like any other
-        backend's.
-
-        In a balancing pool a failed attempt parks its backend and fails
-        over only to another subscription member — a raw subscription
-        request never crosses into an API-key translation path. With no
-        eligible subscription member left, the request takes the existing
-        all-unhealthy response.
-
         Args:
             request: The inbound client request.
-            body: The parsed inbound body, used only for the stream flag and
-                the upstream URL — never re-serialized onto the wire.
+            body: Parsed only for the stream flag and upstream URL.
             raw: The inbound JSON bytes, exactly as received.
 
         Returns:
-            The upstream reply — the JSON body as-is, or the SSE stream —
-            or, for upstream failures, the handler's translated error
-            envelope via :class:`UpstreamError`.
+            The upstream JSON or SSE reply as received.
 
         Raises:
-            UpstreamError: When the upstream fails in single-backend mode,
-                after the request's transport grace is spent.
-            asyncio.TimeoutError: When the upstream stalls past the read
-                timeout; the handler answers 504 without parking, matching
-                the translated Messages path.
+            UpstreamError: When the relay's retry policy exhausts.
+            asyncio.TimeoutError: When the upstream read timeout expires.
         """
         url = self._build_upstream_url(body)
         headers = self._subscription_relay_headers(request)
@@ -6345,6 +6434,7 @@ class BridgeServer:
                         await self._active_provider.stream_request(cc_request, _collect)
                     except Exception as exc:
                         logger.warning("Custom-transport stream failed: %s", exc)
+                        BridgeServer._log_custom_transport_failure_body(exc)
                         # In balancing mode: mark unhealthy and failover
                         if self._backends and self._current_backend_idx >= 0:
                             kind = self._provider_error_failure_kind(exc)
@@ -6979,7 +7069,26 @@ class BridgeServer:
                                         if upstream.status in _AUTH_FAILURE_STATUSES
                                         else ("rate_limit" if upstream.status == 429 else "hard")
                                     )
-                                    self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
+                                    # §6.1: a rate-limited member parks for the
+                                    # provider's own retry hint when it sends one —
+                                    # the same treatment _mark_subscription_unhealthy
+                                    # gives the relay path.
+                                    hint = (
+                                        parse_retry_after_seconds(upstream.headers.get("Retry-After"))
+                                        if kind == "rate_limit"
+                                        else None
+                                    )
+                                    if hint is not None:
+                                        logger.debug(
+                                            "Backend %s sent Retry-After: %ds — parking for the hint",
+                                            self._backends[self._current_backend_idx][2].name,
+                                            hint,
+                                        )
+                                        self._mark_backend_unhealthy(
+                                            self._current_backend_idx, failure_kind=kind, cooldown=hint
+                                        )
+                                    else:
+                                        self._mark_backend_unhealthy(self._current_backend_idx, failure_kind=kind)
                                     if self._any_healthy_backend() and attempt < max_attempts - 1:
                                         self._select_backend()
                                         self._normalize_model(cc_request)
@@ -7026,6 +7135,13 @@ class BridgeServer:
 
                                 # All backends exhausted or non-balancing mode — surface error to agent
                                 logger.error("Upstream error %d: %s", upstream.status, error_body)
+                                # §16 last resort: the walk is exhausted and nothing
+                                # has reached the client (sr is None is the
+                                # pre-emission invariant); cross into the raw relay.
+                                if sr is None:
+                                    relay_response = await self._relay_last_resort(request, body)
+                                    if relay_response is not None:
+                                        return relay_response
                                 error_msg = self._translate_upstream_error(upstream.status, error_body)
                                 error_data = {"type": "error", "error": {"type": "api_error", "message": error_msg}}
                                 if sr is None:
@@ -7919,6 +8035,12 @@ class BridgeServer:
 
                             error_data = {"type": "error", "error": {"type": "api_error", "message": error_msg}}
                             if sr is None:
+                                # §16 last resort: same crossing as the plain
+                                # arm's terminal — the walk is exhausted with
+                                # nothing written to the client.
+                                relay_response = await self._relay_last_resort(request, body)
+                                if relay_response is not None:
+                                    return relay_response
                                 return _make_error_response(error_data, status=_last_error_status)
                             try:
                                 await sr.write(messages_format_error(error_data).encode())
@@ -8214,6 +8336,7 @@ class BridgeServer:
                         await self._active_provider.stream_request(cc_request, _collect)
                     except Exception as exc:
                         logger.warning("Custom-transport stream failed: %s", exc)
+                        BridgeServer._log_custom_transport_failure_body(exc)
                         if self._backends and self._current_backend_idx >= 0:
                             kind = self._provider_error_failure_kind(exc)
                             self._mark_backend_unhealthy(
@@ -9387,7 +9510,18 @@ class BridgeServer:
                         failure_kind = "auth"
                     else:
                         failure_kind = "hard"
-                    self._mark_backend_unhealthy(idx, failure_kind=failure_kind)
+                    # §6.1: honor the upstream Retry-After hint on rate limits —
+                    # parity with the relay path's parking.
+                    hint = exc.retry_after if failure_kind == "rate_limit" else None
+                    if hint is not None:
+                        logger.debug(
+                            "Backend %s sent Retry-After: %ds — parking for the hint",
+                            self._backends[idx][2].name,
+                            hint,
+                        )
+                        self._mark_backend_unhealthy(idx, failure_kind=failure_kind, cooldown=hint)
+                    else:
+                        self._mark_backend_unhealthy(idx, failure_kind=failure_kind)
                 # F4: After 2+ backends reject the same body with 400, stop
                 # burning healthy backends.  The request itself is bad.
                 if exc.status == 400:
@@ -9506,7 +9640,18 @@ class BridgeServer:
                         failure_kind = "auth"
                     else:
                         failure_kind = "hard"
-                    self._mark_backend_unhealthy(idx, failure_kind=failure_kind)
+                    # §6.1: preserve a prior 429's retry hint through the final
+                    # empty-response ladder instead of reverting to the default.
+                    hint = exc.retry_after if failure_kind == "rate_limit" else None
+                    if hint is not None:
+                        logger.debug(
+                            "Backend %s sent Retry-After: %ds — parking for the hint",
+                            self._backends[idx][2].name,
+                            hint,
+                        )
+                        self._mark_backend_unhealthy(idx, failure_kind=failure_kind, cooldown=hint)
+                    else:
+                        self._mark_backend_unhealthy(idx, failure_kind=failure_kind)
                 continue
             except UnsupportedModelError as exc:
                 # KBR-126: the second mark site. Same reasoning as the failover
@@ -9746,6 +9891,7 @@ class BridgeServer:
                         await self._active_provider.stream_request(cc_request, _collect)
                     except Exception as exc:
                         logger.warning("Custom-transport stream failed: %s", exc)
+                        BridgeServer._log_custom_transport_failure_body(exc)
                         if self._backends and self._current_backend_idx >= 0:
                             kind = self._provider_error_failure_kind(exc)
                             self._mark_backend_unhealthy(
@@ -12084,6 +12230,25 @@ class BridgeServer:
             return getattr(exc, "retry_after", None)
         return None
 
+    @staticmethod
+    def _log_custom_transport_failure_body(exc: Exception) -> None:
+        # pragma: no mutate block
+        """Log a custom-transport failure's bounded upstream body at DEBUG.
+
+        The warning line folds the exception text only, and a provider whose
+        ``message`` field is empty renders it bare (2026-10-29: ``OpenAI
+        subscription error 400: `` with nothing after the colon). The
+        structured body rides the error as ``upstream_body``; it reaches the
+        DEBUG log — not the warning — because a 400 body can echo request
+        material that must not print in default configurations.
+
+        Args:
+            exc: The failure; a body-less error or a foreign type logs nothing.
+        """
+        body_text = getattr(exc, "upstream_body", None)
+        if body_text:
+            logger.debug("Custom-transport failure body: %s", body_text)
+
     def _custom_transport_error_message(self, exc: Exception) -> str:
         # pragma: no mutate block
         """Build an actionable error message for custom-transport failures.
@@ -12403,9 +12568,14 @@ class BridgeServer:
                         continue
 
                     # In balancing mode (retry_rate_limit=False), raise 429 immediately
-                    # so the caller can fail over to another backend.
+                    # so the caller can fail over to another backend. The retry hint
+                    # rides along so the parking site can honor it (§6.1).
                     if last_status == 429 and not retry_rate_limit:
-                        raise UpstreamError(last_status, last_body)
+                        raise UpstreamError(
+                            last_status,
+                            last_body,
+                            retry_after=parse_retry_after_seconds(resp.headers.get("Retry-After")),
+                        )
 
                     if self._is_non_retryable_error_code(last_status, last_body):
                         raise UpstreamError(last_status, last_body)

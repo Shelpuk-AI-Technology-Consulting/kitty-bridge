@@ -1119,7 +1119,11 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
 Each backend of a balancing pool carries a health record
 (`BridgeServer._backend_health`). A failure marks it unhealthy for a cooldown whose
 length depends on the kind: `rate_limit` from the provider's own retry hint,
-`hard`/`cloudflare` from `backend_cooldown` (default 300 s; capped at 30 s for a
+parsed from `Retry-After` on the raw-subscription path, the Messages plain
+streaming arm, the Messages custom arm, and the shared non-streaming
+classification when the header is present (numeric seconds only; an HTTP-date
+or absent header takes `backend_cooldown`, default 300 s); `hard`/`cloudflare`
+from `backend_cooldown` (default 300 s; capped at 30 s for a
 one-backend pool), `transport`/`stream` on an escalating ladder, `auth` for 900 s,
 `entitlement` for 24 h. On request arrival `_select_backend()` picks among healthy
 backends (backup tier held out while a primary lives); when **every** backend is
@@ -2502,6 +2506,40 @@ unapproved provider. A Claude-launched mixed pool may retry or fail over a raw s
 only to another subscription member, so that request never crosses into an API-key translation path.
 A BridgeServer guard preserves this boundary for embedded callers.
 
+The mirror direction — a translated request's failover walk reaching the subscription
+member — is closed separately (2026-10-29 live diagnosis: the walk selected the member,
+dispatched it through the API-key transport with its by-construction empty stored key,
+collected a guaranteed 401, and parked it as `auth` for 900 s; the member had never served a
+request). Translated failover selections skip subscription backends by default:
+`_get_next_backend`/`_select_backend` exclude them unless the caller asks for them —
+`require_subscription=True` (the relay's own selections) or `allow_subscription=True`
+(the arrival pick in `_select_backend_or_hold`, shared by the four protocol handlers, so the
+round-robin can still land on the member and the relay engages). In exchange the Messages
+routes gain one explicit crossing: when the translated walk is exhausted and the error would
+surface before any byte has reached the client, the bridge selects the healthy subscription
+member and serves the ORIGINAL inbound bytes through the raw relay
+(`_relay_last_resort`). The crossing is pre-emission-only (the post-emission rule stands),
+exists only on the Messages terminals (streaming plain transport, streaming custom transport,
+non-streaming from both of its error arms), reuses the relay's loop with its confinement, health
+classifier, and terminal envelopes intact, and is structurally unreachable from Chat Completions,
+Responses, and Gemini ingress, whose failovers never see the member. When the crossed relay
+attempt itself fails, the client receives the relay's own envelope — the translated walk's last
+error is discarded. The crossing serves the original bytes, so any compaction the translated walk
+performed is discarded: a request that only fit after compaction may be rejected by Anthropic on
+size — an accepted trade-off, deliberate rather than accidental (relaying rewritten bytes would
+end the byte-exact contract §16 exists to keep). Three companion disciplines keep the exclusion
+honest: every walk-internal "is anyone healthy?" guard carries the same subscription visibility
+as the selection it precedes (a guard that passes on a member the selection will refuse converts
+the excluded member into an uncaught `AllBackendsUnhealthyError` — a generic 500); the
+all-unhealthy gamble is bound by the same visibility, so a fully-cooled mixed pool raises the
+normal all-unhealthy response instead of gambling into a member the translated transport cannot
+authenticate; and on the non-Messages routes the walk-exhaustion 503 consequently answers sooner
+and omits the healthy-but-excluded member from its per-backend causes — intended. The arrival
+pick keeps `allow_subscription=True` on every route on purpose: selecting the member and hitting
+the route's own `_subscription_route_rejection` is today's behavior for non-Messages ingress
+(a 400 with no upstream traffic and no health transition), and narrowing it per route is a
+separate decision this change does not make.
+
 For an eligible subscription backend on `/v1/messages`, the bridge reads the inbound JSON bytes
 once, validates only enough to return the normal invalid-JSON response, then posts those same bytes
 using `data=`. It does not call model normalization, a translator, compaction, truncation, provider
@@ -2567,6 +2605,18 @@ every balancing member.
   permitted translation/authentication fallback. Allowing it to fail over to an ordinary member
   would silently abandon the byte-exact subscription contract, so a mixed Claude pool can only
   choose another subscription member for that request.
+- **Exclude the subscription member from translated failover; cross into the relay only as a
+  pre-emission last resort.** The translated transport authenticates a member with its stored
+  key, and a subscription member's stored key is empty by construction, so an unfiltered
+  failover walk produces a dispatch that cannot succeed — the guaranteed 401 and 900 s `auth`
+  park observed live on 2026-10-29. The crossing sits at walk exhaustion rather than at every
+  selection because it is a transport handoff with its own failure domain: concentrating it at
+  one pre-emission point per Messages arm keeps the translated walk's semantics untouched,
+  keeps non-Messages ingress structurally unable to reach the member, and spends the Claude
+  subscription only where the pool has nothing else left — the member's fair round-robin share
+  still flows through the relay on the initial picks. Crossing at every selection instead would
+  either re-open the per-route selection sites this change closes or burn subscription quota on
+  every cheap-provider blip, inverting the pool's economics.
 - **Reuse the health state, not a subscription-specific circuit breaker.** Two circuits would diverge
   in cooldown, failover, observability, and recovery semantics for otherwise equivalent members.
 
