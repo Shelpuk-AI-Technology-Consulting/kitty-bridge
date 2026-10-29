@@ -496,6 +496,36 @@ class TestLastResortCrossing:
         finally:
             await server.stop_async()
 
+    @pytest.mark.asyncio()
+    async def test_custom_transport_error_terminal_crosses_on_streaming(self, fast_ladders: None) -> None:
+        """The streaming custom arm's error terminal crosses before its envelope (review round 2)."""
+        random.seed(1)
+        custom = (
+            _FailingCustomProvider(),
+            "",
+            Profile(name="custom-0", provider="openai_subscription", model="m", auth_ref=str(uuid.uuid4())),
+        )
+        server = _mixed_server(custom, _subscription_member("sub-1"))
+        cc_stream_body = (
+            b'{\n  "model" : "test-model",\n  "messages" : [ { "role" : "user", "content" : "Hello" } ],\n'
+            b'  "max_tokens" : 8,\n  "stream" : true\n}'
+        )
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_UPSTREAM_URL, body=_SSE_REPLY, headers={"Content-Type": "text/event-stream"})
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=cc_stream_body,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 200, body_text
+                    assert "Hi" in body_text
+                assert len(_relay_calls(m)) == 1
+        finally:
+            await server.stop_async()
+
 
 class TestCrossingFailureEnvelopes:
     """A relay attempt that fails inside the crossing renders the relay's envelope."""
@@ -620,12 +650,14 @@ class TestEmptyTerminalCrossing:
             await server.stop_async()
 
     def test_every_messages_empty_terminal_precedes_a_crossing(self) -> None:
-        """Drift guard: each Messages handler offers the relay before its empty terminals.
+        """Drift guard: each Messages handler offers the relay before its exhaustion terminals.
 
         Counting the ``_relay_last_resort`` calls per handler pins the wiring:
-        ``_handle_messages`` carries the non-stream error terminal plus two
-        empty terminals; ``_stream_messages`` carries the plain error
-        terminal, the custom-arm terminal, and three empty terminals.
+        ``_handle_messages`` carries its non-stream error terminal plus two
+        empty gates; ``_stream_messages`` carries the plain error terminal,
+        the plain catch-all terminal, the custom arm's error and empty
+        terminals, and three empty gates. A new exhaustion terminal without a
+        crossing shifts the count and fails here.
         """
         tree = ast.parse(Path(server_module.__file__).read_text(encoding="utf-8"))
         counts = {}
@@ -641,7 +673,7 @@ class TestEmptyTerminalCrossing:
                     and isinstance(sub.func, ast.Attribute)
                     and sub.func.attr == "_relay_last_resort"
                 )
-        assert counts == {"_handle_messages": 3, "_stream_messages": 5}
+        assert counts == {"_handle_messages": 3, "_stream_messages": 6}
 
 
 class TestRecoveryHoldVisibility:

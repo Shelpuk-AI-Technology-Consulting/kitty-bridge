@@ -27,6 +27,7 @@ from aioresponses import aioresponses
 from kitty.bridge import server as server_module
 from kitty.bridge.server import BridgeServer
 from kitty.profiles.schema import Profile
+from kitty.providers.base import ProviderAdapter, ProviderError
 from kitty.providers.custom_anthropic import CustomAnthropicAdapter
 
 
@@ -274,3 +275,148 @@ class TestHintUpperBound:
             await server.stop_async()
 
         assert _cooldowns(server)["solo"] == (3600, "rate_limit")
+
+
+class _RateLimitedCustomProvider(ProviderAdapter):
+    """Custom-transport provider whose stream always raises a hinted 429."""
+
+    use_custom_transport = True
+
+    @property
+    def provider_type(self) -> str:
+        """Name the provider class in health attribution.
+
+        Returns:
+            The provider type string.
+        """
+        return "stub_custom"
+
+    @property
+    def default_base_url(self) -> str:
+        """Give the never-contacted base URL.
+
+        Returns:
+            A placeholder URL; the provider fails before any I/O.
+        """
+        return "https://custom-stub.example.com"
+
+    def build_request(self, model: str, messages: list[dict], **kwargs) -> dict:
+        """Reflect the request through untouched.
+
+        Args:
+            model: The model name.
+            messages: The conversation.
+            **kwargs: Remaining request fields.
+
+        Returns:
+            The request fields as given.
+        """
+        return {"model": model, "messages": messages}
+
+    def parse_response(self, response_data: dict) -> dict:
+        """Return the payload unchanged.
+
+        Args:
+            response_data: The upstream payload.
+
+        Returns:
+            The same payload.
+        """
+        return response_data
+
+    def map_error(self, status_code: int, body: dict) -> Exception:
+        """Wrap a status into an exception.
+
+        Args:
+            status_code: The upstream status.
+            body: The upstream body.
+
+        Returns:
+            A provider error carrying both.
+        """
+        exc = ProviderError(f"stub error {status_code}: {body}")
+        exc.http_status = status_code
+        return exc
+
+    async def stream_request(self, cc_request: dict, write) -> None:
+        """Fail every stream with a rate-limit error carrying its hint.
+
+        Args:
+            cc_request: The request payload in CC format.
+            write: The collector the custom arm hands in; never called.
+
+        Raises:
+            ProviderError: Always, http_status 429 with ``retry_after`` 42.
+        """
+        exc = ProviderError("stub rate limit: slow down")
+        exc.http_status = 429
+        exc.retry_after = 42
+        raise exc
+
+
+def _custom_member(name: str) -> tuple:
+    """Build a rate-limiting custom-transport member.
+
+    Args:
+        name: Profile name for health attribution.
+
+    Returns:
+        A ``(provider, key, profile)`` balancing tuple.
+    """
+    return (
+        _RateLimitedCustomProvider(),
+        "",
+        Profile(
+            name=name,
+            provider="openai_subscription",
+            model="m",
+            auth_ref=str(uuid.uuid4()),
+        ),
+    )
+
+
+class TestMessagesCustomArmRetryAfter:
+    """The Messages streaming custom arm honours the hint like its siblings (round 2)."""
+
+    @pytest.mark.asyncio()
+    async def test_429_parks_the_custom_member_for_its_hint(self) -> None:
+        """A custom-transport 429 with ``retry_after`` 42 parks the member 42 s."""
+        server = _server([_custom_member("custom-0")])
+        upstream_reply = {
+            "id": "msg_rl",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hi"}],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post("https://api.anthropic.com/v1/messages", status=200, body=json.dumps(upstream_reply))
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    json={
+                        "model": "claude-sonnet-4-6",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 64,
+                        "stream": True,
+                    },
+                ) as resp:
+                    # The pool is single-member: the custom walk exhausts, the
+                    # crossing finds no healthy subscription member, and the
+                    # 429 envelope stands.
+                    body_text = await resp.text()
+                    assert resp.status == 429, body_text
+                assert not [
+                    call
+                    for (method, url), calls in m.requests.items()
+                    for call in calls
+                    if "api.anthropic.com" in str(url)
+                ]
+        finally:
+            await server.stop_async()
+
+        assert _cooldowns(server)["custom-0"] == (42, "rate_limit")

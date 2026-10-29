@@ -2530,7 +2530,10 @@ client (streaming plain and custom exhaustion, native streaming ladder exhaustio
 non-streaming gates; a count guard pins one crossing call per terminal, review 2026-10-29) —
 reuses the relay's loop with its confinement, health
 classifier, and terminal envelopes intact, and is structurally unreachable from Chat Completions,
-Responses, and Gemini ingress, whose failovers never see the member. When the crossed relay
+Responses, and Gemini ingress, whose failovers never see the member. The custom-transport
+streaming arm's 429 mark carries `self._retry_after_from_exc(exc)`, matching the other three
+routes' custom arms and §6.1's shared state-machine contract; before review round 2 it silently
+used the default 300 s despite a parsed hint. When the crossed relay
 attempt itself fails, the client receives the relay's own envelope — the translated walk's last
 error is discarded. Every crossing site renders that envelope through one shared helper
 (`_relay_failure_envelope`: upstream status → provider envelope, stall → the 504

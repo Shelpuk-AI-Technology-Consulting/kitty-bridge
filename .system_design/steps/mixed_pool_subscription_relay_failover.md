@@ -97,3 +97,18 @@ duplicating it.
   `TestRecoveryHoldVisibility::test_hold_waits_for_the_subscription_member_recovery` (900/120 park
   → one 120 s hold → recovery). No code change; the finding's premise was a misread of the
   triple-negative condition.
+
+## Implementation notes — review of the round-1 docs push (fde4285), applied 2026-10-29
+
+- The reviewer caught that §16/step-doc/README claimed a "streaming custom transport" crossing
+  terminal that was never actually wired: both round-1 streaming sites sit in the plain-transport
+  branch. Wired now — the custom arm's walk-exhaustion error terminal offers
+  `_relay_last_resort` (envelope-wrapped like every site); its empty terminal was already wired in
+  round 2. Count guard updated to `_handle_messages` 3 / `_stream_messages` 6; new streaming twin
+  test drives `_FailingCustomProvider` exhaustion through the relay.
+- Round-1's "streaming custom arm honours the hint" claim was likewise false in code: the mark
+  passed no `cooldown` while all three sibling routes did. Fixed to
+  `cooldown=self._retry_after_from_exc(exc)` and pinned by
+  `TestMessagesCustomArmRetryAfter` (stub raises http_status 429 with `retry_after` 42 → park is
+  42 s, kind `rate_limit`). Root cause of both: the round-1 doc claims were written from the plan,
+  not verified against the merged hunk — the KBR-247 lesson again.

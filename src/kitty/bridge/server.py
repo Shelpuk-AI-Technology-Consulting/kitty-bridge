@@ -5953,6 +5953,12 @@ class BridgeServer:
             The relay's response, or ``None`` when the crossing does not
             apply: single-backend mode, the relay forbidden, no healthy
             member, or the original bytes unreadable.
+
+        Raises:
+            Exception: Whatever the relay attempt raises once the crossing
+                applies. Callers render the relay's terminal envelope via
+                :meth:`_relay_failure_envelope` and re-raise what it does
+                not own (a bug).
         """
         if not self._backends or self._subscription_relay_forbidden():
             return None
@@ -6486,6 +6492,10 @@ class BridgeServer:
                             self._mark_backend_unhealthy(
                                 self._current_backend_idx,
                                 failure_kind=kind,
+                                # Same hint as the three sibling routes' custom
+                                # arms: a rate-limited member recovers on the
+                                # provider's own schedule, not the default.
+                                cooldown=self._retry_after_from_exc(exc),
                             )
                             if self._any_healthy_backend(require_streaming=True) and attempt < n_backends - 1:
                                 try:
@@ -6531,6 +6541,19 @@ class BridgeServer:
                         error_status, error_type = self._map_provider_error(exc)
                         error_data = {"type": "error", "error": {"type": error_type, "message": error_msg}}
                         if sr is None:
+                            # §16 last resort: the custom-transport walk is
+                            # exhausted and nothing has reached the client.
+                            # The relay's own envelope wins when the crossing
+                            # fails (§16, review 2026-10-29).
+                            try:
+                                relay_response = await self._relay_last_resort(request, body)
+                            except Exception as relay_exc:
+                                envelope = self._relay_failure_envelope(relay_exc)
+                                if envelope is None:
+                                    raise
+                                return envelope
+                            if relay_response is not None:
+                                return relay_response
                             return _make_error_response(error_data, status=error_status)
                         try:
                             await sr.write(messages_format_error(error_data).encode())
