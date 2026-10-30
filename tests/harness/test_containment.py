@@ -24,7 +24,8 @@ connections and the bridge answers an error — and the green assertion
 fulfils §1.4 and is *not* T-E2's own phase-3 obligation, which injects a
 bypass into the product.
 
-**Layer.** No ``pytestmark``, so these take the ``l1`` path default, following
+**Layer.** The only ``pytestmark`` is the KBR-272 timeout bound (below); no
+layer marker, so these take the ``l1`` path default, following
 ``test_bridge.py`` and ``test_vertical_slice.py``. The reason is §8.2's and
 only §8.2's: ``l3`` is in ``PENDING_ACTIVATION_LAYERS``, so an ``l3`` marker
 today would leave the containment harness's correctness checked by no job at
@@ -73,6 +74,9 @@ from harness.recorder import RecordingUpstream
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
+
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
 
 @pytest.fixture
 def capability_report() -> CapabilityReport:
@@ -444,6 +448,41 @@ class TestCompletenessGate:
         # ``_isolate_singleton`` has reset to a fresh every-not_attempted
         # state before this test; the gate must accept that as "no work".
         _run_completeness_gate()  # no raise
+
+    @pytest.mark.parametrize(
+        ("tree_shape", "expected"),
+        [
+            ("repo", False),
+            ("mutants", True),
+        ],
+    )
+    def test_the_mutmut_stand_down_keys_on_the_tree_shape(
+        self, tmp_path: Path, tree_shape: str, expected: bool
+    ) -> None:
+        """The stand-down matches mutmut's copied tree and nothing else.
+
+        Args:
+            tmp_path: Pytest's per-test temporary directory.
+            tree_shape: ``"repo"`` builds a checkout-shaped path
+                (``<root>/tests/harness/conftest.py``), ``"mutants"`` the
+                tree mutmut copies (``<root>/mutants/tests/harness/conftest.py``).
+            expected: Whether the stand-down must fire.
+
+        The predicate reads three ``.parent``s up and the name there; a
+        drift in the ancestor count re-fires the gate red on every
+        mutation leg, and an over-match (any checkout rooted at a
+        directory named ``mutants``) stands the gate down in ordinary
+        runs, silently. Both directions are pinned here, following the
+        repo's rule that every suppression carries its own test.
+        """
+        from harness.conftest import _in_mutants_tree
+
+        middle = "mutants/tests" if tree_shape == "mutants" else "tests"
+        conftest = tmp_path / middle / "harness" / "conftest.py"
+        conftest.parent.mkdir(parents=True)
+        conftest.write_text("", encoding="utf-8")
+
+        assert _in_mutants_tree(conftest) is expected
 
     def test_run_completeness_gate_raises_on_failed_landed_row(self) -> None:
         """``failed`` on a landed row is a product defect the gate surfaces.

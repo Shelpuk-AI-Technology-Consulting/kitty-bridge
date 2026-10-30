@@ -39,6 +39,9 @@ from kitty.bridge.responses.translator import (
 from kitty.bridge.server import BridgeServer
 from kitty.providers.base import ProviderAdapter
 
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 # ── Fixtures of shape, not of value ──────────────────────────────────────────
 
 _TEXT = "hi"

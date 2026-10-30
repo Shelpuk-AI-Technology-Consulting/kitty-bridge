@@ -52,6 +52,24 @@ if os.environ.get("CI"):
     )
     settings.load_profile("kitty-bridge-ci")
 
+# Hypothesis profile for mutmut runs (KBR-272). mutmut 3.8.0 runs stats and
+# the clean tests as two in-process `pytest.main()` calls; the second reuses
+# the first's imported modules from `sys.modules`, so a `@given` method runs
+# a second time bound to a new instance and `differing_executors` fires --
+# on the first method-decorated property test in the selection, every run.
+# The condition is mutmut's execution model, not a test defect, which is the
+# case hypothesis's message names as safe to suppress. AFTER the CI block
+# deliberately: the mutmut profile parents from the environment the block
+# above built, so a CI-hosted mutmut run keeps its derandomisation, deadline
+# and database behaviour. `MUTMUT_DEPENDENCY_DEPTH` is exported by mutmut
+# itself and set by nothing else, so no gate or developer run loads this.
+# The import sits mid-file on purpose: E402 is the point -- loading after
+# the CI block is what lets this profile parent from the environment the
+# block above built.
+from hypothesis_mutmut_profile import apply as _apply_mutmut_profile  # noqa: E402
+
+_apply_mutmut_profile()
+
 # The collected items and their layers, as `(node id, [layer names])`, published
 # for `tests/test_layer_markers.py`. A stash key rather than a module global so
 # it is scoped to the session and typed.

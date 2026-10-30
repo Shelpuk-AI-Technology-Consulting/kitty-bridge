@@ -851,3 +851,233 @@ class TestEveryJobVerifiesTheCategoriesItClaims:
                 gaps.append(f"{command!r} selects {sorted(unverified)} without requiring it")
 
         assert gaps == []
+class TestMutationRemeasureResumeLoop:
+    """Pin the resume loop of ``mutation-remeasure.yml``.
+
+    🔴 **The loop's resume support made artifact expiry unrecoverable.** Each
+    leg restores the latest ``mutants-compaction_and_pairing`` artifact
+    (14-day retention) and computes the remaining untested mutants from the
+    restored tree. With no artifact left, ``mutants/`` never exists: the
+    resolve step computed an empty ``REMAINING``, the run step short-circuited
+    "Nothing to test", the upload warned and uploaded nothing — and the leg
+    went green claiming "the measurement is complete" (fixed: TREE_RESTORED +
+    the patterns fallback). Round 8 closed the next silent-green path the
+    same shape: a restored tree whose sources drifted reads "complete" from
+    its own stale ``.meta`` walk, because regeneration happens only inside a
+    run. These tests pin the full contract: the restore step says whether it
+    restored and whether the tree is current, a stale tree forces the full
+    regenerating pass, names resume only on a current tree, the complete
+    message only fires for a restored, current, fully-tested tree, and the
+    artifact carries the fingerprint that makes the currency question
+    answerable.
+    """
+
+    _RESTORE = "Restore the previous mutants tree"
+    _RESOLVE = "Resolve the group's patterns"
+    _RUN = "Run mutmut for the remaining mutants"
+    _FINGERPRINT = "Fingerprint the measured sources"
+
+    def _step(self, name_prefix: str) -> dict:
+        """Return the one ``mutation-remeasure.yml`` step named ``name_prefix``.
+
+        Args:
+            name_prefix: Exact start of the step's ``name:`` field.
+
+        Returns:
+            The single matching step mapping.
+
+        Raises:
+            AssertionError: When zero or several steps match, since a
+                renamed or duplicated step must fail loudly here rather than
+                let the assertions below inspect the wrong block.
+        """
+        workflow = _load_workflow("mutation-remeasure.yml")
+        matches = [
+            step
+            for step in _get_all_steps(workflow)
+            if step.get("name", "").startswith(name_prefix)
+        ]
+        assert len(matches) == 1, f"expected exactly one {name_prefix!r} step, got {len(matches)}"
+        return matches[0]
+
+    def test_the_restore_step_says_whether_it_restored(self):
+        """The restore step reports restoration and currency on both paths.
+
+        The run step's branches key on these variables reading "false", so
+        a restore that found nothing must export ``TREE_RESTORED=false``
+        explicitly, and a restored tree must be graded against the
+        checkout's ``src/kitty`` hash -- an unset variable must never be
+        mistaken for a restored, current tree.
+        """
+        script = self._step(self._RESTORE)["run"]
+
+        assert 'echo "TREE_RESTORED=false"' in script
+        assert 'echo "TREE_RESTORED=true"' in script
+        # The currency verdict is a real comparison, not an echo: the
+        # artifact's fingerprint against this checkout's src/kitty tree
+        # hash, with a missing fingerprint reading as stale (the safe
+        # direction -- pre-gate artifacts and damaged ones both land here).
+        assert "cat mutants/TREE_SHA" in script
+        assert "git rev-parse HEAD:src/kitty" in script
+        # The fingerprint is delivered, not merely compared: the zip root
+        # is mutants/' contents, so the restore lands TREE_SHA beside
+        # src/ and only an explicit copy puts it at the compared path.
+        delivery = 'cp "${RUNNER_TEMP}/restored/TREE_SHA" mutants/TREE_SHA'
+        assert delivery in script, (
+            "a fingerprint that never reaches mutants/ reads stale forever"
+        )
+        assert script.index(delivery) < script.index("cat mutants/TREE_SHA"), (
+            "the fingerprint must arrive before the comparison reads it"
+        )
+        assert 'echo "TREE_CURRENT=true"' in script
+        assert 'echo "TREE_CURRENT=false"' in script
+        assert '>> "$GITHUB_ENV"' in script
+
+    def test_the_run_step_selects_targets_across_all_four_states(self):
+        """Target selection covers cold, stale, resume, and exhausted.
+
+        A cold start and a stale tree both take the group's patterns -- the
+        full pass, which is the only thing that regenerates (a stale
+        tree's REMAINING names may no longer exist, and its walk cannot see
+        mutants that exist now). A current tree resumes by explicit name,
+        and only a restored, current, exhausted tree short-circuits.
+        """
+        script = self._step(self._RUN)["run"]
+
+        # Branch one: cold start -- no cached verdicts exist, so the
+        # fastest-first waste cannot occur.
+        assert re.search(
+            r'if \[ "\$\{TREE_RESTORED:-false\}" != "true" \]', script
+        ), "the cold-start branch must be the unset-safe first branch"
+        # Branch two: stale -- the full patterns pass regenerates current
+        # scope; trusting the stale names would measure yesterday's tree.
+        assert re.search(
+            r'elif \[ "\$\{TREE_CURRENT:-false\}" != "true" \]', script
+        ), "the stale-tree branch must be the unset-safe second branch"
+        assert "Restored tree is stale" in script
+        # Order is load-bearing: stale must be checked before names, or a
+        # stale tree resumes by names that address yesterday's mutants.
+        restore_idx = script.index('if [ "${TREE_RESTORED:-false}" != "true" ]')
+        stale_idx = script.index('elif [ "${TREE_CURRENT:-false}" != "true" ]')
+        names_idx = script.index('elif [ -n "$REMAINING" ]')
+        assert restore_idx < stale_idx < names_idx
+        # Branch three: names, only on a current tree.
+        assert re.search(r'elif \[ -n "\$REMAINING" \]', script)
+        assert 'TARGETS="$REMAINING"' in script
+        # Branch four: the short-circuit is the final else -- reachable only
+        # when the tree is restored, current, and has nothing left.
+        assert "Nothing to test" in script
+        assert 'TARGETS="$PATTERNS"' in script
+        assert "mutmut run $TARGETS" in script
+
+    def test_the_complete_message_only_fires_for_a_current_restored_tree(self):
+        """The complete message is guarded on restoration AND currency.
+
+        A bare ``-z "$REMAINING"`` test is the silent green no-op this
+        class exists to prevent -- and round 8's variant: an empty walk of
+        a STALE tree proves only that the stale scope finished.
+        """
+        script = self._step(self._RESOLVE)["run"]
+
+        assert re.search(
+            r'if \[ -z "\$REMAINING" \] && \[ "\$\{TREE_RESTORED[^"]*" = "true" \] '
+            r'&& \[ "\$\{TREE_CURRENT[^"]*" = "true" \]',
+            script,
+        ), "the measurement-complete message must be guarded on a restored, current tree"
+
+    def test_the_remaining_walk_fails_loudly(self):
+        """A resolve-side crash must not read as a completed tree.
+
+        The REMAINING walk is the only thing that can call the
+        measurement complete, so its failure mode is the same silent
+        green no-op the cold-start fix closes: one corrupt .meta in a
+        restored tree (a mid-run kill can truncate one) must fail the
+        leg loudly, not vanish into an empty list. Pinned by the
+        absence of the swallow-and-continue form: the PATTERNS
+        resolution keeps its documented unknown-group swallow, the
+        REMAINING walk may not have one.
+        """
+        script = self._step(self._RESOLVE)["run"]
+
+        assert "if ! REMAINING=" in script, (
+            "the REMAINING walk must fail the step loudly on error"
+        )
+        remaining_start = script.index("if ! REMAINING=")
+        remaining_end = script.index("PYEOF", remaining_start)
+        assert "|| true" not in script[remaining_start:remaining_end], (
+            "the REMAINING walk must not swallow its own failure"
+        )
+
+    def test_the_upload_records_the_measured_sources(self):
+        """The artifact carries the fingerprint the staleness gate reads.
+
+        The fingerprint is a provenance claim, so it is written by a
+        ``success()`` step, not ``always()`` (review round 9): a leg whose
+        run failed early never measured this checkout's scope, and
+        stamping HEAD's hash onto the restored tree it left behind would
+        read that stale tree as current on the next leg -- the same
+        silent-green the gate exists to close. Soft-deadline legs still
+        stamp, because the run step exits 0 on the timeout codes and the
+        tree on disk is then genuinely this checkout's scope.
+        Deliberately no ``mkdir``: a run that died before mutmut
+        generated anything must fail the write and publish no unusable
+        artifact.
+        """
+        step = self._step(self._FINGERPRINT)
+
+        assert step.get("if") == "success()", (
+            "a failed leg must not stamp its restored tree as current"
+        )
+        assert "git rev-parse HEAD:src/kitty > mutants/TREE_SHA" in step["run"]
+        assert "mkdir" not in step["run"], (
+            "a pre-generation crash must abort the upload, not publish an empty tree"
+        )
+        # Order is load-bearing: fingerprint after upload publishes
+        # fingerprint-less artifacts and the gate reads stale forever.
+        workflow = _load_workflow("mutation-remeasure.yml")
+        steps = _get_all_steps(workflow)
+        names = [s.get("name", "") for s in steps]
+        assert names.index(self._FINGERPRINT) < next(
+            i for i, n in enumerate(names) if n.startswith("Upload the mutants tree")
+        ), "the fingerprint must precede the upload that archives it"
+
+    def test_the_checkout_fetches_full_history(self):
+        """The leg's checkout carries the history the clean phase needs.
+
+        mutmut's stats phase runs the whole suite, including the KBR-285
+        fixture tests, which ``git diff`` a pinned historical range.
+        ``tests.yml`` checks out with ``fetch-depth: 0`` for exactly that
+        reason and says so in its comment; this workflow's default-shallow
+        checkout made every stats phase die in ``bad revision '30a91a0^1'``
+        (leg 3, 2026-10-30 -- the September legs predate the merge that
+        brought the fixture to this branch, which is why they never saw
+        it).
+        """
+        workflow = _load_workflow("mutation-remeasure.yml")
+        checkouts = [
+            step
+            for step in _get_all_steps(workflow)
+            if step.get("uses", "").startswith("actions/checkout")
+        ]
+        assert len(checkouts) == 1
+        assert checkouts[0].get("with", {}).get("fetch-depth") == 0
+
+    def test_the_artifact_lookup_fails_loudly(self):
+        """A failed lookup must not read as a fresh tree.
+
+        A 403, a rate limit, or a transient 5xx on the artifact query is
+        indistinguishable from "no artifact ever uploaded" under the old
+        swallow: the leg cold-started and re-measured from scratch, and
+        the resume chain was silently cut (review round 11). The
+        REMAINING-walk precedent applies: the lookup is load-bearing, so
+        it takes the fail-loud form with the recovery named in the error.
+        """
+        script = self._step(self._RESTORE)["run"]
+
+        assert "if ! ARTIFACT_ID=" in script
+        lookup_start = script.index("if ! ARTIFACT_ID=")
+        lookup_end = script.index('echo "TREE_RESTORED=false"', lookup_start)
+        assert "|| true" not in script[lookup_start:lookup_end], (
+            "the artifact lookup must not swallow its own failure"
+        )
+        assert "the artifact lookup failed" in script[lookup_start:lookup_end]

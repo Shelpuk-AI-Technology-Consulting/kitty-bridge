@@ -74,6 +74,9 @@ from kitty.auth.oauth_session import OAuthSession
 from kitty.bridge.server import BridgeServer
 from kitty.providers.ollama_cloud import OllamaCloudAdapter
 
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 #: The format this transport serves, named once so a case differs from its
 #: neighbours only in the thing it is about.
 FORMAT = WireFormat.OLLAMA_CHAT

@@ -1,0 +1,348 @@
+name: Mutation re-measure
+
+# A measurement tool, not a gate (TEST_SUITE.md §8, "The arrangement, made
+# explicit"). KBR-272 added it because the mutation baseline's recording needs
+# an idle workstation — the shared dev box is contended by sibling sessions,
+# which is exactly what hung KBR-266's per-mutant phase in CLOSE_WAIT — and a
+# GitHub-hosted runner is the idle guarantee the ticket names.
+#
+# Run it by hand when a group's score must be recorded or re-measured:
+#
+#   gh workflow run mutation-remeasure.yml -f group=compaction_and_pairing
+#
+# `group` must be a key of TARGET_GROUPS in `tests/mutmut_scope.py`; anything
+# else fails the pattern-resolution step loudly rather than measuring nothing.
+#
+# The `mutants/` tree this run produces is uploaded as an artifact. ⚠️ It is a
+# SINGLE-GROUP tree: mutmut generates mutants for the whole configured scope
+# but only tests the group passed on the command line, so every other group's
+# mutants carry `not_checked`. Do NOT overwrite a workstation tree that holds
+# recorded groups with this artifact — overlay the artifact's new-group files
+# onto the recorded tree instead, or the six recorded groups' per-mutant
+# results are destroyed (the reproducibility contract MUTATION_BASELINE.md
+# records). For the same reason the aggregator step below tolerates its own
+# exit code: it asserts `not_checked == 0` per group, which a single-group
+# run trivially violates for the six unmeasured groups.
+#
+# The nightly schedule and the per-group thresholds are T-H3 (KBR-91) scope;
+# this file is the tool that job extends, not a second definition of it. It
+# invokes no pytest directly, so it claims no layer.
+
+on:
+  workflow_dispatch:
+    inputs:
+      group:
+        description: Target group from tests/mutmut_scope.py TARGET_GROUPS
+        required: false
+        default: compaction_and_pairing
+        type: string
+  # Branch bootstrap, and why it is here: GitHub indexes workflow_dispatch
+  # from the DEFAULT branch only, so a dispatch on this file is a 404 until
+  # the file merges. The push trigger below (scoped to exactly this branch)
+  # runs the measurement on every push to the branch that carries it -- the
+  # mechanism KBR-272's PR used to produce its recorded numbers. The moment
+  # the branch is deleted at merge, the clause is dead; drop it in the next
+  # edit of this file if it still lingers.
+  push:
+    branches:
+      - "feat/kbr-272-record-compaction-mutation-score"
+
+permissions:
+  contents: read
+
+jobs:
+  remeasure:
+    runs-on: ubuntu-latest
+    # A cap, not a budget. The first attempt at 180 minutes hit the cap on
+    # the per-mutant phase (KBR-272); after two capped runs 459 mutants
+    # remained of 648 -- the ticket's 5–30-minute estimate was low by an
+    # order of magnitude, because each mutant runs 532–596 associated L1
+    # tests on a 4-vCPU hosted runner (~37 mutants/hour measured). 300
+    # keeps the resume loop at ~3 legs (total compute, not per-leg ceiling,
+    # binds the schedule) while sitting STRICTLY under the 360-minute
+    # `ubuntu-latest` ceiling: the review suite requires declared < ceiling,
+    # and the margin is operational, not aesthetic -- when the cap fires,
+    # the always()-guarded upload still has an hour of platform room to
+    # preserve the partial tree. A run killed here still uploads its
+    # partial tree, and mutmut resumes from the cached tree -- re-dispatch
+    # to continue.
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        # `fetch-depth: 0`, same as tests.yml and for the same reason (its
+        # comment names the test): mutmut's stats phase runs the whole
+        # suite, and the KBR-285 fixture tests `git diff` a pinned
+        # historical range -- a default-shallow checkout dies in
+        # `bad revision '30a91a0^1'` (leg 3, 2026-10-30).
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # Resume support, and why: hosted runners are ephemeral, so every run
+      # re-pays the ~20-minute stats phase and loses whatever per-mutant work
+      # a previous run completed before its cap. mutmut resumes from a cached
+      # `mutants/` tree, so the latest artifact of the same name (uploaded by
+      # the always()-guarded step below, success or timeout) is restored here
+      # when one exists. A missing artifact is the normal first-run case, not
+      # an error. The artifact from an older commit is safe to restore: mutmut
+      # keys its cache on source content, and changed files re-generate.
+      - name: Restore the previous mutants tree, if any
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: mutants-${{ inputs.group || 'compaction_and_pairing' }}
+        run: |
+          set -euo pipefail
+          # The lookup is load-bearing and takes the REMAINING-walk's
+          # fail-loud form (review round 11): `|| true` made a failed
+          # query -- 403, rate limit, transient 5xx -- indistinguishable
+          # from "no artifact ever uploaded", so the leg cold-started and
+          # silently re-measured from scratch, cutting the resume chain.
+          # An EMPTY result (no artifact yet) still exits 0 and falls
+          # through to the normal first-run case below.
+          if ! ARTIFACT_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}" --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty')"; then
+            echo "::error::the artifact lookup failed -- cannot tell a failed query from a fresh tree; fix the cause (permissions or rate limit) and re-dispatch."
+            exit 1
+          fi
+          if [ -z "${ARTIFACT_ID:-}" ]; then
+            echo "No previous ${ARTIFACT_NAME} artifact -- starting a fresh tree."
+            echo "TREE_RESTORED=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "TREE_RESTORED=true" >> "$GITHUB_ENV"
+          echo "Restoring artifact ${ARTIFACT_ID} (${ARTIFACT_NAME})."
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > "${RUNNER_TEMP}/mutants.zip"
+          mkdir -p ${RUNNER_TEMP}/restored mutants
+          unzip -q "${RUNNER_TEMP}/mutants.zip" -d "${RUNNER_TEMP}/restored"
+          # Verdict-bearing files ONLY. mutmut's regeneration check is
+          # mtime-based (source_mtime < mutant_mtime means unmodified), and
+          # a whole-tree restore re-dates every carried file newer than the
+          # fresh checkout -- so stale carried files, tests/ included, are
+          # kept forever. Leg 7 re-fired the old containment gate from a
+          # restored conftest that predated its fix. Restoring src/ (mangled
+          # files + .meta verdicts) and the stats cache leaves tests/,
+          # pyproject and the also_copy entries to regenerate from the
+          # checkout; changed sources regenerate their mutants and mutmut
+          # resets the affected verdicts via its function-hash check.
+          cp -a "${RUNNER_TEMP}/restored/src" mutants/src
+          cp "${RUNNER_TEMP}/restored/mutmut-stats.json" mutants/ 2>/dev/null || true
+          # The fingerprint rides at the zip ROOT, not under src/ -- the
+          # upload archives the CONTENTS of mutants/ (upload-artifact v4
+          # roots a single-path artifact at its least-common ancestor), so
+          # the restore lands it beside src/, and this copy is what puts it
+          # at the path the comparison below reads. `|| true` preserves the
+          # missing-fingerprint-reads-stale rule for pre-gate artifacts.
+          cp "${RUNNER_TEMP}/restored/TREE_SHA" mutants/TREE_SHA 2>/dev/null || true
+          echo "Restored $(find mutants -name '*.meta' | wc -l) per-mutant result files."
+          # Staleness gate (round 8): the restored tree's own .meta walk
+          # cannot see a src/kitty drift -- its REMAINING names address
+          # mutants that may no longer exist, and mutants that exist now
+          # are invisible to it, while regeneration happens only inside a
+          # run. The artifact therefore carries the src/kitty tree hash it
+          # measured (written by the fingerprint step); a mismatch marks
+          # the tree stale and the run step falls back to the group's
+          # patterns -- the full pass, which regenerates and re-measures
+          # current scope. The tree hash, not the commit SHA: a docs-only
+          # commit must not invalidate a perfectly good tree. A missing
+          # fingerprint (pre-gate artifact, or a damaged one) reads as
+          # stale -- the safe direction.
+          #
+          # Deliberately src/kitty ONLY (review rounds 11-12 asked why
+          # tests/ is excluded): the walk's completeness claim -- every
+          # mutant of the group's current enumeration has a verdict -- is
+          # a function of the generated sources alone, so the gate needs
+          # no more than that. Test-suite drift is a different axis and is
+          # NOT closed by this gate: a carried verdict was established
+          # under the tests of the leg that measured it, so a tree carried
+          # across test-changing commits mixes suites, and the recorded
+          # row's provenance SHA describes the sources exactly but the
+          # tests only approximately. Exact test provenance requires the
+          # loop to converge on a branch whose tests do not change
+          # mid-loop -- the normal case -- and the owner's re-dispatch
+          # lever (re-measure a converged tree after a test change) covers
+          # the rest. Hashing tests/ into the gate was considered and
+          # declined: it would invalidate the tree on every test-only
+          # commit and the loop would never converge during review.
+          if [ "$(cat mutants/TREE_SHA 2>/dev/null || true)" = "$(git rev-parse HEAD:src/kitty)" ]; then
+            echo "TREE_CURRENT=true" >> "$GITHUB_ENV"
+          else
+            echo "TREE_CURRENT=false" >> "$GITHUB_ENV"
+          fi
+
+      # The scope registry is the machine-readable form of TEST_SUITE.md §6.1;
+      # the patterns come from it rather than being copied here, so the
+      # registry and the measured run cannot drift apart. The input reaches
+      # the step through an env var, not direct ${{ }} interpolation into the
+      # shell/Python source: workflow_dispatch inputs are caller-controlled
+      # text, and the direct form is both an injection vector and a functional
+      # break on any value containing a quote. The `||` fallback is what makes
+      # the push bootstrap work: on a push event `inputs.group` is EMPTY (the
+      # dispatch default does not apply to push), which is how the first
+      # bootstrap run failed with "Unknown group ''".
+      - name: Resolve the group's patterns and the remaining untested mutants
+        env:
+          GROUP: ${{ inputs.group || 'compaction_and_pairing' }}
+        run: |
+          set -euo pipefail
+          # An unknown group raises KeyError; swallowing it here (printing
+          # nothing) lets the guard below emit the actionable ::error instead
+          # of a bare Python traceback.
+          PATTERNS="$(python -c "import os, sys; sys.path.insert(0, 'tests'); from mutmut_scope import patterns_for; print(' '.join(patterns_for(os.environ['GROUP'])))" 2>/dev/null || true)"
+          if [ -z "$PATTERNS" ]; then
+            echo "::error::Unknown group '$GROUP' -- must be a key of TARGET_GROUPS in tests/mutmut_scope.py"
+            exit 1
+          fi
+          echo "PATTERNS=$PATTERNS" >> "$GITHUB_ENV"
+          # NOTE: Pass the remaining UNTESTED mutant names explicitly, not the
+          # group's patterns. mutmut's cache-skip fires only on a full run
+          # (`if not mutant_names and result is not None`): a pattern-scoped
+          # run re-tests every matched mutant from its fastest-first sort
+          # order, so a 4-hour leg burns itself on the fast cached mutants
+          # and never reaches the slow untested tail (leg 5: 214 minutes,
+          # zero new verdicts). Explicit names re-run exactly those mutants
+          # -- the documented force-rerun shape -- and the restored .meta
+          # carries the rest of the group's verdicts, so the aggregated
+          # score stays valid for the whole group. An empty list is
+          # ambiguous -- a completed measurement (tree restored) or a COLD
+          # START (no artifact left, so the walk saw nothing; artifacts
+          # expire after 14 days) -- and reading it as "complete" made
+          # expiry unrecoverable: the run step skipped, the upload had no
+          # tree to upload, and every later dispatch repeated the no-op
+          # while claiming the measurement was done. The run step tells
+          # the two apart via TREE_RESTORED (exported by the restore
+          # step) and falls back to the group's patterns, which on a
+          # treeless run is the full first pass -- the leg-5 fastest-first
+          # waste needs a populated tree to thrash.
+          # No `2>/dev/null || true` here, deliberately: this walk is the
+          # only thing that can call the measurement complete, so a
+          # swallowed error is the same silent green no-op the cold-start
+          # fix closes -- one corrupt .meta in a restored tree (a mid-run
+          # kill can truncate one) must fail the leg loudly, not vanish
+          # into an empty list. The PATTERNS resolution above keeps its
+          # swallow: there the failure mode is the unknown-group guard,
+          # which this step turns into the actionable ::error.
+          if ! REMAINING="$(python - << 'PYEOF'
+          import fnmatch, json, os, sys
+          sys.path.insert(0, 'tests')
+          from mutmut_scope import patterns_for
+          pats = patterns_for(os.environ['GROUP'])
+          remaining = []
+          for root, _dirs, files in os.walk('mutants/src'):
+              for fn in sorted(files):
+                  if not fn.endswith('.meta'):
+                      continue
+                  with open(os.path.join(root, fn)) as fh:
+                      meta = json.load(fh)
+                  for key, code in meta.get('exit_code_by_key', {}).items():
+                      if code is None and any(fnmatch.fnmatch(key, p) for p in pats):
+                          remaining.append(key)
+          print(' '.join(remaining))
+          PYEOF
+          )"; then
+            echo "::error::the mutants walk failed -- a .meta file may be corrupt; delete the named file and re-dispatch (mutmut re-runs that mutant)."
+            exit 1
+          fi
+          echo "REMAINING=$REMAINING" >> "$GITHUB_ENV"
+          if [ -z "$REMAINING" ] && [ "${TREE_RESTORED:-false}" = "true" ] && [ "${TREE_CURRENT:-false}" = "true" ]; then
+            echo "No untested mutants for '$GROUP' -- the measurement is complete."
+          elif [ -z "$REMAINING" ]; then
+            echo "The walk found no untested mutants, but the tree is absent or stale -- the run step takes the full pass."
+          else
+            echo "Remaining untested mutants: $(wc -w <<< "$REMAINING")"
+          fi
+
+      # Soft deadline, not a GitHub timeout -- and why, from three lost
+      # legs (KBR-272): a job-level timeout kill can eat the cancel grace
+      # window tearing down mutmut's fork-server children (one leg's tree
+      # was lost that way), and a STEP-level timeout skips every subsequent
+      # if: always() step outright (a second leg, same fate: mutmut step
+      # `cancelled`, upload `skipped`, zero artifacts). GNU `timeout`
+      # SIGINTs mutmut at 240 minutes instead, so THIS step completes
+      # normally and the aggregate + upload steps below run as ordinary
+      # steps -- the partial tree is always preserved. -k 60 is the SIGKILL
+      # backstop; mid-run hard kills are already proven safe by the legs
+      # above (per-mutant .meta results are written incrementally, and the
+      # next leg restored and resumed from a hard-killed tree). 124/130 are
+      # the timeout/SIGINT exit codes and end the leg cleanly; any other
+      # non-zero code is a real mutmut failure and fails the step loudly.
+      # The GitHub step timeout below (285) is a last-resort backstop for
+      # GNU timeout itself misbehaving; it should never fire.
+      - name: Run mutmut for the remaining mutants
+        timeout-minutes: 285
+        run: |
+          # Target selection, and why four branches (round 8): a cold start
+          # and a STALE tree both take the group's patterns -- the full pass
+          # is the only thing that regenerates, and a stale tree's REMAINING
+          # names may no longer exist while its walk cannot see the mutants
+          # that exist now. A current restored tree resumes by explicit
+          # name; only a restored, current, exhausted tree short-circuits.
+          if [ "${TREE_RESTORED:-false}" != "true" ]; then
+            echo "Cold start: no restored tree, so the run step measures the whole group."
+            TARGETS="$PATTERNS"
+          elif [ "${TREE_CURRENT:-false}" != "true" ]; then
+            echo "Restored tree is stale (src/kitty changed since its measurement) -- full pass."
+            TARGETS="$PATTERNS"
+          elif [ -n "$REMAINING" ]; then
+            echo "Remaining untested mutants: $(wc -w <<< "$REMAINING")"
+            TARGETS="$REMAINING"
+          else
+            echo "Nothing to test -- the restored tree already covers the whole group."
+            exit 0
+          fi
+          rc=0
+          timeout -s INT -k 60 240m mutmut run $TARGETS || rc=$?
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 130 ]; then
+            echo "Soft deadline reached at 240 minutes; the partial tree is on disk and the upload step preserves it. Re-dispatch to continue."
+            exit 0
+          fi
+          exit "$rc"
+
+      # 🔴 `|| true`, deliberately, and why: the aggregator asserts
+      # `not_checked == 0` per group and exits 1 when a group has unmeasured
+      # mutants. This run tests ONE group by design, so the other six groups
+      # read `not_checked` and the check fires even on a fully successful
+      # measurement. The table on stdout is still printed and lands in the
+      # log; failing the job over it would make every single-group run red.
+      # A run whose MEASURED group is incomplete is still caught: that shows
+      # up in the table itself, which the operator reads before recording.
+      - name: Aggregate per-group scores
+        if: always()
+        run: python scripts/aggregate_mutation_baseline.py || true
+
+      # `if: success()`, not the upload's `always()` -- and that is the
+      # point (review round 9): the fingerprint is a PROVENANCE claim, and
+      # stamping it unconditionally would mark a tree this leg never
+      # measured as current. The run step exits 0 on the soft-deadline
+      # codes (124/130), so a partial-but-real tree still gets stamped; a
+      # genuinely failed leg's tree (say, a stats-phase abort -- the tree
+      # on disk is then still the restored one) uploads without a
+      # fingerprint and the next leg reads it stale, which is the safe
+      # direction. Deliberately no `mkdir`: if the run died before mutmut
+      # generated anything, this write fails and no tree is uploaded. One
+      # residual edge stays possible and is accepted: a restore that fails
+      # midway leaves the empty `mutants/` behind, so a TREE_SHA-only
+      # artifact can be published -- the next leg then fails loudly at the
+      # src/ copy, and the recovery is deleting that artifact.
+      - name: Fingerprint the measured sources
+        if: success()
+        run: git rev-parse HEAD:src/kitty > mutants/TREE_SHA
+
+      # `if: always()`: a run killed at the timeout (or failed mid-phase) is
+      # exactly the run whose partial tree is worth keeping -- mutmut resumes
+      # from a cached tree, and the operator overlays it onto the recorded
+      # baseline rather than paying the ~20-minute stats phase again.
+      - name: Upload the mutants tree
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # The same `||` fallback as the resolve step: on a push event
+          # `inputs.group` is empty, and the restore step looks this name up.
+          name: mutants-${{ inputs.group || 'compaction_and_pairing' }}
+          path: mutants/
+          retention-days: 14
