@@ -104,11 +104,17 @@ def test_apply_loads_the_profile_under_mutmut_and_restores() -> None:
 
     ``load_profile`` mutates global state: the test restores the ambient
     profile by name in a ``finally``, so a failure here cannot re-suppress
-    health checks for the rest of the suite.
+    health checks for the rest of the suite. The restore is asserted as
+    *equality with the ambient suppression set*, not as absence of
+    ``differing_executors``: under mutmut itself -- the one context that
+    killed a leg here -- the ambient profile already IS the mutmut profile
+    (``tests/conftest.py`` ran ``apply`` first), so "the check is gone"
+    cannot hold and must not be asserted.
     """
     from hypothesis_mutmut_profile import apply
 
     ambient_name = settings._current_profile  # noqa: SLF001 - no public reader
+    ambient_suppressions = set(settings.default.suppress_health_check)
     try:
         apply(MUTMUT_ENV)
         assert PROFILE_NAME in settings._profiles  # noqa: SLF001 - registration proof
@@ -117,9 +123,7 @@ def test_apply_loads_the_profile_under_mutmut_and_restores() -> None:
         )
     finally:
         settings.load_profile(ambient_name)
-        assert HealthCheck.differing_executors not in set(
-            settings.default.suppress_health_check
-        )
+        assert set(settings.default.suppress_health_check) == ambient_suppressions
 
 
 def test_apply_is_a_noop_without_the_mutmut_variable() -> None:

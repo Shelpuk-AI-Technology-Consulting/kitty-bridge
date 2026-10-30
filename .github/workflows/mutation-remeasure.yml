@@ -115,7 +115,31 @@ jobs:
           # resets the affected verdicts via its function-hash check.
           cp -a "${RUNNER_TEMP}/restored/src" mutants/src
           cp "${RUNNER_TEMP}/restored/mutmut-stats.json" mutants/ 2>/dev/null || true
+          # The fingerprint rides at the zip ROOT, not under src/ -- the
+          # upload archives the CONTENTS of mutants/ (upload-artifact v4
+          # roots a single-path artifact at its least-common ancestor), so
+          # the restore lands it beside src/, and this copy is what puts it
+          # at the path the comparison below reads. `|| true` preserves the
+          # missing-fingerprint-reads-stale rule for pre-gate artifacts.
+          cp "${RUNNER_TEMP}/restored/TREE_SHA" mutants/TREE_SHA 2>/dev/null || true
           echo "Restored $(find mutants -name '*.meta' | wc -l) per-mutant result files."
+          # Staleness gate (round 8): the restored tree's own .meta walk
+          # cannot see a src/kitty drift -- its REMAINING names address
+          # mutants that may no longer exist, and mutants that exist now
+          # are invisible to it, while regeneration happens only inside a
+          # run. The artifact therefore carries the src/kitty tree hash it
+          # measured (written by the fingerprint step); a mismatch marks
+          # the tree stale and the run step falls back to the group's
+          # patterns -- the full pass, which regenerates and re-measures
+          # current scope. The tree hash, not the commit SHA: a docs-only
+          # commit must not invalidate a perfectly good tree. A missing
+          # fingerprint (pre-gate artifact, or a damaged one) reads as
+          # stale -- the safe direction.
+          if [ "$(cat mutants/TREE_SHA 2>/dev/null || true)" = "$(git rev-parse HEAD:src/kitty)" ]; then
+            echo "TREE_CURRENT=true" >> "$GITHUB_ENV"
+          else
+            echo "TREE_CURRENT=false" >> "$GITHUB_ENV"
+          fi
 
       # The scope registry is the machine-readable form of TEST_SUITE.md §6.1;
       # the patterns come from it rather than being copied here, so the
@@ -191,10 +215,10 @@ jobs:
             exit 1
           fi
           echo "REMAINING=$REMAINING" >> "$GITHUB_ENV"
-          if [ -z "$REMAINING" ] && [ "${TREE_RESTORED:-false}" = "true" ]; then
+          if [ -z "$REMAINING" ] && [ "${TREE_RESTORED:-false}" = "true" ] && [ "${TREE_CURRENT:-false}" = "true" ]; then
             echo "No untested mutants for '$GROUP' -- the measurement is complete."
           elif [ -z "$REMAINING" ]; then
-            echo "Cold start: no restored tree, so the run step measures the whole group."
+            echo "The walk found no untested mutants, but the tree is absent or stale -- the run step takes the full pass."
           else
             echo "Remaining untested mutants: $(wc -w <<< "$REMAINING")"
           fi
@@ -218,17 +242,24 @@ jobs:
       - name: Run mutmut for the remaining mutants
         timeout-minutes: 285
         run: |
-          # Target selection, and why three branches: explicit names when
-          # the restored tree knows what is left (see the resolve step's
-          # note), "Nothing to test" only for an exhausted RESTORED tree,
-          # and the group's patterns on a cold start.
-          if [ -n "$REMAINING" ]; then
+          # Target selection, and why four branches (round 8): a cold start
+          # and a STALE tree both take the group's patterns -- the full pass
+          # is the only thing that regenerates, and a stale tree's REMAINING
+          # names may no longer exist while its walk cannot see the mutants
+          # that exist now. A current restored tree resumes by explicit
+          # name; only a restored, current, exhausted tree short-circuits.
+          if [ "${TREE_RESTORED:-false}" != "true" ]; then
+            echo "Cold start: no restored tree, so the run step measures the whole group."
+            TARGETS="$PATTERNS"
+          elif [ "${TREE_CURRENT:-false}" != "true" ]; then
+            echo "Restored tree is stale (src/kitty changed since its measurement) -- full pass."
+            TARGETS="$PATTERNS"
+          elif [ -n "$REMAINING" ]; then
+            echo "Remaining untested mutants: $(wc -w <<< "$REMAINING")"
             TARGETS="$REMAINING"
-          elif [ "${TREE_RESTORED:-false}" = "true" ]; then
+          else
             echo "Nothing to test -- the restored tree already covers the whole group."
             exit 0
-          else
-            TARGETS="$PATTERNS"
           fi
           rc=0
           timeout -s INT -k 60 240m mutmut run $TARGETS || rc=$?
@@ -249,6 +280,20 @@ jobs:
       - name: Aggregate per-group scores
         if: always()
         run: python scripts/aggregate_mutation_baseline.py || true
+
+      # `if: always()` like the upload it precedes: a partial tree is worth
+      # keeping, and the fingerprint must ride along with whatever is
+      # uploaded -- it is what lets the next leg tell a current tree from a
+      # stale one (the restore step's staleness gate). Deliberately no
+      # `mkdir`: if the run died before mutmut generated anything, this
+      # write fails and no tree is uploaded. One residual edge stays
+      # possible and is accepted: a restore that fails midway leaves the
+      # empty `mutants/` behind, so a TREE_SHA-only artifact can be
+      # published -- the next leg then fails loudly at the src/ copy, and
+      # the recovery is deleting that artifact.
+      - name: Fingerprint the measured sources
+        if: always()
+        run: git rev-parse HEAD:src/kitty > mutants/TREE_SHA
 
       # `if: always()`: a run killed at the timeout (or failed mid-phase) is
       # exactly the run whose partial tree is worth keeping -- mutmut resumes
