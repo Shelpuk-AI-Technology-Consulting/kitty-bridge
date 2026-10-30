@@ -5668,8 +5668,13 @@ class BridgeServer:
                 # nothing before this point). Both error arms cross — a walk
                 # whose last attempt is a custom-transport member re-raises a
                 # ProviderError, which must cross like an UpstreamError would.
+                # A request-shaped failure is barred: the body is known-bad.
                 try:
-                    relay_response = await self._relay_last_resort(request, body)
+                    relay_response = (
+                        None
+                        if self._crossing_forbidden_for(exc)
+                        else await self._relay_last_resort(request, body)
+                    )
                 except Exception as relay_exc:
                     # The crossing applied and the relay attempt itself
                     # failed: the relay's own envelope wins (§16) — a stall
@@ -5729,8 +5734,15 @@ class BridgeServer:
                     # point like the error terminals — every translated
                     # member answered empty and nothing reached the client —
                     # so the subscription relay is offered before it (review
-                    # 2026-10-29).
-                    relay_response = await self._relay_last_resort(request, body)
+                    # 2026-10-29). The relay's own envelope wins when the
+                    # crossing fails (review round 4).
+                    try:
+                        relay_response = await self._relay_last_resort(request, body)
+                    except Exception as relay_exc:
+                        envelope = self._relay_failure_envelope(relay_exc)
+                        if envelope is None:
+                            raise
+                        return envelope
                     if relay_response is not None:
                         return relay_response
                     return web.json_response(
@@ -5773,8 +5785,15 @@ class BridgeServer:
                     self._active_provider.provider_type,
                 )
                 # §16: pre-emission walk exhaustion — offer the relay before
-                # the terminal (review 2026-10-29).
-                relay_response = await self._relay_last_resort(request, body)
+                # the terminal (review 2026-10-29). The relay's own envelope
+                # wins when the crossing fails (review round 4).
+                try:
+                    relay_response = await self._relay_last_resort(request, body)
+                except Exception as relay_exc:
+                    envelope = self._relay_failure_envelope(relay_exc)
+                    if envelope is None:
+                        raise
+                    return envelope
                 if relay_response is not None:
                     return relay_response
                 return web.json_response(
@@ -5965,7 +5984,11 @@ class BridgeServer:
             Exception: Whatever the relay attempt raises once the crossing
                 applies. Callers render the relay's terminal envelope via
                 :meth:`_relay_failure_envelope` and re-raise what it does
-                not own (a bug).
+                not own (a bug). Callers also bar request-shaped failures
+                (:meth:`_crossing_forbidden_for`) before offering — "every
+                translated attempt has failed" means member-shaped
+                failures (auth, rate limit, upstream breakage); a body two
+                members already rejected with 400 is not offered again.
         """
         if not self._backends or self._subscription_relay_forbidden():
             return None
@@ -5982,6 +6005,27 @@ class BridgeServer:
             logger.debug("Last-resort crossing could not read the original bytes", exc_info=True)
             return None
         return await self._relay_subscription_messages(request, body, raw)
+
+    @staticmethod
+    def _crossing_forbidden_for(exc: Exception) -> bool:
+        """Report whether the surfaced failure is request-shaped, barring the relay.
+
+        A 400/404/413/422 from the last translated attempt means the request
+        itself is bad — F4 stops the walk on it and D3's rationale says the
+        agent will not retry. Offering the crossing would post a body known
+        to be malformed to the subscription member, park it ``hard`` for
+        Anthropic's identical 400, and turn a non-retryable request error
+        into a 503 (review round 4). Auth and rate-limit statuses stay
+        member-shaped: the crossing is exactly what serves them.
+
+        Args:
+            exc: The failure the translated walk is about to surface.
+
+        Returns:
+            True when the relay must not be offered for this failure.
+        """
+        status = getattr(exc, "status", None) or getattr(exc, "http_status", None)
+        return status in (400, 404, 413, 422)
 
     def _relay_failure_envelope(self, exc: Exception) -> web.Response | None:
         """Render the relay's terminal envelope for a failed relay attempt.
@@ -6551,9 +6595,14 @@ class BridgeServer:
                             # §16 last resort: the custom-transport walk is
                             # exhausted and nothing has reached the client.
                             # The relay's own envelope wins when the crossing
-                            # fails (§16, review 2026-10-29).
+                            # fails (§16, review 2026-10-29); a request-shaped
+                            # failure is barred (review round 4).
                             try:
-                                relay_response = await self._relay_last_resort(request, body)
+                                relay_response = (
+                                    None
+                                    if self._crossing_forbidden_for(exc)
+                                    else await self._relay_last_resort(request, body)
+                                )
                             except Exception as relay_exc:
                                 envelope = self._relay_failure_envelope(relay_exc)
                                 if envelope is None:
@@ -6675,7 +6724,15 @@ class BridgeServer:
                             # legal (§5.3 S8). The walk is exhausted and
                             # nothing reached the client, so the subscription
                             # relay is offered first (§16, review 2026-10-29).
-                            relay_response = await self._relay_last_resort(request, body)
+                            # The relay's own envelope wins when the crossing
+                            # fails (review round 4).
+                            try:
+                                relay_response = await self._relay_last_resort(request, body)
+                            except Exception as relay_exc:
+                                envelope = self._relay_failure_envelope(relay_exc)
+                                if envelope is None:
+                                    raise
+                                return envelope
                             if relay_response is not None:
                                 return relay_response
                             return _make_error_response(
@@ -7222,9 +7279,15 @@ class BridgeServer:
                                     # The relay's own envelope wins when the
                                     # crossing fails (§16) — a stall must not
                                     # leak into the dispatch-loop's catch-all,
-                                    # which mangles it (review 2026-10-29).
+                                    # which mangles it (review 2026-10-29). A
+                                    # request-shaped failure is barred
+                                    # (review round 4).
                                     try:
-                                        relay_response = await self._relay_last_resort(request, body)
+                                        relay_response = (
+                                            None
+                                            if self._crossing_forbidden_for(upstream)
+                                            else await self._relay_last_resort(request, body)
+                                        )
                                     except Exception as relay_exc:
                                         envelope = self._relay_failure_envelope(relay_exc)
                                         if envelope is None:
@@ -7427,8 +7490,15 @@ class BridgeServer:
                                 # body falls back to kitty's own upstream-error wording (Q9), never to
                                 # the empty-reply message that would misreport what happened.
                                 # Pre-emission walk exhaustion: the subscription relay is offered
-                                # before the terminal (§16, review 2026-10-29).
-                                relay_response = await self._relay_last_resort(request, body)
+                                # before the terminal (§16, review 2026-10-29). The relay's own
+                                # envelope wins when the crossing fails (review round 4).
+                                try:
+                                    relay_response = await self._relay_last_resort(request, body)
+                                except Exception as relay_exc:
+                                    envelope = self._relay_failure_envelope(relay_exc)
+                                    if envelope is None:
+                                        raise
+                                    return envelope
                                 if relay_response is not None:
                                     return relay_response
                                 if usable_payload is not None:
@@ -7938,8 +8008,16 @@ class BridgeServer:
                                     message_id,
                                 )
                                 # Pre-emission walk exhaustion: the subscription relay is
-                                # offered before the terminal (§16, review 2026-10-29).
-                                relay_response = await self._relay_last_resort(request, body)
+                                # offered before the terminal (§16, review 2026-10-29). The
+                                # relay's own envelope wins when the crossing fails
+                                # (review round 4).
+                                try:
+                                    relay_response = await self._relay_last_resort(request, body)
+                                except Exception as relay_exc:
+                                    envelope = self._relay_failure_envelope(relay_exc)
+                                    if envelope is None:
+                                        raise
+                                    return envelope
                                 if relay_response is not None:
                                     return relay_response
                                 return _make_error_response(
@@ -8139,9 +8217,14 @@ class BridgeServer:
                                 # arm's terminal — the walk is exhausted with
                                 # nothing written to the client. The relay's
                                 # own envelope wins when the crossing fails
-                                # (§16, review 2026-10-29).
+                                # (§16, review 2026-10-29); a request-shaped
+                                # failure is barred (review round 4).
                                 try:
-                                    relay_response = await self._relay_last_resort(request, body)
+                                    relay_response = (
+                                        None
+                                        if self._crossing_forbidden_for(exc)
+                                        else await self._relay_last_resort(request, body)
+                                    )
                                 except Exception as relay_exc:
                                     envelope = self._relay_failure_envelope(relay_exc)
                                     if envelope is None:

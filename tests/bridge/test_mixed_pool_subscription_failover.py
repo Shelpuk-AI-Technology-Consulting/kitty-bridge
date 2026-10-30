@@ -256,6 +256,144 @@ def fast_ladders(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
 
 
+class TestRequestShapedBar:
+    """Request-shaped failures are barred from the crossing (review round 4)."""
+
+    @staticmethod
+    def _health_by_name(server: BridgeServer) -> dict:
+        """Return each member's health record by profile name.
+
+        Args:
+            server: The bridge server whose members to index.
+
+        Returns:
+            Profile name → health record.
+        """
+        return dict(zip((member[2].name for member in server._backends), server._backend_health, strict=True))
+
+    @pytest.mark.asyncio()
+    async def test_f4_400_walk_answers_400_without_crossing(self, fast_ladders: None) -> None:
+        """Two members reject the body with 400: the client gets the 400, the member stays healthy."""
+        random.seed(1)
+        server = _mixed_server(
+            _plain_member("plain-0"),
+            _plain_member("plain-1"),
+            _subscription_member("sub-1"),
+        )
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    _APIKEY_URL,
+                    status=400,
+                    body=json.dumps({"error": {"message": "your request is malformed"}}),
+                    repeat=True,
+                )
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_BODY,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 400, body_text
+                    assert "malformed" in body_text
+                assert _relay_calls(m) == []
+        finally:
+            await server.stop_async()
+
+        assert self._health_by_name(server)["sub-1"]["healthy"] is True
+
+    @pytest.mark.asyncio()
+    async def test_streaming_400_answers_400_without_crossing(self, fast_ladders: None) -> None:
+        """A streaming walk ending in a 400 surfaces the 400 instead of relaying a known-bad body."""
+        random.seed(1)
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(
+                    _APIKEY_URL,
+                    status=400,
+                    body=json.dumps({"error": {"message": "your request is malformed"}}),
+                    repeat=True,
+                )
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_STREAM_BODY,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 400, body_text
+                assert _relay_calls(m) == []
+        finally:
+            await server.stop_async()
+
+        assert self._health_by_name(server)["sub-1"]["healthy"] is True
+
+    @pytest.mark.asyncio()
+    async def test_member_shaped_failures_still_cross(self, fast_ladders: None) -> None:
+        """A 500 walk still crosses: the bar covers request-shaped statuses only."""
+        random.seed(1)
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_APIKEY_URL, status=500, body=json.dumps({"error": "upstream broken"}), repeat=True)
+                m.post(_UPSTREAM_URL, status=200, body=json.dumps(_UPSTREAM_REPLY))
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_BODY,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 200, body_text
+                    assert (await resp.json())["content"][0]["text"] == "Hi"
+                assert len(_relay_calls(m)) == 1
+        finally:
+            await server.stop_async()
+
+
+class TestEmptyTerminalStallEnvelope:
+    """A stalled crossing at an empty terminal answers the 504 envelope (review round 4)."""
+
+    @pytest.mark.asyncio()
+    async def test_stalled_crossing_at_empty_gate_answers_504(
+        self, monkeypatch: pytest.MonkeyPatch, fast_ladders: None
+    ) -> None:
+        """The non-streaming empty gate's stall 504s instead of hitting the 500 handler."""
+        random.seed(1)
+
+        async def _raise_timeout(self: BridgeServer, request, body, raw):  # noqa: ANN001
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(BridgeServer, "_relay_subscription_messages", _raise_timeout)
+        server = _mixed_server(_plain_member("plain-0"), _subscription_member("sub-1"))
+        empty_reply = {
+            "id": "msg_empty",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 0},
+        }
+        port = await server.start_async()
+        try:
+            with aioresponses(passthrough=["http://127.0.0.1"]) as m:
+                m.post(_APIKEY_URL, status=200, body=json.dumps(empty_reply), repeat=True)
+                async with aiohttp.ClientSession() as session, session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_BODY,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    body_text = await resp.text()
+                    assert resp.status == 504, body_text
+                    assert "timed out" in body_text
+        finally:
+            await server.stop_async()
+
+
 class TestSelectionVisibility:
     """Translated selections skip subscription members unless asked (R1/R2)."""
 

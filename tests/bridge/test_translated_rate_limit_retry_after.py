@@ -3,8 +3,8 @@
 ``SYSTEM_DESIGN.md`` §6.1 promises "``rate_limit`` from the provider's own
 retry hint". The subscription relay already honors it
 (``_mark_subscription_unhealthy``); these tests pin the same parity on the
-translated streaming and non-streaming Messages arms, where a 429 currently
-parks the member for the fixed default no matter what the provider asked for
+translated streaming and non-streaming Messages arms — the arms a 429 could
+previously park for the fixed default no matter what the provider asked for
 (live observation 2026-10-29: MiniMax members flapping at 429 with the hint
 ignored).
 

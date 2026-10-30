@@ -43,8 +43,13 @@ duplicating it.
   subscription member (`require_subscription=True`) → return
   `_relay_subscription_messages(request, body, await request.read())`; logs one
   INFO crossing line.
-- Wired at the three Messages terminals: streaming plain-transport arm, streaming
-  custom-transport arm, non-streaming `UpstreamError` arm.
+- Wired at the nine Messages terminals: `_handle_messages`' error arm and both
+  empty gates; `_stream_messages`' plain error and catch-all terminals; the
+  custom arm's error and empty terminals; and the native and translated empty
+  ladders (count guard: `_handle_messages` 3, `_stream_messages` 6). Request-shaped
+  400/404/413/422 failures are barred: F4 establishes that the body itself is
+  bad, so relaying it would bench a healthy subscription member and turn the
+  non-retryable client error into a retryable-looking 503.
 
 ## Verification
 
@@ -112,3 +117,19 @@ duplicating it.
   `TestMessagesCustomArmRetryAfter` (stub raises http_status 429 with `retry_after` 42 → park is
   42 s, kind `rate_limit`). Root cause of both: the round-1 doc claims were written from the plan,
   not verified against the merged hunk — the KBR-247 lesson again.
+
+## Implementation notes — review round 4 (on 1ad24af), applied 2026-10-30
+
+- Request-shaped failures are barred from the crossing (`_crossing_forbidden_for`,
+  400/404/413/422): F4 already establishes the body is bad, and relaying it parked a healthy
+  subscription member on Anthropic's identical 400 while turning the non-retryable client error
+  into a 503. Wired at all four error-terminal crossings; auth/rate-limit/upstream statuses stay
+  eligible (member-shaped). Pinned by the F4 cell (two 400ing members → 400 envelope, member
+  healthy, no relay call), the streaming single-400 cell, and a 500-still-crosses control.
+- The five empty-terminal crossings now wrap the relay in `_relay_failure_envelope` like the
+  error terminals — a stall there 504s instead of reaching the 500 handler or (on the streaming
+  arm) re-dispatching a second full relay POST (README promises one attempt). §16's "every
+  crossing site" sentence is now true by construction; the empty-gate stall test pins it.
+- Doc residues fixed: the test module docstring's "currently parks", the Bedrock map_error
+  Google docstring (changed symbol, was undocumented), and this file's To Be bullet (three
+  terminals → nine, with the bar).

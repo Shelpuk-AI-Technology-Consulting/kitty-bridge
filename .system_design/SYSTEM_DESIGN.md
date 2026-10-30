@@ -2540,7 +2540,13 @@ error is discarded. Every crossing site renders that envelope through one shared
 `api_error` envelope with the /clear hint, transport blip → the connection-failed envelope,
 anything else → a bug that propagates), so a stalled crossing answers 504 from every arm —
 including the non-streaming arm and the streaming plain arm, whose stall previously leaked into
-the dispatch-loop's catch-all and surfaced as a mangled 502 (review 2026-10-29). The crossing serves the original bytes, so any compaction the translated walk
+the dispatch-loop's catch-all and surfaced as a mangled 502 (review 2026-10-29). The relay is
+offered only for member-shaped failures: a 400/404/413/422 from the last translated attempt bars
+the crossing (`_crossing_forbidden_for`) — F4 already establishes the body itself is bad, so
+relaying it would park a healthy subscription member on Anthropic's identical 400 and dress a
+non-retryable client error up as a retryable 503 (review round 4). Auth, rate-limit, and
+upstream-breakage statuses stay eligible: those are member-shaped, and the member's own OAuth
+identity is exactly what can serve them. The crossing serves the original bytes, so any compaction the translated walk
 performed is discarded: a request that only fit after compaction may be rejected by Anthropic on
 size — an accepted trade-off, deliberate rather than accidental (relaying rewritten bytes would
 end the byte-exact contract §16 exists to keep). Three companion disciplines keep the exclusion
