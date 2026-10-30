@@ -153,16 +153,22 @@ jobs:
           # fingerprint (pre-gate artifact, or a damaged one) reads as
           # stale -- the safe direction.
           #
-          # Deliberately src/kitty ONLY (review round 11 asked why tests/
-          # is excluded): the walk's completeness claim -- every mutant of
-          # the group's current enumeration has a verdict -- is a function
-          # of the generated sources alone. A verdict's TRUTH also depends
-          # on the tests, which drift independently; that dimension is
-          # covered by the recorded baseline row's provenance SHA (the
-          # score is true as of the commit it names) and by the owner's
-          # re-dispatch lever, not by this gate: hashing tests/ too would
-          # invalidate the tree on every test-only commit and the loop
-          # would never converge during review.
+          # Deliberately src/kitty ONLY (review rounds 11-12 asked why
+          # tests/ is excluded): the walk's completeness claim -- every
+          # mutant of the group's current enumeration has a verdict -- is
+          # a function of the generated sources alone, so the gate needs
+          # no more than that. Test-suite drift is a different axis and is
+          # NOT closed by this gate: a carried verdict was established
+          # under the tests of the leg that measured it, so a tree carried
+          # across test-changing commits mixes suites, and the recorded
+          # row's provenance SHA describes the sources exactly but the
+          # tests only approximately. Exact test provenance requires the
+          # loop to converge on a branch whose tests do not change
+          # mid-loop -- the normal case -- and the owner's re-dispatch
+          # lever (re-measure a converged tree after a test change) covers
+          # the rest. Hashing tests/ into the gate was considered and
+          # declined: it would invalidate the tree on every test-only
+          # commit and the loop would never converge during review.
           if [ "$(cat mutants/TREE_SHA 2>/dev/null || true)" = "$(git rev-parse HEAD:src/kitty)" ]; then
             echo "TREE_CURRENT=true" >> "$GITHUB_ENV"
           else
