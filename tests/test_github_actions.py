@@ -1061,3 +1061,23 @@ class TestMutationRemeasureResumeLoop:
         ]
         assert len(checkouts) == 1
         assert checkouts[0].get("with", {}).get("fetch-depth") == 0
+
+    def test_the_artifact_lookup_fails_loudly(self):
+        """A failed lookup must not read as a fresh tree.
+
+        A 403, a rate limit, or a transient 5xx on the artifact query is
+        indistinguishable from "no artifact ever uploaded" under the old
+        swallow: the leg cold-started and re-measured from scratch, and
+        the resume chain was silently cut (review round 11). The
+        REMAINING-walk precedent applies: the lookup is load-bearing, so
+        it takes the fail-loud form with the recovery named in the error.
+        """
+        script = self._step(self._RESTORE)["run"]
+
+        assert "if ! ARTIFACT_ID=" in script
+        lookup_start = script.index("if ! ARTIFACT_ID=")
+        lookup_end = script.index('echo "TREE_RESTORED=false"', lookup_start)
+        assert "|| true" not in script[lookup_start:lookup_end], (
+            "the artifact lookup must not swallow its own failure"
+        )
+        assert "the artifact lookup failed" in script[lookup_start:lookup_end]

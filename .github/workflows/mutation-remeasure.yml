@@ -99,7 +99,17 @@ jobs:
           ARTIFACT_NAME: mutants-${{ inputs.group || 'compaction_and_pairing' }}
         run: |
           set -euo pipefail
-          ARTIFACT_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}" --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty')" || true
+          # The lookup is load-bearing and takes the REMAINING-walk's
+          # fail-loud form (review round 11): `|| true` made a failed
+          # query -- 403, rate limit, transient 5xx -- indistinguishable
+          # from "no artifact ever uploaded", so the leg cold-started and
+          # silently re-measured from scratch, cutting the resume chain.
+          # An EMPTY result (no artifact yet) still exits 0 and falls
+          # through to the normal first-run case below.
+          if ! ARTIFACT_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}" --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty')"; then
+            echo "::error::the artifact lookup failed -- cannot tell a failed query from a fresh tree; fix the cause (permissions or rate limit) and re-dispatch."
+            exit 1
+          fi
           if [ -z "${ARTIFACT_ID:-}" ]; then
             echo "No previous ${ARTIFACT_NAME} artifact -- starting a fresh tree."
             echo "TREE_RESTORED=false" >> "$GITHUB_ENV"
@@ -142,6 +152,17 @@ jobs:
           # commit must not invalidate a perfectly good tree. A missing
           # fingerprint (pre-gate artifact, or a damaged one) reads as
           # stale -- the safe direction.
+          #
+          # Deliberately src/kitty ONLY (review round 11 asked why tests/
+          # is excluded): the walk's completeness claim -- every mutant of
+          # the group's current enumeration has a verdict -- is a function
+          # of the generated sources alone. A verdict's TRUTH also depends
+          # on the tests, which drift independently; that dimension is
+          # covered by the recorded baseline row's provenance SHA (the
+          # score is true as of the commit it names) and by the owner's
+          # re-dispatch lever, not by this gate: hashing tests/ too would
+          # invalidate the tree on every test-only commit and the loop
+          # would never converge during review.
           if [ "$(cat mutants/TREE_SHA 2>/dev/null || true)" = "$(git rev-parse HEAD:src/kitty)" ]; then
             echo "TREE_CURRENT=true" >> "$GITHUB_ENV"
           else
