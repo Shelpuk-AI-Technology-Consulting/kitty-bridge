@@ -934,6 +934,322 @@ class TestAssertion2:
 
 
 # --------------------------------------------------------------------------
+# Scope enforcement (KBR-307) — rows outside provider_key do not claim
+# --------------------------------------------------------------------------
+
+
+def _p17_shaped_row(scope: tuple[str, ...]) -> r.MutationRow:
+    """Return a P17-shaped row with a caller-chosen scope.
+
+    P17 is the canonical ALWAYS-triggered, narrowly-scoped row
+    (``scope=("openai_subscription",)``, ``paths=(envelope.stream,
+    envelope.store)``), so the fixtures that exercise the scope filter
+    build one with the caller's scope rather than pointing at P17 itself —
+    a doctored production row would be a mutable fact under test.
+
+    Args:
+        scope: The scope tuple the fixture row carries.
+
+    Returns:
+        An unconditional ``ALWAYS`` row anchored at ``envelope.stream``.
+    """
+    return r.MutationRow(
+        id="Z-SCOPE-P17",
+        site=("tests/harness/test_oracle.py:Z-SCOPE-P17",),
+        trigger=r.Trigger.ALWAYS,
+        paths=(c.ENVELOPE_STREAM,),
+        conditional=False,
+        design_ref="test",
+        scope=scope,
+    )
+
+
+def _stream_flip() -> tuple[Request, Request]:
+    """Return an inbound and a captured projection differing only at stream.
+
+    Returns:
+        A pair of :class:`Request` projections whose only structural delta
+        is ``envelope.stream`` (``True`` inbound, ``False`` captured).
+    """
+    return (
+        _empty_request(Envelope(stream=True)),
+        _empty_request(Envelope(stream=False)),
+    )
+
+
+class TestScopeFilter:
+    """A row whose scope excludes ``provider_key`` does not claim (KBR-307).
+
+    KBR-139 delivered the scope data and ``row_is_in_scope``; KBR-307
+    threads it into the runtime oracle surface. Every case here exercises
+    the filter through the same three seams — ``_claim_matching``,
+    ``_conditional_violations``, ``_run_assertions`` — so a helper-only
+    test cannot pass while the runtime wiring is missing.
+    """
+
+    def test_claim_matching_filters_rows_outside_provider_scope(self) -> None:
+        """A scope-narrow row contributes no claimer on a foreign adapter."""
+        p17 = _p17_shaped_row(scope=("openai_subscription",))
+        broad = r.MutationRow(
+            id="Z-SCOPE-BROAD",
+            site=("tests/harness/test_oracle.py:Z-SCOPE-BROAD",),
+            trigger=r.Trigger.ALWAYS,
+            paths=(c.ENVELOPE_STREAM,),
+            conditional=False,
+            design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
+        )
+
+        # On anthropic, the P17-shaped row is scope-gated out; the
+        # ALL_PROVIDERS row is the only claimer.
+        claimers = oracle._claim_matching(
+            (c.ENVELOPE_STREAM,),
+            (p17, broad),
+            frozenset({r.Trigger.ALWAYS}),
+            provider_key="anthropic",
+        )
+        assert claimers[c.ENVELOPE_STREAM] == ("Z-SCOPE-BROAD",)
+
+        # On openai_subscription, both rows are live and both claim.
+        claimers = oracle._claim_matching(
+            (c.ENVELOPE_STREAM,),
+            (p17, broad),
+            frozenset({r.Trigger.ALWAYS}),
+            provider_key="openai_subscription",
+        )
+        assert claimers[c.ENVELOPE_STREAM] == ("Z-SCOPE-P17", "Z-SCOPE-BROAD")
+
+    def test_default_provider_key_is_all_providers_permissive(self) -> None:
+        """Omitting ``provider_key`` leaves both rows live (the sentinel short-circuit).
+
+        The contract is on the call-site short-circuit, not on
+        ``row_is_in_scope``: the helper returns ``False`` when handed the
+        sentinel as a key (the sentinel is a value of ``row.scope``, not of
+        ``provider_key``), so the filter must pass through untouched under
+        the default.
+        """
+        p17 = _p17_shaped_row(scope=("openai_subscription",))
+        broad = r.MutationRow(
+            id="Z-SCOPE-BROAD",
+            site=("tests/harness/test_oracle.py:Z-SCOPE-BROAD",),
+            trigger=r.Trigger.ALWAYS,
+            paths=(c.ENVELOPE_STREAM,),
+            conditional=False,
+            design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
+        )
+
+        claimers = oracle._claim_matching(
+            (c.ENVELOPE_STREAM,), (p17, broad), frozenset({r.Trigger.ALWAYS})
+        )
+        assert claimers[c.ENVELOPE_STREAM] == ("Z-SCOPE-P17", "Z-SCOPE-BROAD")
+
+    def test_conditional_violations_filters_iteration(self) -> None:
+        """A conditional row scoped away is not iterated on a foreign adapter.
+
+        Two-row fixture so the discriminator reaches assertion 2 (a
+        one-row fixture would raise assertion 1 before
+        ``_conditional_violations`` runs): a broader triggered row B
+        claims the delta via the prefix rule (assertion 1 passes), and
+        the narrow conditional row R is the violation under specificity
+        attribution. On ``openai_subscription``, R is iterated and its
+        violation surfaces; on ``anthropic``, R is filtered out of the
+        iteration and the run is clean — the discriminator.
+        """
+        conditional = r.MutationRow(
+            id="Z-SCOPE-COND",
+            site=("tests/harness/test_oracle.py:Z-SCOPE-COND",),
+            trigger=r.Trigger.RESPONSES_ORIGIN_PATH,
+            paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
+            conditional=True,
+            design_ref="test",
+            scope=("openai_subscription",),
+        )
+        broader = r.MutationRow(
+            id="Z-SCOPE-BROAD2",
+            site=("tests/harness/test_oracle.py:Z-SCOPE-BROAD2",),
+            trigger=r.Trigger.ALWAYS,
+            paths=(c.CONVERSATION_TURNS,),
+            conditional=False,
+            design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
+        )
+        inbound = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="assistant", parts=(ToolUse(name="f", arguments={}, id="a"),)),),
+            ),
+        )
+        captured = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="assistant", parts=(ToolUse(name="f", arguments={}, id="b"),)),),
+            ),
+        )
+
+        # In scope: the conditional row fires without its trigger (assertion 2).
+        with pytest.raises(ConditionalRowFiredWithoutTriggerError) as info:
+            oracle._run_assertions(
+                inbound,
+                captured,
+                register=(conditional, broader),
+                triggers_met=frozenset({r.Trigger.ALWAYS}),
+                provider_key="openai_subscription",
+            )
+        assert info.value.row_id == "Z-SCOPE-COND"
+
+        # Out of scope: the conditional row is not iterated; B claims via
+        # the prefix rule and the run is clean.
+        deltas = oracle._run_assertions(
+            inbound,
+            captured,
+            register=(conditional, broader),
+            triggers_met=frozenset({r.Trigger.ALWAYS}),
+            provider_key="anthropic",
+        )
+        assert deltas == (c.part_path(0, 0, "id"),)
+
+    def test_run_assertions_forwards_provider_key_to_conditional_violations(self) -> None:
+        """The ``_run_assertions`` → ``_conditional_violations`` forward is live.
+
+        Same two-row fixture as
+        :meth:`test_conditional_violations_filters_iteration`, driven
+        through ``_run_assertions`` rather than the helper directly. A
+        dropped ``provider_key`` argument inside ``_run_assertions`` would
+        let R through the filter under the permissive default and raise
+        ``ConditionalRowFiredWithoutTriggerError`` where the real forward
+        keeps the run clean.
+        """
+        conditional = r.MutationRow(
+            id="Z-SCOPE-COND",
+            site=("tests/harness/test_oracle.py:Z-SCOPE-COND",),
+            trigger=r.Trigger.RESPONSES_ORIGIN_PATH,
+            paths=(c.part_path(c.WILDCARD, c.WILDCARD, "id"),),
+            conditional=True,
+            design_ref="test",
+            scope=("openai_subscription",),
+        )
+        broader = r.MutationRow(
+            id="Z-SCOPE-BROAD2",
+            site=("tests/harness/test_oracle.py:Z-SCOPE-BROAD2",),
+            trigger=r.Trigger.ALWAYS,
+            paths=(c.CONVERSATION_TURNS,),
+            conditional=False,
+            design_ref="test",
+            scope=(r.ALL_PROVIDERS,),
+        )
+        inbound = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="assistant", parts=(ToolUse(name="f", arguments={}, id="a"),)),),
+            ),
+        )
+        captured = Request(
+            envelope=Envelope(),
+            conversation=Conversation(
+                turns=(Turn(role="assistant", parts=(ToolUse(name="f", arguments={}, id="b"),)),),
+            ),
+        )
+
+        deltas = oracle._run_assertions(
+            inbound,
+            captured,
+            register=(conditional, broader),
+            triggers_met=frozenset({r.Trigger.ALWAYS}),
+            provider_key="anthropic",
+        )
+        assert deltas == (c.part_path(0, 0, "id"),)
+
+    def test_run_assertions_raises_unclaimed_when_scope_filter_removes_the_only_claimer(
+        self,
+    ) -> None:
+        """A P17-shaped row on a foreign adapter leaves the delta unclaimed.
+
+        Single-row register, the trigger met, the delta claimed nowhere:
+        on ``openai_subscription`` the row claims and the run is clean; on
+        ``anthropic`` the row is scope-gated out and assertion 1 fires
+        naming ``envelope.stream``. This is the AC5 half of the pair.
+        """
+        p17 = _p17_shaped_row(scope=("openai_subscription",))
+        inbound, captured = _stream_flip()
+
+        deltas = oracle._run_assertions(
+            inbound,
+            captured,
+            register=(p17,),
+            triggers_met=frozenset({r.Trigger.ALWAYS}),
+            provider_key="openai_subscription",
+        )
+        assert deltas == (c.ENVELOPE_STREAM,)
+
+        with pytest.raises(UnclaimedMutationError) as info:
+            oracle._run_assertions(
+                inbound,
+                captured,
+                register=(p17,),
+                triggers_met=frozenset({r.Trigger.ALWAYS}),
+                provider_key="anthropic",
+            )
+        assert "envelope.stream" in info.value.paths
+
+    def test_run_assertions_p17_claims_on_openai_subscription(self) -> None:
+        """The production register's P17 claims on its own adapter (AC5's pin).
+
+        The single-row fixtures above are surgical; this case runs the
+        same stream flip against :data:`harness.register.REGISTER` — where
+        P17 is live — and flips only the ``provider_key``. On
+        ``openai_subscription`` P17 claims the delta and the run passes;
+        on ``anthropic`` the flip is unclaimed. The gating is per-adapter,
+        not global.
+        """
+        inbound, captured = _stream_flip()
+
+        deltas = oracle._run_assertions(
+            inbound,
+            captured,
+            register=r.REGISTER,
+            triggers_met=frozenset({r.Trigger.ALWAYS}),
+            provider_key="openai_subscription",
+        )
+        assert deltas == (c.ENVELOPE_STREAM,)
+
+        with pytest.raises(UnclaimedMutationError) as info:
+            oracle._run_assertions(
+                inbound,
+                captured,
+                register=r.REGISTER,
+                triggers_met=frozenset({r.Trigger.ALWAYS}),
+                provider_key="anthropic",
+            )
+        assert "envelope.stream" in info.value.paths
+
+    def test_scope_filter_removal_breaks_claim_matching(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Mechanism control: a permissive helper re-opens the over-claim.
+
+        The same shape the R5b control uses (KBR-53): the helper is
+        weakened to "always True", the filter goes permissive, and the
+        P17-shaped row claims on ``anthropic`` — the exact delta the real
+        filter keeps unclaimed. If this case stops failing-by-design, the
+        filter has stopped being the load-bearing behaviour.
+        """
+        p17 = _p17_shaped_row(scope=("openai_subscription",))
+        inbound, captured = _stream_flip()
+
+        monkeypatch.setattr(r, "row_is_in_scope", lambda row, key: True)
+
+        # With the helper permissive, P17 claims on anthropic and the run
+        # is clean — the over-claim this ticket's filter exists to prevent.
+        deltas = oracle._run_assertions(
+            inbound,
+            captured,
+            register=(p17,),
+            triggers_met=frozenset({r.Trigger.ALWAYS}),
+            provider_key="anthropic",
+        )
+        assert deltas == (c.ENVELOPE_STREAM,)
+
+
+# --------------------------------------------------------------------------
 # §4.3 C2 — native passthrough key-order assertion
 # --------------------------------------------------------------------------
 

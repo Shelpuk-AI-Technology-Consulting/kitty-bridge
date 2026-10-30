@@ -150,7 +150,11 @@ shell ─► kitty.cli.main.main
   `--settings <tmpfile>` flag whose `env` block repeats them. The env block also carries
   `ENABLE_CLAUDEAI_MCP_SERVERS=false` (KBR-245): Claude Code's documented per-session
   opt-out from claude.ai MCP connectors, which suppresses the banner Claude Code prints when
-  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` shadow the user's claude.ai OAuth login.
+  `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` shadow the user's claude.ai OAuth login, and
+  `CLAUDE_CODE_TMPDIR=tempfile.gettempdir()` (KBR-314): Claude Code's documented override for its
+  internal temp dir; without it Claude Code's cross-session messaging daemon falls back to `/` as
+  its socket dir, which fails its ownership check on boxes where `/` is neither user- nor root-owned
+  and surfaces a remediation hint at every launch.
 
 ### 2.1 Launcher lifecycle and crash recovery (KBR-93, KBR-268)
 
@@ -955,8 +959,9 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   per handler, no new ladder logic, no per-route D4 body change. The
   native-Messages arm of `/v1/messages` — the `if cc_response.get("type") ==
   "message"` branch, where the reply arrives in native Messages shape —
-  stays structurally out of the gate (it never reaches the elif) and
-  remains the recorded residual for both KBR-300 and KBR-304. Tests: each
+  stayed structurally out of the gate (it never reaches the elif) and was
+  the recorded residual for both KBR-300 and KBR-304 — closed by KBR-306
+  below. Tests: each
   of the four KBR-300 test files gained a native-provider variant
   (`test_an_empty_native_completion_ends_in_the_d4_terminal` +
   `test_an_empty_native_attempt_crosses_to_a_healthy_plain_peer` +
@@ -965,6 +970,67 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
   deliberately leaves `upstream_wire_shape` at the inherited
   `CHAT_COMPLETIONS` (the base-class invariant is a production-adapter
   rule; the test exercises the conjunct dimension only).
+- **KBR-306 closed the last cell: the native-Messages arm of `/v1/messages`
+  non-streaming.** After KBR-304 every CC-shaped non-streaming empty reply
+  on every route was judged, but the `if cc_response.get("type") ==
+  "message"` branch of `_handle_messages` — the arm a native Anthropic
+  provider reaches when it answers in its own Messages shape — shipped the
+  ladder-exhausted empty reply as a billed, healthy-marked `200`:
+  `result = cc_response` fell through to the audit/bill/mark block, and
+  `_messages_truncation_before_content` (D3) could not catch a genuinely
+  empty `end_turn`. The fix mirrors KBR-298/300/304 exactly: inside the
+  `if` branch, after the D3 truncation check and before
+  `result = cc_response`, the parsed native reply is judged through
+  `self._is_empty_cc_response` — whose Messages-shaped arm (pinned by the
+  streaming twin `PreambleHold._block_start_releases`, Q14 D1) decides —
+  and a judged-empty completion ends in the route's D4 terminal
+  (`server.py:5510-5520`'s byte-image: bare-JSON `502` +
+  `_NATIVE_EMPTY_REPLY_MESSAGE` + `reason: "empty_response"`), before
+  `_audit_response_tool_use` / `_log_usage` / `_mark_backend_healthy`. One
+  client branch, `(502, reason=empty_response)`, now covers `/v1/messages`
+  in both stream modes — the D4 body is byte-identical across the
+  non-streaming elif, the native `if` arm, and the streaming S11 terminal.
+  The ladder is unchanged: `_is_non_retryable_reply` already judges
+  Messages-shaped empties through the same arm, so
+  `_request_with_retry_{single,balancing}` walked these attempts before
+  this ticket; the gate sits where it can only see a content-bearing reply
+  or the exhausted empty one. D3 keeps its ordering (a
+  `max_tokens` / `model_context_window_exceeded` stop reason on a
+  content-less reply is non-retryable in the ladder and renders the
+  request-shaped `400` before the new gate). Two carry-overs are
+  deliberate, recorded here so they are not read as accidents:
+  - *Whitespace-only text is not judged empty* (PO confirmation
+    2026-09-23): the Messages arm's `text != ""` (no `.strip()`) mirrors
+    the streaming hold's release semantics; a native reply whose only
+    content is a whitespace-only text block reaches the client as `200`
+    in both stream modes. Widening it would require changing BOTH the arm
+    and the streaming hold together to preserve the documented mirror —
+    a behaviour change on a streaming path this ticket explicitly
+    records as fine, so it stays open.
+  - *A thinking-only native reply takes the ladder* (the KBR-287/293/
+    297/298/300 reasoning-only trade-off, carried through the
+    KBR-277/285 judge family): the arm counts a thinking block as empty,
+    consistent with the streaming hold, which also does not release on a
+    thinking block. A tool_use block counts as content (D1: any block
+    whose type is not text/thinking/redacted_thinking is content).
+  Tests:
+  `tests/bridge/test_messages_native_non_streaming_empty_hold.py` (the
+  KBR-300/304 harness shape in a sibling file: a real in-process
+  `BridgeServer` against an `aioresponses` upstream; the
+  `_NativeOpenAIAdapter` stub physically mirrored from the raw-CC file;
+  Messages-shaped canned bodies that flow through the
+  `_native_messages_request + type == "message"` guard as-is; the
+  recording seam capturing `_log_usage` / `_mark_backend_healthy`; three
+  RED tests on the unfixed code — empty, thinking-only, and the
+  balancing-mode `[native, native]` exhaustion whose `healthy_log == []`
+  is the meaningful "no healthy-mark" pin, the single-backend assertion
+  being vacuous by the recorded asymmetry; four pass-through pins —
+  content-bearing, tool-use-only, D3 truncation, and the
+  `[native, plain]` crossing — pass under both predicates). The existing
+  R4 pin in `tests/bridge/test_native_provider_reply_shape.py`
+  (`test_claude_code_still_gets_the_upstream_messages_reply`, three real
+  native adapters) continues to hold and is the stronger content-bearing
+  pass-through pin.
 - **KBR-277 closed the non-streaming half.**
   `BridgeServer._is_empty_cc_response`'s Chat Completions-shaped arm now reads
   `message.reasoning_content` with the same `isinstance(..., str) and ... != ""` rule
@@ -1053,7 +1119,15 @@ other non-Messages wire behaves byte-identically to the pre-KBR-232 code.
 Each backend of a balancing pool carries a health record
 (`BridgeServer._backend_health`). A failure marks it unhealthy for a cooldown whose
 length depends on the kind: `rate_limit` from the provider's own retry hint,
-`hard`/`cloudflare` from `backend_cooldown` (default 300 s; capped at 30 s for a
+parsed from `Retry-After` on the raw-subscription path, the Messages plain
+streaming arm, the Messages custom arm, and the shared non-streaming
+classification when the header is present (numeric seconds only; an HTTP-date
+or absent header takes `backend_cooldown`, default 300 s). The parsed hint is
+capped at one hour (`parse_retry_after_seconds`, 2026-10-29 review): a broken
+upstream header can no longer bench a member for a day, while a genuinely long
+rate limit still gets a real cooldown — the member re-parks on its next 429,
+costing one request per cap period; `hard`/`cloudflare`
+from `backend_cooldown` (default 300 s; capped at 30 s for a
 one-backend pool), `transport`/`stream` on an escalating ladder, `auth` for 900 s,
 `entitlement` for 24 h. On request arrival `_select_backend()` picks among healthy
 backends (backup tier held out while a primary lives); when **every** backend is
@@ -1915,6 +1989,53 @@ fuzzer's distribution is the only producer.
   (`TEST_SUITE.md` §3.3.1b is the closed-set authority; gap row G44
   registers the five named format-specific control fields that stay dropped).
 
+**Hop-2 landing on the rebuild-trio — [KBR-305](https://shelpuk.atlassian.net/browse/KBR-305).**
+The six KBR-301 sampling keys reach the CC body. On the **verbatim-forwarder**
+routes the body reaches the upstream with the keys intact. On the three
+rebuild-from-allowlist adapters — `AnthropicAdapter` (and its four delegates
+`zai_coding`, `custom_anthropic`, `minimax_token`, `opencode_go` on
+Messages-routed models), `BedrockAdapter`, `OllamaCloudAdapter` — the
+allowlists read only the keys their destination wire accepts. The per-adapter
+disposition, verified against each destination's published schema or source
+(Anthropic Messages `platform.claude.com/docs/en/api/messages` accepts none
+of the six; Bedrock `InferenceConfiguration` is exactly
+`{maxTokens, temperature, topP, stopSequences}`;
+[Ollama `ChatRequest` + `Options`](https://raw.githubusercontent.com/ollama/ollama/main/api/types.go)
+on main carries `Logprobs bool`/`TopLogprobs int` top-level and
+`Seed`/`PresencePenalty`/`FrequencyPenalty` under `options` — but no
+`n`/`num_choices` field anywhere):
+
+| CC key | Anthropic family | Bedrock | Ollama Cloud |
+|---|---|---|---|
+| `seed` | drop | drop | carry → `options.seed` |
+| `presence_penalty` | drop | drop | carry → `options.presence_penalty` |
+| `frequency_penalty` | drop | drop | carry → `options.frequency_penalty` |
+| `logprobs` (bool) | drop | drop | carry → top-level `logprobs` |
+| `top_logprobs` (int) | drop | drop | carry → top-level `top_logprobs` |
+| `n` | drop | drop | drop (no Ollama equivalent) |
+
+**Ticket correction, recorded.** The ticket's text states "Ollama Cloud's
+`/api/chat` accepts `seed` and `options.n`". The `options.n` half is wrong —
+Ollama's Go source declares no `n`/`num_choices` field anywhere, so `n`
+cannot be carried and is drop-and-register on Ollama like the others; the
+five other Ollama keys are real (Go struct + `docs.ollama.com/api/chat` for
+`logprobs`/`top_logprobs`). **Ticket scope clarification.** The two logprob
+carries are accepted-but-inert upstream — ollama.com accepts the keys but
+serves logprobs from local models only (maintainer statement,
+ollama/ollama#13638), and `OllamaCloudAdapter.translate_from_upstream` does
+not forward response logprobs either way. The carry is chosen because (a)
+forwarding keeps both projections agreeing on those addresses with no
+claimed delta at the wire, and (b) the carry starts working with no further
+change if Ollama ever serves them on cloud. The reader widening
+(`tests/harness/reader_ollama.py`) is owed either way because the published
+`ChatRequest` carries the keys — the reader is total over the published
+format, independent of whether the bridge forwards them. The
+register-row P43 (per the test suite's design of record) lands the
+conditional carry/drop split at the rebuild-trio sites; the row text records
+the split and the accepted P31/P32-rule departure (L1 suite carries the
+discriminating duty on the five ollama carries per `TEST_SUITE.md` §6.1's
+mutmut scope).
+
 ### 12.6 Out of scope
 
 - The response direction (`translate_response`, `translate_stream_chunk`) processes
@@ -2051,3 +2172,558 @@ The oracle covers four branches:
   (their triggers become content-shape-aware, not string-only); TEST_SUITE.md §3.2.1's M3/M4
   prose is updated to the closed state but the rows themselves stay. The Bedrock adapter
   continues to declare `WireShape.OTHER`; the emitted shape family is unchanged.
+
+---
+
+## 14. OpenAI OAuth login: browser flow and headless device-code flow
+
+Traces to [KBR-317](https://shelpuk.atlassian.net/browse/KBR-317). The `openai_subscription`
+provider authenticates through OpenAI's OAuth surface with the same `client_id` as the
+Codex CLI (`app_EMoamEEZ73f0CkXaXp7hrann`). Two login paths now exist; both land in the
+same `OAuthSession` shape, so the downstream `id_token` → API key exchange, the
+credential store, and the `openai_subscription` adapter are unchanged.
+
+### 14.1 Components
+
+| Component | Module | Responsibility |
+|---|---|---|
+| `run_oauth_flow` (`kitty.auth.openai_oauth`) | **changed** | Single entry point for both flows; gains keyword-only `device_auth: bool \| None = None` and dispatches (§14.3). Browser path otherwise unchanged. |
+| `run_oauth_device_flow` (`kitty.auth.openai_oauth`) | **new** | RFC 8628 device-authorization grant against `auth.openai.com`; mirrors `codex-rs/login/src/device_code_auth.rs`. |
+| `is_headless_environment` (`kitty.auth.headless`) | **new** | Pure predicate over `os.environ`: `CI`, `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_TTY`, or (Linux) neither `DISPLAY` nor `WAYLAND_DISPLAY` set. Variable list from `codex-rs/core/src/env.rs` at revision `1fc72c6` (file since moved; pinned revision cited in openai/codex#9253); the headless-preference pattern itself is current-main behaviour in `codex-rs/cli/src/login.rs::run_login_with_device_code_fallback_to_browser`. |
+| CLI flag plumbing (`kitty.cli.main::_run_auth`, `kitty.cli.auth_cmd`) | **changed** | `kitty auth openai --device-auth` / `--no-device-auth`, forwarded as `device_auth: bool \| None` through `run_auth_openai` → `run_oauth_for_provider` → `run_oauth_flow`. |
+
+**Entry points served** (all four reach the dispatch through
+`run_oauth_for_provider`): `kitty auth openai` (`auth_cmd.py`), the profile
+wizard's OpenAI path (`profile_cmd.py` `_create_profile_flow`), the
+profile-edit re-auth branch (`profile_cmd.py`), and `kitty setup`
+(`setup_cmd.py`). Only `kitty auth openai` has a flag surface; the three
+interactive entry points inherit auto-detect.
+
+### 14.2 The wire contract (as confirmed against codex-rs @ main, 2026-10)
+
+Device-code login against `auth.openai.com` (the OAuth issuer):
+
+1. `POST {issuer}/api/accounts/deviceauth/usercode` — body
+   `{"client_id": "<CLIENT_ID>"}`, `Content-Type: application/json`.
+   Response: `{"device_auth_id": str, "user_code": str, "interval": str-digits}`.
+   The `interval` is a string of digits (codex deserialises it with
+   `s.trim().parse::<u64>()`); the `user_code` key may also arrive as
+   `usercode` (codex aliases both).
+2. The CLI prints `{issuer}/codex/device` as the verification URL and the
+   `user_code` as a one-time code (expires in 15 minutes per codex's prompt).
+3. `POST {issuer}/api/accounts/deviceauth/token` — body
+   `{"device_auth_id": str, "user_code": str}` — polled every `interval`
+   seconds. **403 / 404 mean "still pending" → keep polling** (up to 15 min
+   total). **Other non-2xx → fail fast with the status in the message.**
+   Success returns
+   `{"authorization_code": str, "code_challenge": str, "code_verifier": str}` —
+   the **server** mints the PKCE pair for the device flow (unlike the browser
+   flow, where the client mints it).
+4. `POST {issuer}/oauth/token` (the standard token endpoint) — authorization-code
+   grant with the server-issued PKCE pair and
+   `redirect_uri = {issuer}/deviceauth/callback` (a **server-side** redirect
+   target, not the user's loopback).
+   Response: the same token shape as the browser flow
+   (`access_token`, `id_token`, `refresh_token`, `account_id`, …).
+5. `id_token` → API key exchange proceeds as in the browser flow (best-effort,
+   non-fatal on failure).
+
+Why the device path needs no local callback: the authorization code is
+delivered to the CLI by the polling endpoint itself, so the browser never has
+to reach the machine running kitty.
+
+### 14.3 Selection rule
+
+| Condition | Path taken |
+|---|---|
+| `--device-auth` passed | Device-code flow, regardless of environment. |
+| `--no-device-auth` passed | Browser flow, regardless of environment (used with `ssh -L 1455:localhost:1455` when the user prefers the tunnel). |
+| Neither flag, headless per §14.2's predicate | Device-code flow. |
+| Neither flag, not headless | Browser flow (today's default). |
+
+**Why auto-detect is kitty's default when the `codex login` subcommand's
+default is browser-with-hint:** the ticket's premise is that a remote-VM
+user should not need to discover a flag to authenticate. Codex itself
+prefers device-code when headless in its other login paths
+(`run_login_with_device_code_fallback_to_browser`, TUI onboarding); kitty
+extends that preference to its single shared entry point. The device-code
+protocol is mirrored exactly; the selection default is a recorded product
+choice.
+
+### 14.4 Decisions, and why
+
+- **Mirror codex-rs's device protocol rather than design a bespoke UX.** The
+  ticket names the Codex CLI implementation as the reference and OpenAI has
+  already shipped, debugged, and documented this exact protocol for the same
+  `client_id`. A bespoke "paste the callback URL" variant (Claude Code's
+  approach) would be a different protocol from what OpenAI's
+  `/codex/device` page implements, and would split kitty's UX from the
+  tool it is mirroring.
+- **Dispatch inside `run_oauth_flow`, not in the CLI layer.** There are four
+  entry points into `run_oauth_for_provider` (§14.1); only one has a flag
+  surface. A `device_auth` kwarg with a `None` default threaded through
+  `run_oauth_for_provider` / `run_auth_openai` gives all four auto-detect
+  with no extra wiring, keeps the selection rule in one place, and
+  preserves the existing call-site behaviour when the kwarg is omitted.
+  The signature change is additive and keyword-only.
+- **`is_headless_environment` lives in its own `kitty.auth.headless` module.**
+  It is a pure predicate over the environment with no dependency on aiohttp,
+  asyncio, or the OAuth module; giving it its own home keeps it importable
+  from tests and from future callers (e.g. tmux-wrap warnings) without
+  dragging in the OAuth machinery.
+- **Fail fast on unexpected statuses and transport errors, poll only on
+  403/404.** Matches codex. A 401 or 5xx on the polling endpoint, or a DNS
+  failure mid-poll, is a server-side or network problem the user cannot fix
+  by waiting; only "not authorised yet" (403/404) is a legitimate reason to
+  keep the loop alive. The user re-runs the command.
+- **Interval policy deliberately diverges from codex.** Upstream
+  serde-defaults a missing `interval` to 0 and its poll loop
+  `Duration::from_secs(interval).min(remaining)` then busy-loops the token
+  endpoint for up to 15 minutes. Kitty's posture: missing field → 5 s
+  default; `interval` ≤ 0 or unparseable → typed
+  `OAuthDeviceCodeIntervalError` (fail fast); sleep floor `max(interval, 1)`;
+  final sleep clamped to the remaining budget. Recorded so a future reader
+  does not "fix" the clamp to match upstream.
+- **15-minute hard cap on polling, not `OAUTH_TIMEOUT_SECONDS`.** Codex uses
+  15 minutes for the device flow because the user has to switch machines,
+  open a browser, and type a code — a fundamentally slower interaction than
+  clicking a link. Reusing the 300 s browser timeout here would time out
+  legitimate logins.
+- **The prompt is kitty-owned, printed to stderr, and carries the
+  workspace-admin sentence.** Codex's `device_code_prompt` string is the
+  structural base (a test fixture, not a contract); kitty adds the admin
+  sentence because personal vs workspace entitlement is a question codex's
+  prompt does not have to answer. Stderr matches where the browser path
+  already prints its "if the browser did not open" hint. The device path
+  does not print the browser path's "Opening browser for ChatGPT
+  login…" line — that message is wrong for a no-browser flow.
+- **No secret values in logs or exception messages.** §9's structural
+  redaction guard is scoped to `kitty.bridge` loggers and does not cover
+  `kitty.auth.*`, so the requirement is stated directly on the new code:
+  DEBUG lines carry status codes and counts only, and OAuth error bodies
+  are redacted before landing in an exception message (some token-endpoint
+  errors echo request parameters verbatim).
+- **No change to the token shape or persistence layer.** Both flows produce
+  the same `OAuthSession`; the credential store, the `auth_ref` indirection,
+  and the `openai_subscription` adapter are untouched. This is the reason
+  the change is confined to `kitty/auth/` + CLI plumbing.
+
+### 14.5 Verification
+
+- L1 unit tests for `is_headless_environment` (table-driven over
+  monkeypatched `os.environ`).
+- L1 unit tests for the device-response parsers (interval as whitespace-
+  padded string, `user_code`/`usercode` alias, 403/404 pending, other
+  statuses fail fast) and the interval edge cases (missing → 5 s default;
+  `"0"`, negative, non-numeric → `OAuthDeviceCodeIntervalError`).
+- L1 redaction tests assert no device secret appears in DEBUG output.
+- L2 contract test pins kitty's JSON request/response shapes from §14.2 as
+  a literal fixture (kitty's contract; upstream drift needs a deliberate
+  fixture update, not a test failure).
+- L3 subsystem test drives `run_oauth_device_flow` end-to-end over mocked
+  HTTP (aioresponses): happy path, 404-on-usercode, poll-then-success,
+  poll-timeout (injected shrunken budget), transport exception mid-poll,
+  partial token response → typed error, cancellation, error body
+  containing the auth code → message without it, final-sleep clamp
+  (monkeypatched `asyncio.sleep`), session close-if-created.
+- CLI tests assert `--device-auth` / `--no-device-auth` route to the right
+  path with the environment detection stubbed; the device path emits the
+  device prompt and not the "Opening browser" line; `check_tty` still
+  gates the command.
+
+### 14.6 Known limits (recorded, not fixed here)
+
+- ChatGPT **Business/Team/Enterprise** workspaces must have device-code
+  authentication enabled by a workspace admin
+  (`https://chatgpt.com/admin/permissions`, "Enable device code
+  authentication for Codex CLI"); personal Plus/Pro accounts have it on by
+  default (toggle at `https://chatgpt.com/#settings/Security` when
+  disabled). This is an OpenAI-side entitlement; kitty cannot detect or
+  bypass it. Surfaced in the device prompt (§14.4) and in the README.
+- **Pre-existing redirect-URI/port-scan mismatch (not this ticket's scope).**
+  `REDIRECT_URI` is hardcoded to `http://localhost:1455/auth/callback`
+  while the callback server scans ports 1455–1459; if 1455 is occupied and
+  kitty binds 1456, the browser's redirect lands on whatever holds 1455 and
+  the flow times out with no hint. Recorded because §14.3's
+  `--no-device-auth` tunnel fallback makes the failure reachable; the
+  README's tunnel recipe carries the "port 1455 must be free" caveat.
+  Fixing it (bind-then-build-URL is impossible — OpenAI registers only
+  1455 for this client — so the fix would be refusing non-1455 binds with
+  a clear error) belongs to a separate ticket.
+- The verification URL is a **fixed string** (`{issuer}/codex/device`),
+  not per-login. Codex has the same property; the one-time code is the
+  per-login secret, not the URL.
+- The server-issued PKCE pair means the device flow's code_verifier is
+  chosen by OpenAI, not by kitty. This is codex's protocol choice, not a
+  kitty one; it is what makes the polling endpoint the sole delivery
+  channel for the authorization code.
+
+## 15. Impersonated Codex CLI identity and OpenAI's client-version gates
+
+Traces to [KBR-318](https://shelpuk.atlassian.net/browse/KBR-318). The
+`openai_subscription` provider does not present itself as kitty: every
+request to `chatgpt.com/backend-api/codex/responses` claims to be a Codex
+CLI install, carrying the CLI's `User-Agent` and its `version` header.
+OpenAI version-gates individual models on that identity — a request whose
+claimed version is below a model's gate is rejected with **HTTP 400 and an
+empty body**, with no hint that the version was the problem. The gate first
+bit on `gpt-6-astra` (requires Codex CLI ≥ 0.153.0) while kitty claimed
+`0.128.0`; the failure surfaced as a user-facing 400, not a red CI run.
+Login into the provider is §14's concern; this section is the request
+identity once logged in.
+
+### 15.1 Components
+
+| Component | Module | Responsibility |
+|---|---|---|
+| `CODEX_CLI_VERSION` (`kitty.codex_identity`) | **existing, re-pointed** | The single literal for the impersonated CLI version — `"0.154.0"` as of v1.18.0. Every version field kitty sends OpenAI derives from it. |
+| `build_codex_user_agent` (`kitty.codex_identity`) | **existing** | Builds `codex_cli_rs/{version} ({os} {release}; {machine})` from the constant. Also consumed by the OAuth token leg's `token_request_headers` (`kitty.auth.oauth_session`) — a bump moves that identity too, beyond this section's logged-in-request scope. |
+| `OpenAISubscriptionAdapter._build_codex_headers` (`kitty.providers.openai_subscription`) | **existing** | Sends `version: CODEX_CLI_VERSION` on every Codex-backend request; the UA rides alongside it. |
+| `TestTheIdentityMeetsOpenAisClientGates` (`tests/test_upstream_identity_consistency.py`) | **new** | The tripwire: asserts the parsed constant stays ≥ the lowest known client gate (`(0, 153, 0)`, Astra's), with the bump instructions carried in the assertion message. |
+
+### 15.2 Decisions, and why
+
+- **One literal, two derived fields, never a second copy.** The `version`
+  header and the `User-Agent` both read the module constant, so a bump
+  moves every consumer together. The KBR-8 two-source defect — two
+  independently-editable version literals that can silently disagree — is
+  pinned shut: a single-source test asserts the version literal appears
+  exactly once in `src/`, and header ⇄ constant ⇄ UA agreement tests
+  assert both fields derive from the module (§15.3).
+- **The guard is a floor, not an early-warning system.** It fails when the
+  constant drops below the lowest *known* gate (a regression or a careless
+  edit). It cannot detect a *new* gate raise: both sides of the comparison
+  are literals in this repository, and live upstream probing is banned for
+  `tests/`. A future gate raise is discovered the way this one was — a
+  user-facing failure traced back to the identity — and the deliberate
+  response is: bump `CODEX_CLI_VERSION`, raise the floor in the test, cite
+  the new gate's provenance in the test docstring.
+- **The constant is living by design.** OpenAI gates models by client
+  version and rotates the list independently of kitty releases; each
+  future gate needs a conscious bump. The tripwire exists to make that a
+  test failure with instructions rather than a customer's 400. The
+  version is also pinned to never be kitty's own release train
+  (`kitty.__version__ != CODEX_CLI_VERSION`), because the two numbers
+  move on independent schedules.
+- **Why 0.154.0 specifically.** ≥ 0.153.0 satisfies the Astra gate;
+  0.154.0 is the value the fix was validated against empirically (the
+  identical request rejected at `0.128.0` succeeded end-to-end at
+  `0.154.0`). The then-current stable (0.162.1) was deliberately *not*
+  adopted: only a version validated against the real backend ships, not
+  merely the newest release — the same question the next gate raise will
+  face.
+
+### 15.3 Verification
+
+- L1 module tests pin the UA format (version + running platform) and that
+  the impersonated version is not kitty's release train
+  (`tests/test_codex_identity.py`).
+- L1 consistency tests pin `version` header ⇄ constant ⇄ UA agreement
+  (`tests/providers/test_openai_subscription.py::TestCodexHeaders`).
+- L1 single-source test asserts the version literal appears exactly once
+  in `src/` (`tests/test_oauth_leg_identity.py`) — the KBR-8 regression
+  pin.
+- L1 tripwire: the floor guard (§15.1), watched red at `0.128.0` and
+  green at `0.154.0` — a development-time observation recorded in the
+  KBR-318 ticket, not a committed artifact.
+
+### 15.4 Known limits (recorded, not fixed here)
+
+- **A new gate raise is invisible to CI until a user hits it.** This is a
+  consequence of the no-live-probing rule, accepted deliberately: the
+  discovery channel is a user-facing 400 with an empty body, and the
+  response is the bump-and-raise-floor procedure from §15.2.
+- **The gate value's provenance is community documentation**, not an
+  official API reference ("Codex && Work GPT-6-ASTRA…" ChatGPT community
+  thread; confirmed empirically). It is cited in the tripwire's
+  docstring so the next maintainer can re-verify before trusting it.
+- **Gate raises are expected to recur.** Recorded so a future reader does
+  not mistake the recurrence for a defect in the design: the constant is
+  a deliberate, periodically-bumped value, not a set-and-forget one.
+
+---
+
+## 16. Anthropic subscription relay
+
+Traces to [KBR-319](https://shelpuk.atlassian.net/browse/KBR-319). This is a Claude Code
+subscription feature, not API-key Anthropic support: the subscription request must remain Claude
+Code's request while Kitty supplies local routing and the established balancing safety controls.
+
+### 16.1 The contract
+
+`anthropic_subscription` is a distinct, tokenless profile type. During profile setup, editing, and
+`kitty doctor` diagnostics (both the checklist and single-profile paths), Kitty calls
+`claude auth status --json` and accepts only a JSON object whose `loggedIn` is `true`,
+whose `authMethod` is `"claude.ai"`, and whose `subscriptionType` is a non-empty string. `email`
+is optional. These four names are the complete allowlist: unknown values, command stdout/stderr, and
+the decoded object are never logged, stored, or displayed. The profile retains a generated UUIDv4
+`auth_ref` only for schema compatibility; no CredentialStore value exists for it, and subscription
+launch paths bypass credential resolution and validation. Claude Code continues to own storage and
+refresh, which keeps macOS Keychain and non-macOS credential-file differences outside Kitty's
+credential model.
+
+A direct subscription profile may run only under `kitty … claude`. Codex, Gemini, Kilo, default
+profile-first non-Claude routing, and generic bridge mode reject it before credential lookup,
+egress, bridge creation, or child spawn. A subscription Claude launch sets no `ANTHROPIC_API_KEY`
+and no `ANTHROPIC_AUTH_TOKEN` (and clears both from the child environment; the session settings file
+additionally pins both empty, because Claude Code merges `--settings` per variable against user
+scope and an omitted key would let a user-scope value — direct Claude Code API use — stand);
+API-key profile launches keep setting them. The same rule governs a Claude-launched balancing
+pool: if the pool contains an `anthropic_subscription` member, `launch_async` builds the spawn
+configuration from the first such member's profile — paired with that member's own (empty)
+credential — instead of the launch (first-member) profile, so the child presents Claude Code's
+own OAuth identity and the relay forwards real session credentials. Pre-fix, the child carried
+the first member's real stored API key plus the synthetic placeholder token, and the relay
+forwarded both to Anthropic. When the first member is a non-Anthropic provider, the key is one
+Anthropic never issued: Anthropic answered 401 and parked the member for 900 s — the failure this
+change was raised from. When the first member is itself an `anthropic` API-key profile, the
+forwarded key is one Anthropic did issue, so no 401 follows from it: the request may be accepted
+and the subscription member's share billed to that key — a silent variant of the same defect
+(which credential Anthropic honours when the child presents both a key and the placeholder token
+is not established here). The switch is gated on the Claude
+adapter (the same condition that arms the relay), so no other launcher can pick up a subscription
+profile even if a caller hands it one. The child's credentials never authenticate a
+non-subscription member — the translated path builds upstream headers from each member's own
+resolved key — so this is purely an identity switch. One accepted side effect, deliberate rather
+than cosmetic: `ANTHROPIC_MODEL` and the default-model aliases now hint the subscription member's
+model. On the translated path the hint is inert — the bridge rewrites the request model to the
+selected backend's — but the raw relay posts the child's bytes unchanged and never normalizes the
+model, so on that path the hint is what determines the model Anthropic receives; that is exactly
+why it had to move. A pool that lists several `anthropic_subscription` members hints the first
+one's model: those members share the one session identity, and on the raw path the model travels
+inside the forwarded bytes, so a later member's differing model cannot be honoured — pool
+subscription members should agree on a model. The trade's known failure mode: a mixed pool now
+rests on a live Claude Code
+session. With an expired or absent session the child either fails with Claude Code's own login
+error — in which case no request reaches the bridge at all — or its token-less request 401s at
+Anthropic and parks the subscription member as `auth` —
+the terminal 503 then speaks the credential-rejection headline, whose remediation is
+`claude auth login`, not a key change (pre-fix, the pool's API-key members still served most
+requests). The park does not end when the user signs in again: an `auth` park runs a fixed 900 s
+cooldown that only expiry clears, so after `claude auth login` the member rejoins the pool only
+when that cooldown lapses, and the API-key members keep serving until then. Recording a
+subscription-aware headline for that terminal is a deliberate non-goal
+here. For a non-Claude balancing launch, Kitty excludes
+subscription members before it constructs backend state; remaining members keep their configured
+order and backup flags. No remaining member is a configuration error, not a fallback to an
+unapproved provider. A Claude-launched mixed pool may retry or fail over a raw subscription request
+only to another subscription member, so that request never crosses into an API-key translation path.
+A BridgeServer guard preserves this boundary for embedded callers.
+
+The mirror direction — a translated request's failover walk reaching the subscription
+member — is closed separately (2026-10-29 live diagnosis: the walk selected the member,
+dispatched it through the API-key transport with its by-construction empty stored key,
+collected a guaranteed 401, and parked it as `auth` for 900 s; the member had never served a
+request). Translated failover selections skip subscription backends by default:
+`_get_next_backend`/`_select_backend` exclude them unless the caller asks for them —
+`require_subscription=True` (the relay's own selections) or `allow_subscription=True`
+(the arrival pick in `_select_backend_or_hold`, shared by the four protocol handlers, so the
+round-robin can still land on the member and the relay engages). In exchange the Messages
+routes gain one explicit crossing: when the translated walk is exhausted and the error would
+surface before any byte has reached the client, the bridge selects the healthy subscription
+member and serves the ORIGINAL inbound bytes through the raw relay
+(`_relay_last_resort`). The crossing is pre-emission-only (the post-emission rule stands),
+exists only on the Messages terminals (streaming plain transport, streaming custom transport,
+non-streaming from both of its error arms) and on the Messages empty-response terminals — the
+five points where every translated member answered content-less and nothing has reached the
+client (streaming plain and custom exhaustion, native streaming ladder exhaustion, and both
+non-streaming gates; a count guard pins one crossing call per terminal, review 2026-10-29) —
+reuses the relay's loop with its confinement, health
+classifier, and terminal envelopes intact, and is structurally unreachable from Chat Completions,
+Responses, and Gemini ingress, whose failovers never see the member. The custom-transport
+streaming arm's 429 mark carries `self._retry_after_from_exc(exc)`, matching the other three
+routes' custom arms and §6.1's shared state-machine contract; before review round 2 it silently
+used the default 300 s despite a parsed hint. When the crossed relay
+attempt itself fails, the client receives the relay's own envelope — the translated walk's last
+error is discarded. Every crossing site renders that envelope through one shared helper
+(`_relay_failure_envelope`: upstream status → provider envelope, stall → the 504
+`api_error` envelope with the /clear hint, transport blip → the connection-failed envelope,
+anything else → a bug that propagates), so a stalled crossing answers 504 from every arm —
+including the non-streaming arm and the streaming plain arm, whose stall previously leaked into
+the dispatch-loop's catch-all and surfaced as a mangled 502 (review 2026-10-29). The relay is
+offered only for member-shaped failures: a 400/404/413/422 from the last translated attempt bars
+the crossing (`_crossing_barred`) — F4 already establishes the body itself is bad, so
+relaying it would park a healthy subscription member on Anthropic's identical 400 and dress a
+non-retryable client error up as a retryable 503 (review round 4). Auth, rate-limit, and
+upstream-breakage statuses stay eligible: those are member-shaped, and the member's own OAuth
+identity is exactly what can serve them. The crossing serves the original bytes, so any compaction the translated walk
+performed is discarded: a request that only fit after compaction may be rejected by Anthropic on
+size — an accepted trade-off, deliberate rather than accidental (relaying rewritten bytes would
+end the byte-exact contract §16 exists to keep). Three companion disciplines keep the exclusion
+honest: every walk-internal "is anyone healthy?" guard carries the same subscription visibility
+as the selection it precedes (a guard that passes on a member the selection will refuse converts
+the excluded member into an uncaught `AllBackendsUnhealthyError` — a generic 500); the
+all-unhealthy gamble is bound by the same visibility, so a fully-cooled mixed pool raises the
+normal all-unhealthy response instead of gambling into a member the translated transport cannot
+authenticate; and on the non-Messages routes the walk-exhaustion 503 consequently answers sooner
+and omits the healthy-but-excluded member from its per-backend causes — intended. The arrival
+pick keeps `allow_subscription=True` on every route on purpose: selecting the member and hitting
+the route's own `_subscription_route_rejection` is today's behavior for non-Messages ingress
+(a 400 with no upstream traffic and no health transition), and narrowing it per route is a
+separate decision this change does not make.
+
+For an eligible subscription backend on `/v1/messages`, the bridge reads the inbound JSON bytes
+once, validates only enough to return the normal invalid-JSON response, then posts those same bytes
+using `data=`. It does not call model normalization, a translator, compaction, truncation, provider
+normalization, synthetic upstream authentication, or token refresh. End-to-end incoming headers —
+including Claude Code's OAuth `Authorization`, `anthropic-beta`, `anthropic-version`, and any
+incoming `x-api-key`, retained when Claude Code sent it — pass through untouched; only synthetic
+injection is forbidden, and Kitty never injects `x-api-key`. Authority/Host,
+hop-by-hop headers, and HTTP length/framing are the sole exceptions: they cannot survive the
+localhost-to-Anthropic hop and aiohttp regenerates them. The raw relay is not available through Chat
+Completions, Responses, or Gemini ingress.
+
+Raw relay failures retain status, a bounded response body, and parsed `Retry-After` before entering
+the existing backend-health state. Rate limits use that hint when present; OAuth failures park as
+`auth`; plan denials park as `entitlement`; transport and other upstream failures use their existing
+kinds. Non-streaming and pre-emission SSE failures share this classifier. A stalled upstream is the
+one classified non-parking failure: before the first byte reaches the client, the relay answers the
+translated Messages streaming path's 504 `api_error` envelope, parking no backend and failing over
+to none — one timeout semantics for both stream modes. This deliberately diverges from the
+translated path's non-streaming arms (a 500 envelope single-backend; park-and-failover when
+balancing): the equivalence to mirror is the streaming arm's, and a stall after emission closes the
+stream per the established post-emission rule rather than answering 504. Transport blips are not a
+divergence: the relay rides out the same per-request `TransportGrace` window every translated route
+honours — same-member retries while it lasts, park-and-fail-over once it is spent, and in
+single-backend mode the same grace before the handler's 500 envelope. The existing selection,
+failover, all-unhealthy response, healthz/stats, and recovery-hold paths remain the one system for
+every balancing member.
+
+### 16.2 Decisions, and why
+
+- **Ask `claude auth status --json`, not Claude Code's private credential storage.** The command
+  reports the supported cross-platform status without Kitty reading, storing, or accidentally
+  logging OAuth material. The strict four-field reader allowlist prevents a future Claude Code
+  status addition from becoming a new secret-display/storage channel. Parsing
+  `~/.claude/.credentials.json` would fail on a Keychain-backed macOS session and couple Kitty to
+  an implementation detail Claude Code may change.
+- **Retain a UUID with no credential record.** The existing schema and profile-store contract use a
+  UUIDv4 `auth_ref`; making it optional would widen every profile consumer. A provider-specific
+  launch bypass keeps compatibility while establishing the invariant that this UUID cannot be used
+  as an API key, upstream header, or child environment value.
+- **A separate provider type, not an `anthropic` option.** API-key Anthropic constructs its own
+  headers and can translate requests; subscription traffic must preserve Claude Code's identity and
+  bytes. Combining them would make a security-relevant distinction implicit.
+- **Byte-preserve the body and every end-to-end header.** Decoding/re-serializing JSON changes wire
+  bytes even when values are equal. Rebuilding headers risks dropping OAuth opt-ins. `x-api-key` is
+  retained if Claude Code sent it; only synthetic injection is forbidden. Routing and framing fields
+  are excluded only because they become invalid at the new TCP destination.
+- **Filter a balancing pool before all startup work.** Reading excluded credentials or using an
+  excluded first member for the spawn configuration would violate the Claude-only policy even if
+  random selection later skipped it.
+- **Spawn a mixed pool from its subscription member's profile.** One child process presents one
+  credential set, and the raw relay forwards exactly what the child sent: a synthetic
+  `ANTHROPIC_AUTH_TOKEN` and a member API key would reach Anthropic, where a key Anthropic never
+  issued is rejected with 401 — parking the member for 900 s, commonly with no other subscription
+  member in the pool to fail over to — a 503 for the client while eight healthy members sat
+  unused (an `anthropic` API-key first member instead yields a key Anthropic accepts, so the
+  defect there is silent over-billing rather than a 503; §16.1 records both). The alternative
+  (injecting the stored credential) is unavailable by construction: Kitty never stores or
+  refreshes OAuth material, so Claude Code's own session is the only identity the subscription
+  member can present. Building the spawn config from the subscription member therefore keeps one
+  rule — "a subscription launch presents Claude Code's identity" — instead of a second,
+  pool-specific auth path in the relay.
+- **Keep raw subscription attempts inside their own balancing subset.** The raw OAuth request has no
+  permitted translation/authentication fallback. Allowing it to fail over to an ordinary member
+  would silently abandon the byte-exact subscription contract, so a mixed Claude pool can only
+  choose another subscription member for that request.
+- **Exclude the subscription member from translated failover; cross into the relay only as a
+  pre-emission last resort.** The translated transport authenticates a member with its stored
+  key, and a subscription member's stored key is empty by construction, so an unfiltered
+  failover walk produces a dispatch that cannot succeed — the guaranteed 401 and 900 s `auth`
+  park observed live on 2026-10-29. The crossing sits at walk exhaustion rather than at every
+  selection because it is a transport handoff with its own failure domain: concentrating it at
+  one pre-emission point per Messages arm keeps the translated walk's semantics untouched,
+  keeps non-Messages ingress structurally unable to reach the member, and spends the Claude
+  subscription only where the pool has nothing else left — the member's fair round-robin share
+  still flows through the relay on the initial picks. Crossing at every selection instead would
+  either re-open the per-route selection sites this change closes or burn subscription quota on
+  every cheap-provider blip, inverting the pool's economics.
+- **Reuse the health state, not a subscription-specific circuit breaker.** Two circuits would diverge
+  in cooldown, failover, observability, and recovery semantics for otherwise equivalent members.
+
+### 16.3 Verification
+
+- L1 tests cover status parsing (including unknown/secret-shaped extra fields and other spawn
+  failures), provider/launcher eligibility, profile menus, and failure kinds.
+- L1 tests pin the doctor session checks in both execution paths (the credential store is never
+  consulted for a subscription profile) and the edit flow's verify-only session re-check.
+- L2 tests prove provider/schema/menu registration and that Kitty profile/credential output never
+  stores OAuth token material or a subscription credential record.
+- L3 aiohttp tests compare captured raw body bytes and headers for normal and SSE Messages relays,
+  then exercise subscription-only cooldown/failover, 429 retry hints, entitlement, recovery
+  through BridgeServer, and the pre-emission timeout's 504/no-park/no-failover semantics.
+- The step records are `.system_design/steps/kbr319_subscription_profile.md`,
+  `kbr319_launcher_eligibility.md`, `kbr319_exact_messages_relay.md`,
+  `kbr319_subscription_health.md`, and `balancing_subscription_spawn_identity.md`; each receives
+  implementation notes when its stage lands.
+
+
+## 17. Model context-window resolution
+
+### 17.1 Components
+
+- `src/kitty/providers/model_context.py` — the two resolution entry points,
+  `get_model_context_tokens` (single backend) and
+  `get_balancing_min_context_tokens` (pool budget = the smallest member
+  window). Both catalogs and the default live here.
+- `src/kitty/providers/model_context_overrides.json` — the git-tracked pin
+  catalog: model id → verified context window in tokens — cloud-native ids
+  for most models, plus the OpenRouter-dialect `minimax-m3.1-flash:free`
+  (§17.3 D3).
+- `src/kitty/providers/model_metadata.json` — the OpenRouter-generated
+  table, refreshed wholesale by `scripts/script_update_model_metadata_table.py`
+  (needs `OPENROUTER_API_KEY`; the script never writes the pin catalog).
+- `src/kitty/providers/model_context_sync.py` — fetches the pin catalog from
+  the repo's raw GitHub URL at most once per 24 h and caches it at
+  `REMOTE_OVERRIDES_CACHE_PATH`; a valid, collision-free cache replaces the
+  packaged catalog wholesale, so a merged pin reaches existing installs
+  without a release.
+
+### 17.2 The precedence chain and the matcher
+
+`get_model_context_tokens` resolves in order: pin catalog →
+`provider_config["context_window"]` → metadata table →
+`DEFAULT_CONTEXT_TOKENS` (200,000). Both catalogs share one matcher
+(`_match_catalog` / `_resolve_catalog`): exact lowercase id, a
+`/`-delimited suffix in either direction (`gpt-4o` finds `openai/gpt-4o`;
+`z-ai/glm-5.2` finds `glm-5.2`), then one first-segment strip retry. An
+ambiguous match is terminal, never retried; a **synced** catalog whose keys
+share a final segment is rejected wholesale rather than loaded — the packaged
+catalog is loaded as shipped, and CI holds its tail uniqueness instead.
+
+The budget feeds `BridgeServer._get_max_context_chars` (per-request
+request-size budget, chars = tokens × 4, capped at `_MAX_REQUEST_CHARS`,
+driving compaction and oversized-request handling) and the launcher's
+`build_spawn_config` (the window the agent is told about).
+
+### 17.3 Decisions, and why
+
+| ID  | Decision                                                                                                                                                                             | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | A pin catalog outranks both the metadata table and a hand-written `provider_config["context_window"]`, with the shadowed setting announced at INFO (`_log_shadowed_context_window`)   | OpenRouter's metadata drifts on refresh, and operator-written windows go stale silently — KBR-151 sized a conversation from a window the model does not have. The pin is the reviewed, source-verified value; INFO (not WARNING) because the precedence is deliberate visibility, not an alarm (KBR-170).                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| D2  | Pin values follow the per-model verified upstream value, not a power-of-two convention                                                                                               | `MiniMax-M3` is pinned 1,048,576 because OpenRouter reports 1,048,576 for it; `MiniMax-M3.1-Flash` and its `:free` variant are pinned 1,000,000 because MiniMax's API overview and OpenRouter both report 1,000,000 for that model (verified 2026-10-21). Rounding either way would embed a wrong number.                                                                                                                                                                                                                                                                                                                                                                                                               |
+| D3  | The OpenRouter `:free` spelling gets its own pin key (`minimax-m3.1-flash:free`) instead of relying on the metadata table                                                            | OpenRouter serves M3.1 Flash only as `minimax/minimax-m3.1-flash:free`; the matcher's suffix rule is `/`-delimited and never crosses the `:free` suffix, and the packaged metadata snapshot predates the model, so without the key the OpenRouter path resolves the 200k default and compacts ~5× too early. A metadata refresh would sweep in dozens of unrelated entries behind an API key for one row of value; the owner chose the two-key pin (2026-10-21). Cost, accepted: until the snapshot is refreshed the `:free` pin is the only source for that spelling, so removing it must be accompanied by a refresh — the pinning test makes the pin's presence explicit either way.                                            |
+| D4  | Pins use the bare cloud-native id, not the OpenRouter `vendor/id` form                                                                                                               | The bare key resolves exact matches (Anthropic-dialect paths: custom endpoints, coding plans) and vendor-prefixed queries alike through the suffix rule, so one row serves every path that names the model natively; a prefixed key would serve only the one dialect. The `:free` suffix is part of OpenRouter's id, not a vendor prefix, so it cannot be stripped by the first-segment retry — it stays in the key.                                                                                                                                                                                                                                                                                                        |
+
+### 17.4 Verification
+
+- `tests/test_model_context.py` — synthetic-data precedence, matcher,
+  collision-rejection and remote-cache tests (L1).
+- `tests/test_model_context_packaged_catalog.py` — the real packaged
+  catalogs: `EXPECTED_CATALOG` equality with the shipped file, the
+  provider-variant matrix, vendor-prefixed and `:free` suffix spellings, and
+  tail uniqueness over both catalogs (L2). Every `EXPECTED_CATALOG` entry
+  carries its verified sources in the module docstring with a date.
+- `tests/test_model_context_sync.py` — remote-cache replacement, TTL, and
+  failure fall-through to the packaged catalog.
+
+### 17.5 Known limits (recorded, not fixed here)
+
+- A model absent from both catalogs resolves 200,000; the resolver logs the
+  fall-back once per model (`_log_default_fallback`) rather than per request.
+- The metadata snapshot is refreshed weekly by `model-metadata.yml` (which
+  opens a pull request); between refreshes new OpenRouter-only models
+  (including new `:free` variants) resolve the default unless pinned.
+- The runtime sync fetches over the network; a machine that never reaches
+  GitHub runs on the packaged catalog indefinitely.

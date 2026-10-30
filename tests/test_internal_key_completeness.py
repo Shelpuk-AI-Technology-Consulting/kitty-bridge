@@ -82,6 +82,20 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # shared helper both Messages -> CC converters call, so it is minted
         # here and not in `bridge/server.py`.
         "_metadata",
+        # KBR-296 (M9 site) + KBR-308 (hop 1 — same translator, not the M9
+        # rebuilder): the three `cache_control` carriage keys. The translator
+        # writes them on the per-request dict (``_cache_control``,
+        # ``_tool_cache_controls``) and on the per-message dict the tool
+        # message and the assistant message get (``_cache_control``,
+        # ``_tool_call_cache_controls``) — identical vocabulary to what
+        # ``bridge/server.py`` mints on the M9 fallback, so the M9 path and
+        # hop 1 cannot drift. The per-message entries ride
+        # ``_INTERNAL_MESSAGE_KEYS``; the top-level entries here cover the
+        # belt-and-braces case the AST scan reports. Dual registration per
+        # ``_thinking_blocks`` precedent (see ``_INTERNAL_KEYS:128``).
+        "_cache_control",
+        "_tool_cache_controls",
+        "_tool_call_cache_controls",
     },
     "bridge/responses/translator.py": {"_reasoning_effort", "_thinking_enabled"},
     "bridge/server.py": {
@@ -92,6 +106,13 @@ _EXPECTED_KEYS: dict[str, set[str]] = {
         # KBR-222: `_convert_native_to_cc_format` collects the agent's
         # `document` blocks on the retry, the same key the translator mints.
         "_documents",
+        # KBR-296: the M9 fallback's cache_control carriages — the top-level
+        # automatic-caching form, per-tool breakpoints (name-keyed), and the
+        # message-level carriages for the assistant joined text / tool_result
+        # block and the per-tool_use breakpoints.
+        "_cache_control",
+        "_tool_cache_controls",
+        "_tool_call_cache_controls",
         "_native_messages_request",
         "_original_body",
         "_provider_config",

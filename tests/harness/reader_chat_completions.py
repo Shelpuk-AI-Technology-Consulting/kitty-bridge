@@ -837,6 +837,14 @@ def _read_one_message(
 ) -> c.Turn:
     """Read one ``user``, ``assistant`` or ``tool`` message into a turn.
 
+    ``assistant`` messages also recognise ``reasoning_content`` as a
+    ``Thinking`` part (empty string included — the absence-is-observable
+    rule the reply direction applies; P8's ``_inject_empty_reasoning_content``
+    writes ``""`` on every assistant message once thinking is active);
+    explicit ``null`` is consumed as absent (the ``parallel_tool_calls``
+    precedent at lines 638-654); a non-string value keeps the fail-closed
+    posture the unmodelled ``audio``/``function_call`` keys take.
+
     Args:
         message: The message object.
         index: The message's position, for residual keys.
@@ -888,6 +896,35 @@ def _read_one_message(
         content_parts = _read_content(message.get("content"), path, residual, _ASSISTANT_PART_TYPES)
         parts.extend(content_parts)
 
+        # ``reasoning_content`` — the CC extension P8's site writes on this
+        # message: ``ProviderAdapter._inject_empty_reasoning_content`` puts
+        # ``""`` on every assistant message once thinking is active, because
+        # Kimi/Z.AI/custom-OpenAI reject the request without it. Modelled
+        # here as a ``Thinking`` part (empty string included — the
+        # absence-is-observable rule the reply direction applies to the
+        # same field), appended after the call/text content so a
+        # positionally-diffed run sees exactly one delta where the inbound
+        # turn lacks it. A non-string value keeps the fail-closed posture
+        # the unmodelled ``audio``/``function_call`` keys take. Assistant-
+        # only: P8 injects here and the published request shapes place the
+        # field on assistant messages; a ``user``/``tool``-turn carrier
+        # residualises on evidence, not in anticipation.
+        reasoning_content = message.get("reasoning_content")
+        mapped = {"role", "content", "tool_calls", "name", "refusal"}
+        # Three-way shape match: a string (incl. ``""`` — P8's exact
+        # injection shape) projects a ``Thinking`` part and is consumed;
+        # an explicit ``None`` is consumed as absent (the
+        # ``parallel_tool_calls`` precedent, lines 638-654: the key is
+        # present in the body but the value is null, and the reader
+        # names the intent to omit rather than inventing a part); a
+        # non-string, non-None value is not consumed, so the residual
+        # names the malformed shape (``audio``/``function_call``
+        # posture) and ``verify_total`` fails the run.
+        if reasoning_content is None or isinstance(reasoning_content, str):
+            mapped.add("reasoning_content")
+        if isinstance(reasoning_content, str):
+            parts.append(c.Thinking(text=reasoning_content))
+
         _residualise(
             message,
             # `audio` and `function_call` are NOT in the mapped set: they
@@ -899,7 +936,7 @@ def _read_one_message(
             # `Audio` part or a `function_call` mapping has the residual
             # entry to consult. A silent drop would be exactly the totality
             # violation the residual rule exists to prevent.
-            {"role", "content", "tool_calls", "name", "refusal"},
+            mapped,
             path,
             residual,
         )
@@ -1367,9 +1404,19 @@ def _read_tool_choice(value: Any, residual: dict[str, Any]) -> str:
                 f"tool_choice type {kind!r} requires a {member_key} object"
             )
         name = member.get("name")
-        if not isinstance(name, str):
+        # Empty `name` slips through the isinstance check and produces the
+        # never-legal selection string `"tool:"`. KBR-303 extends the
+        # existing non-string raise to catch the empty shape; absent /
+        # non-string are unchanged. Same losslessness argument
+        # (`contract.decode_arguments`) as KBR-281 + KBR-292 + KBR-295 +
+        # KBR-299 closed on the invocation / declaration surfaces. The
+        # message spelling matches the family: the path prefix embeds
+        # `tool_choice.{member_key}.name` and the suffix matches
+        # `must be a non-empty string name`, so the family greps together
+        # via `git grep "must be a non-empty string" tests/harness/`.
+        if not isinstance(name, str) or not name:
             raise c.UnreadableBodyError(
-                f"tool_choice type {kind!r} requires a {member_key}.name string"
+                f"tool_choice.{member_key}.name must be a non-empty string name"
             )
         for key, item in value.items():
             if key != "type" and key != member_key:

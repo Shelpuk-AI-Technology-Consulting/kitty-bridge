@@ -1,0 +1,37 @@
+{
+  "id": "p34_parallel_false_omitted_trigger",
+  "description": "P34 trigger - Anthropic Messages body whose tool_choice carries disable_parallel_tool_use: false; carry forwards parallel_tool_calls: false; the omit-false branch (D2) is the row's mutation.",
+  "origin": "synthetic",
+  "origin_note": "Synthetic (not captured). KBR-214 D2 / KBR-184 G34 named the omit-false branch as a row but no Claude Code body on the pinned CC 2.1.238 client ships disable_parallel_tool_use: false (the agent carries true or omits). The trigger is constructable because the Anthropic reader distinguishes an explicit false from absent; the body exercises the row's anchor without a live capture.",
+  "captured_from": "",
+  "captured_at": "",
+  "method": "POST",
+  "scheme": "https",
+  "host": "api.anthropic.com",
+  "path": "/v1/messages",
+  "query": "",
+  "headers": [
+    [
+      "host",
+      "api.anthropic.com"
+    ],
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "x-api-key",
+      "<redacted:credential_header>"
+    ]
+  ],
+  "body_file": "p34_parallel_false_omitted_trigger.body",
+  "body_sha256": "23b5dea250d3a26c4840e08699f42d90044e7f07d13184b9ed98ab94aee35547",
+  "wire_format": "anthropic_messages",
+  "known_non_secrets": [],
+  "triggers_met": [
+    "anthropic_parallel_false_omitted"
+  ],
+  "triggers_absent": [
+    "tool_choice_omitted_as_legal_but_unsupported"
+  ]
+}

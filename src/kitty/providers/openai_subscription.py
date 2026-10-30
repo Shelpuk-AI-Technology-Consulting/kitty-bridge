@@ -48,7 +48,7 @@ from kitty.auth.oauth_session import OAuthRefreshFailed, OAuthSession
 from kitty.auth.token_transport import CurlTokenTransport
 from kitty.cloudflare import get_cloudflare_signature, is_cloudflare_block
 from kitty.egress import get_egress
-from kitty.providers.base import ProviderError, WireShape
+from kitty.providers.base import ProviderError, WireShape, parse_retry_after_seconds
 
 # Avoid circular import — only need the parent class methods
 from kitty.providers.openai import OpenAIAdapter
@@ -1386,13 +1386,15 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
     @staticmethod
     def _parse_retry_after(value: object) -> int | None:
-        if value is None:
-            return None
-        try:
-            seconds = int(float(str(value).strip()))
-        except (TypeError, ValueError):
-            return None
-        return max(1, seconds)
+        """Parse a ``Retry-After`` hint, delegating to the shared rule.
+
+        Args:
+            value: The raw header value.
+
+        Returns:
+            Whole seconds, or ``None`` when the value carries no usable hint.
+        """
+        return parse_retry_after_seconds(value)
 
     def _attach_retry_after(self, err: Exception, resp: _CurlResponse) -> None:
         if not isinstance(err, ProviderError) or err.http_status != 429:
@@ -1404,6 +1406,34 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             logger.info("OpenAI subscription rate limited; retry_after=%ds", retry_after)
 
     def map_error(self, status_code: int, body: dict) -> ProviderError:
+        """Translate an upstream status into a provider error.
+
+        The exception text folds the upstream ``message`` field only, so an
+        empty one renders bare (the 2026-10-29 incident); the bounded body
+        rides along as ``upstream_body`` for the bridge's DEBUG diagnostic.
+
+        Args:
+            status_code: The upstream HTTP status.
+            body: The parsed upstream body.
+
+        Returns:
+            The provider error carrying status text and bounded body.
+        """
+        err = self._map_error_by_status(status_code, body)
+        err.upstream_body = self._bounded_upstream_body(body)
+        return err
+
+    def _map_error_by_status(self, status_code: int, body: dict) -> ProviderError:
+        # pragma: no mutate block
+        """Build the status-specific provider error.
+
+        Args:
+            status_code: The upstream HTTP status.
+            body: The parsed upstream body.
+
+        Returns:
+            The provider error with its branch-specific wording.
+        """
         error_obj = body.get("error", body)
         msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
         if status_code == 401:

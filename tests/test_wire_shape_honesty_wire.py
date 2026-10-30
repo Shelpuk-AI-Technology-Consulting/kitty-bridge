@@ -575,7 +575,7 @@ def _native_probe() -> dict:
 # ``_WIRE_CAPTURED_ADAPTERS`` for the R3 sweep.  A fourth adapter that
 # overrides ``use_native_messages`` must be added here and to the
 # parametrize below, or the tripwire under it goes red.
-_NATIVE_SWEEP_ADAPTERS = frozenset({"custom_anthropic", "minimax_token", "zai_coding"})
+_NATIVE_SWEEP_ADAPTERS = frozenset({"anthropic_subscription", "custom_anthropic", "minimax_token", "zai_coding"})
 
 
 def test_every_native_messages_adapter_is_in_the_r3_sweep():
@@ -595,13 +595,13 @@ def test_every_native_messages_adapter_is_in_the_r3_sweep():
     assert overriding == _NATIVE_SWEEP_ADAPTERS
 
 
-@pytest.mark.parametrize("provider_type", ["custom_anthropic", "minimax_token", "zai_coding"])
+@pytest.mark.parametrize("provider_type", ["anthropic_subscription", "custom_anthropic", "minimax_token", "zai_coding"])
 def test_native_passthrough_preserves_a_messages_body(provider_type):
     """The native branch preserves a Messages inbound, modulo internal keys.
 
-    Three independent native-branch code paths are exercised
-    (``custom_anthropic.py:91-97``, ``minimax_token.py:129-135``,
-    ``zai_anthropic.py:85-91``) — each must hold.  The bridge's
+    Four independent native-branch code paths are exercised
+    (``anthropic_subscription``'s relay-identity arm, ``custom_anthropic.py:91-97``,
+    ``minimax_token.py:129-135``, ``zai_anthropic.py:85-91``) — each must hold.  The bridge's
     ``_serves_messages_wire`` relies on this preservation: the inbound
     is forwarded upstream verbatim.
     """

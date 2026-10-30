@@ -150,7 +150,7 @@ $ kitty claude
 $ pip install kitty-bridge
 $ kitty setup
   ? Provider: openai_subscription
-  ? Model: gpt-5.4
+  ? Model: gpt-6-sol
 
   Opening browser for OpenAI authentication...
 
@@ -162,6 +162,115 @@ $ kitty claude
 
 No API key required — kitty authenticates with your ChatGPT Plus or Pro account through a browser-based OAuth flow. Each
 profile gets its own independent session.
+
+The Model value is sent to OpenAI's subscription backend (Kitty strips a `vendor/` prefix if you typed one — unlike the
+Claude subscription relay below, which is byte-for-byte), and OpenAI rotates that list independently of Kitty releases
+— `gpt-5.3-codex` (the wizard's suggested default), `gpt-5.4` and `gpt-5.5` have all retired from it. Current ids at
+the time of writing: `gpt-6-sol`, `gpt-6-luna` and the newer `gpt-6.1-sol` from the GPT-6 generation, plus the
+still-served GPT-5.6 generation `gpt-5.6-terra` (mid-tier — OpenAI's ["balance of capability, speed, and cost for
+everyday work"](https://help.openai.com/en/articles/20001354-gpt-6-and-other-models-in-chatgpt)) and `gpt-5.6-luna`
+(lightest), each tier with a `-pro` variant on Pro subscriptions, and the
+[Astra models](#using-gpt-6-astra-with-your-subscription) documented below. When a name is rejected, the model picker
+in the ChatGPT UI — or `codex` itself — shows the exact live list.
+
+### Example: Use your Claude subscription with Claude Code
+
+```bash
+$ pip install kitty-bridge
+$ kitty setup
+  ? Provider: Anthropic Claude.ai Subscription (Claude Code only)
+  ? Model: claude-opus-5-5
+
+$ kitty claude
+  ✓ Bridge running on port <random_port>
+  ✓ Claude Code launched
+  > Hello! How can I help you today?
+```
+
+Sign in to Claude Code first (`claude auth login`) — Kitty checks that local session during setup and never copies or
+stores your OAuth token. This profile works **only with Claude Code**: Kitty relays Claude Code's request to Anthropic
+exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
+rejected subscription account cools down like any other backend and recovers automatically.
+
+The subscription profile hands your Model value to Anthropic exactly as typed — the relay is byte-for-byte, and Kitty
+neither rewrites the model nor translates anything else in the request — so the dot names from Kitty's bundled model
+catalog (`src/kitty/providers/model_metadata.json`, refreshed from OpenRouter — e.g. `anthropic/claude-opus-5.5`) and a
+`vendor/` prefix are not valid here: both reach Anthropic as typed and are rejected with a model-not-found error. What
+the value must do is name a model Anthropic serves, in the dash-separated id form Anthropic documents. Current ids at
+the time of writing: `claude-opus-5-5` (Opus 5.5), `claude-sonnet-5-5` (Sonnet 5.5), `claude-haiku-5-5` (Haiku 5.5)
+and `claude-fable-5-1` (Fable 5.1 — included on paid plans, but drawing from a separate allowance of 50% of your
+weekly usage limits rather than the general pool); the wizard's suggested default, `claude-sonnet-4-6`, is the
+previous generation and still served. The dash-separated id is what to type — it is the form Anthropic documents, and
+it removes one variable when a request fails. Anthropic's model documentation
+(https://platform.claude.com/docs/en/models/overview) and the model list inside a Claude Code session show the live
+set; the paid-plan inclusion (and the Fable 50% carve-out) is documented in
+[Anthropic's Fable article](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
+
+### ChatGPT subscription on a remote or headless machine
+
+The browser login above assumes the browser and the terminal are on the **same machine**. If you run Kitty on a remote
+server (SSH into a CLI-only Ubuntu VM, a container, a dev box) while your browser is on your laptop, the login would
+redirect your laptop's browser to `localhost:1455` — a port that only exists on the server — and the flow would time out.
+
+Kitty handles this automatically. On an SSH session (or on a machine with no display) it switches to a
+**device-code login**, the same flow the OpenAI Codex CLI uses on headless machines:
+
+```bash
+$ kitty auth openai
+
+Sign in to ChatGPT for Kitty:
+
+1. Open this link in a browser on any machine and sign in to your account
+   https://auth.openai.com/codex/device
+
+2. Enter this one-time code (expires in 15 minutes)
+   ABCD-EFGH
+
+Personal ChatGPT Plus/Pro accounts are enabled by default. On Business/Team/Enterprise
+workspaces an admin must enable device-code authentication first
+(chatgpt.com/admin/permissions).
+
+Continue only if you started this login in Kitty. If a website or another
+person gave you this code, cancel.
+
+Sign in at: https://auth.openai.com/codex/device
+One-time code (expires in 15 minutes): ABCD-EFGH
+```
+
+Open the URL on your laptop, enter the code, and Kitty on the server picks the authorization up on its own — no port
+forwarding needed. The last two lines are a plain-text copy of the link and code, for terminals that mangle colours or
+for copy-pasting.
+
+**Notes:**
+
+- The command still requires an interactive terminal — Kitty needs a TTY to print the prompt and read your input. The
+  flow itself runs against `auth.openai.com` from the VM, regardless of where you open the browser.
+
+- Personal ChatGPT Plus/Pro accounts have device-code login enabled by default. On **Business/Team/Enterprise**
+  workspaces an admin must first enable it (ChatGPT admin settings → permissions → device code authentication).
+- Prefer the old browser login anyway (e.g. you already run `ssh -L 1455:localhost:1455 user@server`)? Force it with
+  `kitty auth openai --no-device-auth`. The SSH tunnel must forward **port 1455 specifically** — that exact port is
+  what OpenAI's redirect uses, so it has to be free on the server.
+- Force the device-code login on a desktop with `kitty auth openai --device-auth`.
+
+#### Using GPT-6 Astra with your subscription
+
+[GPT-6 Astra](https://openai.com/index/gpt-6-astra-next-generation-work/) is available on ChatGPT subscriptions
+through the same backend Kitty already uses. After signing in, pick the Astra model when the wizard asks:
+
+```bash
+$ kitty auth openai
+  ... (device-code or browser login as above) ...
+  ? Model name (default: gpt-5.3-codex): gpt-6-astra
+  ? Profile name (default: openai-sub): astra
+
+$ kitty claude
+```
+
+OpenAI rotates the model list on the subscription backend independently of Kitty releases. If `gpt-6-astra` is
+rejected, try the codex-suffixed `gpt-6-astra-codex`, or check which Astra model your ChatGPT plan offers (the model
+picker in the ChatGPT UI or `codex` on a machine where it is installed shows the exact id). `Astra Pro` is on Pro-tier
+subscriptions as `gpt-6-astra-pro`.
 
 ### Example: Use MiMo V2 Pro with Claude Code
 
@@ -206,6 +315,33 @@ kitty my-pool codex
 
 When you run this, each request goes to a random healthy member. If MiniMax returns an error, kitty silently retries on
 Novita or Z.AI — your agent never sees the failure.
+
+### Subscription members in a pool
+
+A pool can mix an [Anthropic subscription profile](#example-use-your-claude-subscription-with-claude-code) with
+API-key profiles. Kitty relays subscription traffic exactly as your agent formed it, so a pool containing a
+subscription member starts Claude Code **from that member**: for it, the agent presents your own logged-in Anthropic
+session — never another member's API key. Three things follow:
+
+- **Sign in first.** The pool's subscription member works only while your Claude Code session is live. If it has
+  expired, that member's request is rejected with a credential error (503, `Retry-After` countdown) until you run
+  `claude auth login` — a key change does not help, and the member stays out of the pool for the rest of its
+  cooldown (up to 15 minutes). The pool's API-key members keep serving meanwhile,
+  unless Claude Code itself stops at its login prompt — then nothing reaches the bridge until you sign in.
+- **`ANTHROPIC_MODEL` follows the subscription member.** Claude Code's startup model hint (and the default-model
+  aliases) come from the subscription member rather than the pool's first member. For API-key members this is only a
+  hint — kitty rewrites the request model to the selected member's; the subscription member receives the model
+  exactly as your agent formed it. A pool that lists several subscription members hints the first one's model, and
+  subscription traffic is relayed exactly as your agent formed it — so the others receive that same model. Give every
+  subscription member of a pool the same model.
+- **Non-Claude agents skip it.** Other launchers (or a balancing pool used by them) ignore subscription members, as
+  described above — the subscription member only participates under Claude Code.
+- **Failover respects the identity boundary.** Failover among the pool's API-key members never dispatches the
+  subscription member — it serves only through the raw relay. When an API-key failover walk is exhausted before your
+  agent has received any response, kitty makes one attempt through the subscription member's relay with the request
+  exactly as your agent formed it. That attempt spends your Claude subscription quota and keeps the model your agent
+  formed, even if the API-key members had rewritten the request for a smaller context. Once your agent has received
+  the first byte of a response, a failure is never re-attempted on another member.
 
 ### Backup members
 
@@ -448,6 +584,7 @@ is always `0` because there is nowhere to fail over to — check `mode` first.
 
 | Provider            | Type ID               | Notes                                             |
 |---------------------|-----------------------|---------------------------------------------------|
+| Anthropic Claude.ai Subscription (Claude Code only) | `anthropic_subscription` | Uses your local Claude Code sign-in, no API key |
 | Fireworks FirePass  | `fireworks`           |                                                   |
 | Kimi Code           | `kimi`                |                                                   |
 | Novita AI           | `novita`              |                                                   |
@@ -532,6 +669,9 @@ That holds for an endpoint carrying a query string too, and the query is kept an
 |----------------------------------------------|-----------------------------------------------------------|
 | `kitty setup`                                | Create your first profile (interactive wizard)            |
 | `kitty profile`                              | Manage profiles (create, edit, delete, set default, list) |
+| `kitty auth openai`                          | Re-authenticate the ChatGPT subscription                  |
+| `kitty auth openai --device-auth`            | ... forcing device-code login (headless machines)         |
+| `kitty auth openai --no-device-auth`         | ... forcing browser login (e.g. behind an SSH tunnel)     |
 | `kitty doctor`                               | Diagnose installation and configuration issues            |
 | `kitty cleanup`                              | Restore agent config files after a crash                  |
 | `kitty bridge`                               | Start a standalone API server                             |
@@ -658,7 +798,8 @@ Run `kitty doctor` to check your installation. It verifies that:
 
 - Agent binaries are installed and discoverable
 - A default profile exists
-- All profile credentials can be resolved
+- All profile credentials can be resolved (subscription profiles have none — the local Claude Code session is checked
+  instead)
 
 For deeper issues, use the logging flags:
 
@@ -901,9 +1042,34 @@ This is a manual, best-effort configuration. Some IDE-specific features may not 
 
 ### Can I use my Anthropic (Claude Pro/Team) subscription with Kitty?
 
-No. Anthropic's Terms of Service prohibit accessing their subscription APIs from third-party software. You **can** use
-Kitty with Anthropic's API directly — sign up at [console.anthropic.com](https://console.anthropic.com), create an API
-key, and use the `anthropic` provider. You will be billed per token, not through your subscription.
+Yes — with Claude Code. Set up the **Anthropic Claude.ai Subscription** provider (`kitty setup`), and launch with
+`kitty claude`. Kitty relays Claude Code's request to Anthropic exactly as formed: it translates nothing, stores no
+token, and your login stays entirely in Claude Code's hands. The profile works **only with Claude Code** — other
+launchers refuse it, and a balancing pool used by another agent skips subscription members. Kitty with Anthropic's API
+directly (per-token billing) remains available through the `anthropic` provider.
+
+### "uses an Anthropic Claude.ai subscription and requires the Claude Code launcher"
+
+You ran `kitty <agent>` (or `kitty bridge`) with a subscription profile, but only Claude Code can relay its own
+subscription request. Launch it with `kitty claude`, or use an API-key profile for other agents.
+
+### "has no members eligible for"
+
+Your balancing pool's only usable members are Anthropic Claude.ai subscription profiles, and you launched an agent
+other than Claude Code (subscription members are skipped for them, never translated). Launch with `kitty claude`, or
+add an API-key member to the pool.
+
+### "requires the Claude Code Messages relay"
+
+Something other than Claude Code sent a request to a subscription backend on a route the relay does not serve. The
+subscription relay exists only on `POST /v1/messages` and only for Claude Code's own requests — point the client at
+the bridge with `kitty claude`, or switch to an API-key profile.
+
+### "Claude Code is not signed in" / "not using a Claude.ai subscription"
+
+The Claude Code session Kitty checked during setup or `kitty doctor` is missing or is not a Claude.ai subscription
+login. Run `claude auth login`, then retry. If the status command could not run or timed out, the message says so —
+check that Claude Code is installed, on PATH, and responsive (`claude auth status`), then retry.
 
 ### What is the difference between "OpenAI" and "OpenAI ChatGPT Plan"?
 

@@ -1,5 +1,6 @@
 """Tests for launchers/claude.py — ClaudeAdapter spawn configuration."""
 
+import tempfile
 import uuid
 
 import pytest
@@ -109,6 +110,62 @@ class TestClaudeAdapterSpawnConfig:
         config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="sk-test")
 
         assert "ANTHROPIC_AUTH_TOKEN" not in config.env_clear
+
+    def test_subscription_profile_keeps_claude_code_oauth_environment(self):
+        """Subscription launch must not replace Claude Code's local OAuth session."""
+        adapter = ClaudeAdapter()
+        profile = Profile(
+            name="subscription",
+            provider="anthropic_subscription",
+            model="claude-opus",
+            auth_ref=str(uuid.uuid4()),
+        )
+
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="")
+
+        assert config.env_overrides["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
+        # Claude Code merges a --settings env block per variable, so an
+        # omitted key would leave a user-scope value standing. The session
+        # view pins both empty — and only there: the child process env must
+        # not carry the keys at all.
+        assert config.settings_env["ANTHROPIC_API_KEY"] == ""
+        assert config.settings_env["ANTHROPIC_AUTH_TOKEN"] == ""
+        assert "ANTHROPIC_API_KEY" not in config.env_overrides
+        assert "ANTHROPIC_AUTH_TOKEN" not in config.env_overrides
+        assert "ANTHROPIC_API_KEY" in config.env_clear
+        assert "ANTHROPIC_AUTH_TOKEN" in config.env_clear
+
+    def test_subscription_session_file_pins_credential_keys_empty(self, tmp_path):
+        """The session file overrides user-scope credential keys with empty.
+
+        Claude Code merges ``--settings`` per variable against user scope, so
+        a user's ``~/.claude/settings.json`` API key would survive an omitted
+        key and flip the launch to API-key identity. Pinning empty strings in
+        the session file — which outranks user scope — makes the subscription
+        launch authoritative that no key participates.
+        """
+        import json
+
+        adapter = ClaudeAdapter()
+        profile = Profile(
+            name="subscription",
+            provider="anthropic_subscription",
+            model="claude-opus",
+            auth_ref=str(uuid.uuid4()),
+        )
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="")
+
+        from pathlib import Path
+
+        # The launcher merges the settings view over the process-env view.
+        settings_view = {**config.env_overrides, **config.settings_env}
+        session_file = adapter.prepare_launch(settings_view, settings_path=tmp_path)
+        written = json.loads(Path(str(session_file)).read_text(encoding="utf-8"))
+        Path(str(session_file)).unlink()
+
+        assert written["env"]["ANTHROPIC_API_KEY"] == ""
+        assert written["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+        assert written["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4242"
 
 
 class TestClaudeAdapterContextTokens:
@@ -225,6 +282,28 @@ class TestEnableClaudeAiMcpServers:
         assert "ENABLE_CLAUDEAI_MCP_SERVERS" in _KITTY_INJECTED_KEYS
 
 
+class TestClaudeCodeTmpdir:
+    """KBR-314: the launcher picks Claude Code's temp dir so cross-session
+    messaging's socket dir does not default to ``/``.
+
+    Claude Code's cross-session IPC needs a user- or root-owned socket
+    directory; with neither ``XDG_RUNTIME_DIR`` nor ``CLAUDE_CODE_TMPDIR``
+    usable it falls back to ``/``, which fails the ownership check on
+    sandboxed boxes (``/`` owned by a non-root user), and Claude Code prints
+    a remediation hint at every launch. Setting ``CLAUDE_CODE_TMPDIR`` to the
+    OS temp directory (root-owned ``/tmp`` on Linux, per-user on macOS and
+    Windows) passes the check on every supported platform.
+    """
+
+    def test_env_overrides_carries_claude_code_tmpdir(self):
+        """The override must be the OS temp directory, unconditionally."""
+        adapter = ClaudeAdapter()
+        profile = _make_profile()
+        config = adapter.build_spawn_config(profile, bridge_port=4242, resolved_key="sk-test")
+
+        assert config.env_overrides["CLAUDE_CODE_TMPDIR"] == tempfile.gettempdir()
+
+
 class TestInjectedKeyListsInSync:
     """AC5.5: the context-window key must be injected AND cleaned up.
 
@@ -245,6 +324,18 @@ class TestInjectedKeyListsInSync:
         from kitty.cli.cleanup_cmd import _KITTY_INJECTED_KEYS
 
         assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in _KITTY_INJECTED_KEYS
+
+    def test_tmpdir_key_in_settings_override_list(self):
+        """The key must be injected into settings.json by prepare_launch."""
+        from kitty.launchers.claude import _SETTINGS_ENV_OVERRIDE_KEYS
+
+        assert "CLAUDE_CODE_TMPDIR" in _SETTINGS_ENV_OVERRIDE_KEYS
+
+    def test_tmpdir_key_in_cleanup_list(self):
+        """The key must be removed by ``kitty cleanup`` after a crash."""
+        from kitty.cli.cleanup_cmd import _KITTY_INJECTED_KEYS
+
+        assert "CLAUDE_CODE_TMPDIR" in _KITTY_INJECTED_KEYS
 
     def test_settings_and_cleanup_lists_are_identical(self):
         """The launcher and the crash-recovery cleaner agree on every key.

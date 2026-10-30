@@ -337,3 +337,96 @@ class TestDrivenDefaultRun:
                 register=r.REGISTER,
                 triggers_met=frozenset({r.Trigger.PROFILE_SETS_MODEL}),
             )
+
+
+class TestDrivenScopeEnforcement:
+    """The scope filter carries through a real bridge (KBR-307).
+
+    The L1 fixtures in ``test_oracle.py`` prove the filter's logic; this
+    driven case proves the wiring: a real bridge run, its real capture,
+    and the adapter key derived from the harness's own transport binding
+    travel together into the runtime oracle surface. The openai_subscription
+    companion stays projection-level (``test_oracle.py``) — the curl_cffi
+    transport's binding needs TLS certs and OAuth seeding, and the per-adapter
+    rule is pinned at the cheapest layer that can prove it.
+
+    **Scope of this coverage: the wiring, not the adapter matrix.** One
+    adapter route (``custom_anthropic`` on the aiohttp Messages transport)
+    is what a driven slice can prove in isolation; the full per-adapter
+    matrix is the corpus runner's job (KBR-55/56/57) once ``provider_key``
+    moves into the harness, per §3.3.4's parametrised-over-transport rule.
+    """
+
+    async def test_drive_anthropic_route_stream_flip_is_unclaimed(self) -> None:
+        """End-to-end: a synthetic stream flip on the Anthropic-Messages route
+        is unclaimed, because P17 is scope-gated out of this adapter.
+
+        The bridge does not touch ``stream`` on this route (no register row
+        claims it there), so the flip is manufactured on the captured body —
+        the same idiom the C2 reorder test uses. ``ALWAYS`` is met so P17 is
+        trigger-eligible: the only thing keeping P17 from claiming the delta
+        is its ``scope=("openai_subscription",)``. The adapter key comes from
+        the harness's own binding — ``transport.bind()[0].provider_type`` —
+        not a hardcoded literal, so the case exercises the derivation the
+        corpus runner will use.
+        """
+        import pytest
+
+        body = minimal_inbound_body(InboundProtocol.MESSAGES, _SENTINEL, stream=True)
+
+        async with BridgeFixture(transport("aiohttp", WireFormat.ANTHROPIC_MESSAGES)) as fixture:
+            status, _ = await fixture.post(inbound_path(InboundProtocol.MESSAGES), body)
+            assert status == 200
+            captured = list(fixture.captures)[0]
+
+            # Derive the adapter key from the binding — the seam the corpus
+            # runner uses. On this transport it resolves to custom_anthropic.
+            adapter, _config = fixture.transport.bind()
+            provider_key = adapter.provider_type
+
+            # Flip the captured body's stream. One value change; everything
+            # else matches the inbound projection.
+            captured_body = json.loads(captured.body)
+            assert captured_body["stream"] is True, (
+                "the bridge must not touch stream on this route — a flipped "
+                "capture here would mean the test is not manufacturing the delta"
+            )
+            captured_body["stream"] = False
+            flipped_capture = CapturedRequest(
+                method=captured.method,
+                scheme=captured.scheme,
+                host=captured.host,
+                path=captured.path,
+                query=captured.query,
+                headers=captured.headers,
+                body=json.dumps(captured_body).encode("utf-8"),
+            )
+
+            inbound = CapturedRequest(
+                method="POST",
+                scheme="http",
+                host="127.0.0.1",
+                path=inbound_path(InboundProtocol.MESSAGES),
+                query="",
+                body=json.dumps(body).encode("utf-8"),
+            )
+
+            # ALWAYS met → P17 trigger-eligible; PROFILE_SETS_MODEL met → M1
+            # claims the model delta (the harness profile pins a model). The
+            # scope gate is the only thing left to explain the raise.
+            with pytest.raises(oracle.UnclaimedMutationError) as info:
+                oracle.assert_no_unclaimed_mutation(
+                    inbound=inbound,
+                    inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+                    captured=flipped_capture,
+                    captured_format=WireFormat.ANTHROPIC_MESSAGES,
+                    register=r.REGISTER,
+                    triggers_met=frozenset(
+                        {r.Trigger.ALWAYS, r.Trigger.PROFILE_SETS_MODEL}
+                    ),
+                    provider_key=provider_key,
+                )
+            assert "envelope.stream" in info.value.paths, (
+                f"the scope-gated stream flip must surface as unclaimed; "
+                f"got {info.value.paths!r}"
+            )

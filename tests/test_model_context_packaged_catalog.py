@@ -17,11 +17,25 @@ Verified sources (2026-08, via Kindly Web Search):
 - ``glm-5.3-flash``: Z.AI developer docs
   (https://docs.z.ai/guides/vlm/glm-5.3-flash) — "Context Length: 1M", and
   "Text parameters are consistent with GLM-5.3, with support for a 1M-token
-  context window". Absent from model_metadata.json, so without this entry it
-  falls back to DEFAULT_CONTEXT_TOKENS (200k) — a five-fold under-estimate.
+  context window". Absent from model_metadata.json when pinned, so without
+  the entry it fell back to DEFAULT_CONTEXT_TOKENS (200k) — a five-fold
+  under-estimate; the table has since gained ``z-ai/glm-5.3-flash``
+  (1,048,576), and the pin is what keeps that window stable across the
+  weekly refresh.
 - ``glm-5.2``: OpenRouter ``z-ai/glm-5.2`` = 1,048,576.
 - ``deepseek-v4-flash``: OpenRouter ``deepseek/deepseek-v4-flash`` FAQ
   ("1,048,576 token context window") for the canonical API name.
+- ``MiniMax-M3.1-Flash`` (verified 2026-10-21): MiniMax API overview
+  ("1,000,000-token context window", input + output combined) and the
+  platform's Anthropic-API compatibility page (the endpoint supports
+  ``MiniMax-M3.1-Flash`` and ``MiniMax-M3``).
+- ``minimax-m3.1-flash:free`` (verified 2026-10-21): OpenRouter
+  ``minimax/minimax-m3.1-flash:free`` ("1,000,000 token context window");
+  no unsuffixed paid listing exists on OpenRouter. The key is
+  OpenRouter-dialect (not the cloud-native ``MiniMax-M3.1-Flash``): a bare
+  profile spelling exact-matches it, and a vendor-prefixed query reaches it
+  through the key-as-suffix rule — the first-segment strip retry is never
+  needed.
 """
 
 from __future__ import annotations
@@ -40,18 +54,33 @@ pytestmark = pytest.mark.l2
 EXPECTED_CATALOG: dict[str, int] = {
     "qwen3.8-max": 1_000_000,
     "MiniMax-M3": 1_048_576,
+    "MiniMax-M3.1-Flash": 1_000_000,
+    "minimax-m3.1-flash:free": 1_000_000,
     "glm-5.3": 1_048_576,
     "glm-5.3-flash": 1_048_576,
     "glm-5.2": 1_048_576,
     "deepseek-v4-flash": 1_048_576,
 }
 
-# The catalog is provider-agnostic: the same cloud-native model name is used
-# across Qwen Cloud, MiniMax Coding Plan, Z.AI coding plan, DeepSeek cloud,
-# and custom Anthropic-compatible endpoints.
+# The catalog is provider-agnostic: every cloud-native key resolves under any
+# provider name (provider is log-only). Most entries are the cloud-native
+# name shared across Qwen Cloud, MiniMax Coding Plan, Z.AI coding plan,
+# DeepSeek cloud, and custom Anthropic-compatible endpoints; the OpenRouter
+# entry (``minimax-m3.1-flash:free``) is OpenRouter-dialect and only
+# OpenRouter actually serves it, but it still resolves under any provider
+# via exact match.
+#
+# Rows split into registered provider types (``_PROVIDER_TYPES`` in
+# ``profiles/schema.py``: ``zai_coding``, ``minimax_token``,
+# ``custom_anthropic``) and descriptive service names (``qwen_cloud``,
+# ``minimax_coding_plan``, ``deepseek`` — these name the service a profile
+# would talk to, not a type kitty registers). The service rows are
+# historical and kept as-is: they are free of the assertion because the
+# provider argument reaches only log records, so every row resolves alike.
 PROVIDER_VARIANTS = (
     "qwen_cloud",
     "minimax_coding_plan",
+    "minimax_token",
     "zai_coding",
     "deepseek",
     "custom_anthropic",
@@ -92,6 +121,26 @@ class TestPackagedCatalogEntries:
         assert get_model_context_tokens(provider, model, None) == expected
 
 
+class TestShippedCatalogMatchesExpectations:
+    """The shipped overrides file is exactly the reviewed pin set, both ways.
+
+    The resolution tests prove pin→file (each expected value resolves from the
+    shipped catalog) but nothing held the reverse: a row dropped from the
+    shipped file goes unnoticed as soon as the metadata table can satisfy the
+    lookup — the exact D3 undo this file exists to prevent — and an
+    unreviewed extra row is caught by nothing at all. Full dict equality
+    closes both directions in one assertion.
+    """
+
+    def test_shipped_file_equals_the_reviewed_catalog(self):
+        import json
+
+        from kitty.providers.model_context import _OVERRIDES_PATH
+
+        shipped = json.loads(_OVERRIDES_PATH.read_text(encoding="utf-8"))
+        assert shipped == EXPECTED_CATALOG
+
+
 class TestPackagedCatalogSuffixSpelling:
     """Vendor-prefixed spellings resolve via the suffix rule to the same value."""
 
@@ -100,6 +149,9 @@ class TestPackagedCatalogSuffixSpelling:
         [
             ("qwen/qwen3.8-max", 1_000_000),
             ("minimax/MiniMax-M3", 1_048_576),
+            ("minimax/MiniMax-M3.1-Flash", 1_000_000),
+            ("minimax/minimax-m3.1-flash", 1_000_000),
+            ("minimax/minimax-m3.1-flash:free", 1_000_000),
             ("z-ai/glm-5.3", 1_048_576),
             ("z-ai/glm-5.3-flash", 1_048_576),
             ("z-ai/glm-5.2", 1_048_576),
@@ -115,9 +167,13 @@ class TestPackagedCatalogSuffixSpelling:
 class TestPackagedCatalogPriority:
     """The packaged catalog outranks provider_config and the default.
 
-    Catalog-vs-metadata precedence cannot be distinguished with the shipped
-    catalog because every pinned value currently equals its metadata value;
-    that precedence is pinned with synthetic data in ``test_model_context.py``
+    The two MiniMax M3.1 Flash entries have no metadata counterpart, so for
+    those rows the shipped catalog alone already distinguishes
+    catalog-over-metadata: without the pins their spellings resolve the 200k
+    default, since the metadata table cannot answer them at all. The other
+    pinned rows still coincide with their metadata value, so precedence for
+    a coincident row stays pinned with synthetic data in
+    ``test_model_context.py``
     (``TestLocalOverrides.test_override_beats_metadata_exact_and_suffix``).
     """
 

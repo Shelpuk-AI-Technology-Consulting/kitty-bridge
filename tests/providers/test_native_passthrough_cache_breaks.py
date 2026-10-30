@@ -153,6 +153,24 @@ def test_cache_control_is_not_a_member_of_internal_keys() -> None:
     assert "cache_control" not in ProviderAdapter._INTERNAL_KEYS
 
 
+def test_the_carriage_mirror_covers_every_registry_cache_key() -> None:
+    """KBR-296: the harness mirror names every registry key carrying ``cache_control``.
+
+    ``harness.cache_breakpoints._KITTY_CARRIAGE_KEYS`` is hand-maintained and
+    must grow whenever the registry mints a carriage key whose name contains
+    ``cache_control``; until this guard, the mirror's documented
+    drift-correction surfaced only as a phantom-breakpoint count inside a
+    detector test, not as the gap itself. The harness module cannot import
+    ``src/kitty`` (§3.3.1's independence rule), so the direct guard lives
+    here, against the real registry.
+    """
+    registry = ProviderAdapter._INTERNAL_KEYS | ProviderAdapter._INTERNAL_MESSAGE_KEYS
+    cache_control_keys = {key for key in registry if "cache_control" in key}
+
+    assert cache_control_keys, "the registry grew no cache_control keys — the guard is vacuous"
+    assert cache_control_keys <= cb._KITTY_CARRIAGE_KEYS
+
+
 # ── Falsification: the guard can fail ─────────────────────────────────────
 
 

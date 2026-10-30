@@ -454,8 +454,19 @@ def _read_tool_choice(
         canonical = str(kind)
     elif kind == "tool":
         name = value.get("name")
-        if not isinstance(name, str):
-            raise c.UnreadableBodyError("tool_choice type 'tool' requires a name")
+        # Empty `name` slips through the isinstance check and produces the
+        # never-legal selection string `"tool:"`. KBR-303 extends the
+        # existing non-string raise to catch the empty shape; absent /
+        # non-string are unchanged. Same losslessness argument
+        # (`contract.decode_arguments`) as KBR-281 + KBR-292 + KBR-295 +
+        # KBR-299 closed on the invocation / declaration surfaces. The
+        # message spelling matches the family so the family greps
+        # together via `git grep "must be a non-empty string"
+        # tests/harness/`.
+        if not isinstance(name, str) or not name:
+            raise c.UnreadableBodyError(
+                "tool_choice.name must be a non-empty string name"
+            )
         canonical = f"tool:{name}"
     else:
         raise c.UnreadableBodyError(f"unrecognised tool_choice type {kind!r}")

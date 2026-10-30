@@ -136,8 +136,9 @@ class ArrangingBy(Enum):
       regardless of inbound wire"), it is met when
       ``provider.dispatch == "_cc_to_responses"``.
     * :attr:`RESPONSE` — a property of the upstream response, arranged by a
-      scripted recorder (``M6``, ``M8``, ``M9``, ``M12``, ``M17``). T-D8
-      reads these from a named scripted-recorder test, not from the corpus.
+      scripted recorder (``M6``, ``M8``, ``M9``, ``M12``, ``M17``,
+      ``M30``, ``M31``, ``M32``). T-D8 reads these from a named
+      scripted-recorder test, not from the corpus.
     * :attr:`PROFILE` — derived from the profile (``M1`` — profile model;
       ``M4`` / ``M5`` — compaction budget from profile model, and on a
       balancing profile from the smallest context in the pool). Declared
@@ -287,6 +288,54 @@ class Trigger(Enum):
     TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED = (
         "tool_choice_omitted_as_legal_but_unsupported",
         ArrangingBy.REQUEST,
+    )
+    # KBR-55 (G28). Met when the inbound Anthropic body carries ``top_k`` —
+    # the only field Anthropic defines and Chat Completions does not, so
+    # KBR-178 carries it on the internal key ``_top_k`` and only the
+    # Anthropic-family adapters restore it. REQUEST, decided by the inbound
+    # body. Unconditional per §9.2 ("unconditional in P13's sense — fires
+    # wherever the field is present, so it owes no §3.3.2 assertion-2
+    # complement"): the off-state (no ``top_k`` on the inbound) is also the
+    # row-absent state, so no corpus complement can prove anything the
+    # trigger-absent case does not already prove.
+    ANTHROPIC_TOP_K_PRESENT = ("anthropic_top_k_present", ArrangingBy.REQUEST)
+    # KBR-55 (G29). Met when the inbound Anthropic body carries an empty
+    # ``stop_sequences`` list — omitted rather than forwarded, because
+    # ``StopConfiguration`` declares ``minItems: 1`` on Chat Completions and
+    # ``stop: []`` is a schema-invalid body. REQUEST, decided by the inbound
+    # body's value. Conditional: the non-empty case is the complement state —
+    # a non-empty list is carried as-is, so §3.3.2 assertion 2 owes a
+    # corpus entry that proves the omission's absence.
+    EMPTY_STOP_SEQUENCES = ("empty_stop_sequences", ArrangingBy.REQUEST)
+    # KBR-59 (T-D10) / response-direction mirror of
+    # ``GEMINI_INBOUND_ID_ABSENT``. The captured upstream CC reply carries
+    # a ``tool_calls[].id``; the Gemini reply reader projects it onto
+    # ``reply.parts[*].id`` for KBR-257's functionCall-id echo on the
+    # ``google_aistudio`` / ``vertex`` providers. RESPONSE — the trigger
+    # reads a wire-level property of the captured CC reply, decided by
+    # the scripted recorder at T-D8 time, not by a corpus entry.
+    CAPTURED_TOOL_CALL_ID_PRESENT = (
+        "captured_tool_call_id_present",
+        ArrangingBy.RESPONSE,
+    )
+    # KBR-59 (T-D10) / KBR-267 — the canonical tool-calling exchange on
+    # Ollama Cloud: ``message.tool_calls`` non-empty AND
+    # ``done_reason == "stop"``. Ollama's single wire value ``"stop"``
+    # covers both CC's ``"stop"`` and ``"tool_calls"``; the reader
+    # maps it to ``end_turn`` per KBR-267's independent-oracle rule.
+    # RESPONSE — decided by the upstream's reply bytes (T-D8).
+    OLLAMA_CANONICAL_TOOL_CALLING_REPLY = (
+        "ollama_canonical_tool_calling_reply",
+        ArrangingBy.RESPONSE,
+    )
+    # KBR-59 (T-D10) / KBR-267 — rare Ollama vs Chat Completions
+    # part-ordering disagreement on replies that carry both Thinking
+    # and ToolUse. ``message.thinking`` non-empty AND
+    # ``message.tool_calls`` non-empty. RESPONSE — decided by the
+    # upstream's reply bytes (T-D8).
+    REPLY_CONTAINS_THINKING_AND_TOOL_USE = (
+        "reply_contains_thinking_and_tool_use",
+        ArrangingBy.RESPONSE,
     )
 
 
@@ -505,6 +554,30 @@ _ANTHROPIC_FAMILY: tuple[str, ...] = (
     "minimax_token",
     "zai_coding",
     "opencode_go",
+)
+
+#: The three Anthropic-family adapters that reach
+#: :meth:`MessagesTranslator.translate_request` on the ``/v1/messages``
+#: route and **restore** the agent's ``top_k`` (KBR-178's carry: the
+#: other two, ``custom_anthropic`` and ``zai_coding``, are hardcoded
+#: native and never run the translator). M27's scope is every translated
+#: adapter *minus* these three — **eighteen** adapters (§9.2's count;
+#: the naive arithmetic ``21 − 5`` is wrong because two of
+#: :data:`_ANTHROPIC_FAMILY`'s five are not in
+#: :data:`_TRANSLATED_MESSAGES_ADAPTERS` to begin with).
+_TOP_K_RESTORING_TRANSLATED: tuple[str, ...] = (
+    "anthropic",
+    "minimax_token",
+    "opencode_go",
+)
+
+#: M27 / M28's scope — every adapter whose ``/v1/messages`` route runs
+#: :meth:`MessagesTranslator.translate_request` and whose downstream
+#: adapter does not restore ``_top_k`` (M27) or non-empty ``stop``
+#: (M28). Deliberately **not** ``(ALL_PROVIDERS,)``: the two
+#: hardcoded-native adapters are unreachable by construction.
+_TOP_K_DROPPED_SCOPE: tuple[str, ...] = tuple(
+    key for key in _TRANSLATED_MESSAGES_ADAPTERS if key not in _TOP_K_RESTORING_TRANSLATED
 )
 
 _ALWAYS = Trigger.ALWAYS
@@ -753,11 +826,19 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     MutationRow(
         id="M9a",
         # KBR-271: the M9 fallback's top-level twin of M16's fourth path
-        # (KBR-263 / G38). `_convert_native_to_cc_format` builds its result
-        # dict from named keys and never copies `body["cache_control"]`, so
-        # Anthropic's automatic-caching form -- projected to
-        # `envelope.extra[cache_control]` (§3.3.1) -- is dropped by omission
-        # on the retried wire. Pinned at the wire by the KBR-200 CB-3 suite's
+        # (KBR-263 / G38). At the KBR-271 measurement, `_convert_native_to_cc_format`
+        # built its result dict from named keys and never copied
+        # `body["cache_control"]`, so Anthropic's automatic-caching form --
+        # projected to `envelope.extra[cache_control]` (§3.3.1) -- was dropped
+        # by omission on the retried wire.
+        #
+        # KBR-296 (2026-09-23) amended this text: the converter now carries
+        # `body["cache_control"]` onto the internal `_cache_control` carriage
+        # and `AnthropicAdapter.translate_to_upstream` restores it verbatim,
+        # so the retried WIRE carries the form again. The row remains the
+        # register's record of the KBR-271 measurement and of the address
+        # this site touches; its claim is dormant on any route where the
+        # restore runs. Pinned at the wire by the KBR-200 CB-3 suite's
         # `top_level` site (`tests/bridge/test_native_passthrough_cache_breaks.py`).
         #
         # Two overlap facts, stated so no future reader re-derives them from
@@ -789,14 +870,28 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
     MutationRow(
         id="M9b",
         # KBR-271: the M9 fallback's block-level twin of M16's three carrier
-        # paths. The rebuild flattens every block it touches -- assistant
-        # text joined to a string, `tool_use` rebuilt as a `tool_calls`
-        # entry, `tool_result.content` flattened to a string *before* any
-        # carriage (the Messages translator preserves the nested half; this
-        # converter defeats it), `tools` rebuilt from
+        # paths. At the KBR-271 measurement the rebuild flattened every block
+        # it touched -- assistant text joined to a string, `tool_use` rebuilt
+        # as a `tool_calls` entry, `tool_result.content` flattened to a string
+        # *before* any carriage (the Messages translator preserves the nested
+        # half; this converter defeated it), `tools` rebuilt from
         # `name`/`description`/`input_schema` only -- so a breakpoint on a
-        # tool declaration or on any content part is dropped on the retried
-        # wire. Pinned at the wire by the CB-3 suite's `tool`, `image`,
+        # tool declaration or on any content part was dropped on the retried
+        # wire.
+        #
+        # KBR-296 (2026-09-23) amended this text: the converter now carries
+        # per-tool breakpoints onto the internal `_tool_cache_controls`
+        # carriage (name-keyed, P30-aligned) and part-level breakpoints onto
+        # the CC parts themselves (the adapter's restore side reads them via
+        # the existing part-spread paths at `anthropic.py:714, 718-719`); the
+        # assistant-text join carries a last-marked-wins breakpoint on the
+        # message-level `_cache_control`; per-tool_use breakpoints ride the
+        # message-level `_tool_call_cache_controls`; and `tool_result.content`
+        # is now forwarded verbatim, restoring hop 1's KBR-198/KBR-199
+        # nested preservation. The retried WIRE carries every carrier the
+        # rebuild can express. The row remains the register's record of the
+        # KBR-271 measurement; its claim is dormant on any route where the
+        # restore runs. Pinned at the wire by the CB-3 suite's `tool`, `image`,
         # `user_text`, `assistant_text`, `tool_use`, `tool_result` and
         # `tool_result_nested` sites. See M9a for the two overlap facts
         # (site-blind matching against M16; anticipatory, native-route-only
@@ -934,6 +1029,19 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         # part, and `conversation.tools[*]` a deleted tool description -- two of
         # §3.3.1's five oracle falsification cases. That is §3.3.1a's P15 lesson
         # applied to a second row.
+        #
+        # KBR-308 amendment: the translator now writes every carrier the rebuild
+        # can express — top-level on ``_cache_control``, tools name-keyed on
+        # ``_tool_cache_controls``, parts on the CC part (hop 1 ``carry_cache_control=True``),
+        # assistant joined text last-marked-wins on message-level ``_cache_control``,
+        # per-``tool_use`` index-keyed on ``_tool_call_cache_controls``, tool_result
+        # message-level ``_cache_control`` — and the KBR-296 restore side picks them
+        # up. The row stays as documentation-of-record for the KBR-199/KBR-258
+        # measurement; the claim is dormant on any route where the carry runs
+        # (system continues to ride ``_anthropic_system`` verbatim per KBR-228 part B,
+        # document on ``_documents`` per KBR-222, and the nested-``tool_result``
+        # content is forwarded verbatim per KBR-198). The user-message-object
+        # case is the deliberate OD1 deferral (PO 2026-09-24).
         paths=(
             c.system_path(c.WILDCARD, "cache_control"),
             c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),
@@ -1099,6 +1207,285 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         paths=(c.extra_path("metadata"),),
         conditional=False,
         design_ref="§3.2.1 · §3.3.1b · §9.2 G31",
+        scope=_TRANSLATED_MESSAGES_ADAPTERS,
+    ),
+    MutationRow(
+        id="M27",
+        # KBR-55 / G28 — ``top_k`` dropped on the non-Anthropic-family
+        # routes. KBR-178's carry mints the agent's value on the internal
+        # ``_top_k`` (translator.py:439-440) and only AnthropicAdapter and
+        # its two Messages-routed delegates — ``minimax_token`` (whose
+        # native flag defaults off) and ``opencode_go`` (Messages models
+        # only) — restore it. The other 18 adapters drop it by design.
+        #
+        # The ``_top_k`` itself rides on ``_INTERNAL_KEYS`` (P1 strips it
+        # before the wire), so the row's *delta* is at
+        # ``conversation.sampling[top_k]``: the Anthropic Messages
+        # reader (``reader_anthropic_messages`` ``_SAMPLING_KEYS`` at
+        # ``reader_anthropic_messages.py:84``) projects ``top_k`` onto
+        # the sampling address and the upstream projection lacks it.
+        # The address is keyed so the bare ``conversation.sampling``
+        # anchor P13 uses on ``openai_subscription``'s CC-origin path
+        # does not over-claim M27 there: the specificity rule in
+        # ``oracle._conditional_violations`` keys on the narrower
+        # anchor, and M27 is unconditional so assertion-2's
+        # attribution never fires on either row.
+        #
+        # Trigger ``ANTHROPIC_TOP_K_PRESENT`` decides it; the field's
+        # *presence* on the inbound is the condition, so
+        # ``ArrangingBy.REQUEST``. Conditional=False per §9.2
+        # ("unconditional in P13's sense — fires wherever the field
+        # is present, so it owes no §3.3.2 assertion-2 complement"):
+        # the off-state (no top_k on the inbound) is also the
+        # row-absent state, so no corpus complement can prove anything
+        # the trigger-absent case does not already prove.
+        #
+        # Scope is computed at module import:
+        # ``_TOP_K_DROPPED_SCOPE = _TRANSLATED_MESSAGES_ADAPTERS
+        # \ {anthropic, minimax_token, opencode_go}`` → **18** adapters
+        # (§9.2's count). The naive arithmetic ``21 − 5`` would land at
+        # 16 because two of :data:`_ANTHROPIC_FAMILY`'s five entries
+        # (``custom_anthropic``, ``zai_coding``) are hardcoded native
+        # and never reach the translator; the ``\`` operator above
+        # already excludes them.
+        site=(
+            "kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",
+        ),
+        trigger=Trigger.ANTHROPIC_TOP_K_PRESENT,
+        paths=(c.sampling_path("top_k"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G28",
+        scope=_TOP_K_DROPPED_SCOPE,
+    ),
+    MutationRow(
+        id="M28",
+        # KBR-55 / G29 — empty ``stop_sequences`` omitted rather than
+        # forwarded. The Messages-→-CC carry's truthy-only guard at
+        # translator.py:431-433 (``if stop_sequences: result["stop"] =
+        # stop_sequences``) skips an empty list deliberately, because
+        # OpenAI's ``StopConfiguration`` declares ``minItems: 1`` and
+        # ``stop: []`` is a schema-invalid Chat Completions body. The
+        # omission is correct and must not be "fixed" by forwarding
+        # ``[]``; the row is a register claim, not a fix.
+        #
+        # The Anthropic Messages reader projects ``stop_sequences``
+        # onto ``conversation.sampling[stop]`` (the
+        # ``stop_sequences → stop`` rename in
+        # ``reader_anthropic_messages.py:85``) with no emptiness guard
+        # (the reader "projects sampling by presence"), so an
+        # empty ``stop_sequences`` projects as
+        # ``conversation.sampling[stop] = []`` while the upstream
+        # projection has no ``stop`` key. That is the row's delta.
+        #
+        # Trigger ``EMPTY_STOP_SEQUENCES`` (new enum member, REQUEST,
+        # ``ArrangingBy.REQUEST``); ``conditional=True`` because the
+        # non-empty value is the complement state — a non-empty list
+        # is carried as-is, so §3.3.2 assertion 2 owes a corpus entry
+        # proving the omission's absence. The trigger case and the
+        # §3.3.2 complement arrive with T-D5 corpus entries.
+        #
+        # Scope mirrors M27: the same 18 adapters. The two
+        # hardcoded-native adapters (``custom_anthropic``,
+        # ``zai_coding``) never run the translator at all, and the
+        # three Anthropic-family adapters whose translator runs do
+        # carry the empty list as the array form (their downstream
+        # needs the array form for their own ingestion).
+        site=(
+            "kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",
+        ),
+        trigger=Trigger.EMPTY_STOP_SEQUENCES,
+        paths=(c.sampling_path("stop"),),
+        conditional=True,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G29",
+        scope=_TOP_K_DROPPED_SCOPE,
+    ),
+    MutationRow(
+        id="M29",
+        # KBR-55 / G30 — string-form ``stop`` rewritten into a list.
+        # ``server._normalize_cc_stop`` (``server.py:1054``) wraps a
+        # Chat Completions ``stop: "END"`` into ``stop: ["END"]`` at
+        # the ``/v1/chat/completions`` ingress before the body forks.
+        # OpenAI declares ``stop`` as ``oneOf`` a string or an array
+        # of one to four strings, and every wire kitty writes downstream
+        # takes only the array form.
+        #
+        # **Both forms project to one ``Conversation``**, so the row
+        # takes §3.3.1a's ``NOT_PROJECTABLE`` escape with M15's exact
+        # posture: a body already in the array form meets the row
+        # with a no-op, so there is no complement state for §3.3.2
+        # assertion 2 to arrange; ``conditional=False``. The
+        # ``not_projectable_reason`` clause also binds T-A2 / KBR-34
+        # — the future Chat Completions reader must read
+        # ``stop: "END"`` and ``stop: ["END"]`` into the identical
+        # ``Request`` (else the row's claim fails on the
+        # indistinguishable projection — same clause M15 carries).
+        #
+        # Scope = ``(ALL_PROVIDERS,)`` because the
+        # ``_normalize_cc_stop`` seam is on the Chat Completions
+        # ingress route, not an adapter — every adapter reachable
+        # through ``/v1/chat/completions`` runs it. KBR-139
+        # reachability of the site.
+        #
+        # §9.2's stale text names "Row **M17**" for this row; that
+        # id was reserved by KBR-232 for the thinking-strip row
+        # (which closed G40 and is the actual M17), so M29 is the
+        # landed id.
+        site=("kitty/bridge/server.py:_normalize_cc_stop",),
+        trigger=_ALWAYS,
+        paths=(c.NOT_PROJECTABLE,),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1 · §3.3.1a · §9.2 G30",
+        scope=(ALL_PROVIDERS,),
+        not_projectable_reason=(
+            "OpenAI's ``StopConfiguration`` declares ``stop`` as ``oneOf`` a string or an array "
+            "(G30's prose pin), and the Chat Completions and Anthropic readers both project the "
+            "two forms onto one ``Conversation``: a single user turn with the stop sequence. A "
+            "projection that told the two apart would be reading a vendor's spelling into a "
+            "wire-independent form — the same defect M15 records. This binds T-A2 / KBR-34: it "
+            "must read ``stop: \"END\"`` and ``stop: [\"END\"]`` into the identical ``Request``. "
+            "Naming only one of the two forms would let a reader satisfy this literally and still "
+            "project two equivalent bodies apart, which is the failure the escape is void on. If "
+            "it ever does, M29 needs a projectable anchor."
+        ),
+    ),
+    MutationRow(
+        id="M30",
+        # KBR-59 (T-D10) — response-direction mirror of M18/M19. KBR-257
+        # made the Gemini reply translator carry the upstream CC
+        # ``tool_calls[].id`` onto the emitted ``functionCall.id`` when
+        # the upstream carried one, and omit it when absent (the
+        # ``SYSTEM_DESIGN.md`` §4 X4 rule, ``emit when present, omit when
+        # absent`` — Gemini ``FunctionCall.id`` is optional per
+        # ``v1beta``). The reader projects the id faithfully (KBR-36).
+        # The delta this row claims is the *response-direction*
+        # counterpart of M18/M19's request-side functionCall synthesis:
+        # when the upstream carried an id, the reply projection's
+        # ``reply.parts[*].id`` matches the captured CC id rather than
+        # being absent.
+        #
+        # The companion M18/M19 Trigger names ("ABSENT") and the
+        # response-side name ("PRESENT") are deliberately named from
+        # the captured side they read; the request-side names a
+        # request-wire property (the inbound Gemini body) while
+        # ``CAPTURED_TOOL_CALL_ID_PRESENT`` names a captured-reply-wire
+        # property (the upstream CC reply). Same family, opposite
+        # direction, no shared convention to confuse.
+        #
+        # Anchored at ``reply.parts[*].id`` (3-segment, with ``id`` as
+        # the field) per §3.3.1a — the field name, never the bare
+        # ``reply.parts[*]``. The M5/M3 lesson repeated for M32.
+        #
+        # ‡ NOT_PROJECTABLE is not an option: the reader projects the
+        # id faithfully today (the Gemini reader has read it since
+        # T-A4 / KBR-36), so the path is projectable. A
+        # NOT_PROJECTABLE row would blind the oracle to exactly the
+        # path KBR-257 made projectable. The KBR-195 §8 rationale
+        # carries forward verbatim.
+        #
+        # Renumbered from M27 at the 2026-10-18 merge of origin/main:
+        # KBR-55 landed its G28/G29/G30 rows on the M27/M28/M29 ids
+        # first, so the reply rows take the next free ids (the same
+        # collision KBR-195's reviewer round caught for M21/M22/M23).
+        site=("kitty/bridge/gemini/translator.py:GeminiTranslator._translate_content",),
+        trigger=Trigger.CAPTURED_TOOL_CALL_ID_PRESENT,
+        paths=(c.reply_part_path(c.WILDCARD, "id"),),
+        conditional=True,
+        design_ref="§4 X4 · KBR-257",
+        scope=("google_aistudio", "vertex"),
+    ),
+    MutationRow(
+        id="M31",
+        # KBR-59 (T-D10) / KBR-267 — Ollama canonical tool-calling
+        # ``reply.stop_reason`` delta. Ollama's ``/api/chat``
+        # with-tools responses carry ``done_reason: "stop"`` — the
+        # single wire value that covers both CC's ``"stop"`` (the
+        # direct-completion end-turn case) and CC's ``"tool_calls"``
+        # (the tool-calling case). The reader maps ``"stop"`` to
+        # ``end_turn`` per KBR-267's *independent-oracle* rule —
+        # inferring ``tool_use`` from the presence of
+        # ``message.tool_calls`` would violate the rule by reading the
+        # CC side of the comparison into an Ollama projection.
+        #
+        # The delta surfaces when the bridge emits the reply on a
+        # wire that uses a finer stop-reason vocabulary (e.g. CC
+        # translates the Ollama end-turn reply into ``"tool_calls"``
+        # on the agent side because the message had tool calls — so
+        # the CC reader projects ``tool_use`` while the Ollama reader
+        # projects ``end_turn``).
+        #
+        # Trigger reads the wire-level condition: a captured Ollama
+        # reply with ``message.tool_calls`` non-empty AND
+        # ``done_reason == "stop"``. RESPONSE per the ArrangingBy
+        # enumeration update — the scripted recorder owns the input
+        # shape; the corpus does not.
+        site=("kitty/providers/ollama_cloud.py:OllamaCloudAdapter.translate_from_upstream",),
+        trigger=Trigger.OLLAMA_CANONICAL_TOOL_CALLING_REPLY,
+        paths=(c.REPLY_STOP_REASON,),
+        conditional=True,
+        design_ref="§3.2.2 · KBR-267 · KBR-59 comment 3.1",
+        scope=("ollama_cloud",),
+    ),
+    MutationRow(
+        id="M32",
+        # KBR-59 (T-D10) / KBR-267 — Ollama vs Chat Completions
+        # part-ordering delta on rare Thinking+ToolUse replies.
+        # §7.4.1's two-reader-disagree-on-a-part-boundary rule names
+        # the bare-index anchor for this case: when two readers
+        # disagree about a part boundary, the bare-part path is the
+        # address. KBR-267 comment 3.2 records the disagreement:
+        # Ollama projects Text → Thinking → ToolUse → Image (its
+        # canonical reader ordering) while Chat Completions projects
+        # Text → refusal → ToolUse → Thinking (the CC tool-calling
+        # ordering). The two orderings agree on the common
+        # Text+ToolUse case via the empty-content convergence rule —
+        # the *rare* Thinking+ToolUse case is what surfaces a delta.
+        #
+        # Trigger reads the wire-level condition: a captured Ollama
+        # reply with ``message.thinking`` non-empty AND
+        # ``message.tool_calls`` non-empty. RESPONSE per the
+        # ArrangingBy enumeration update. Scope is the Ollama Cloud
+        # route (the only provider carrying the wire shape).
+        #
+        # Co-claim note (registered for the corpus builder): M32's
+        # ``reply.parts[*]`` (2-segment, broad) and M30's
+        # ``reply.parts[*].id`` (3-segment, narrow) co-claim a
+        # tool-call-id delta on a Thinking+ToolUse reply under the
+        # prefix rule. ``_conditional_violations``'s specificity
+        # attribution handles this — when M30 is *triggered* and a
+        # delta lands at ``reply.parts[*].id``, M32 is exempt (M30
+        # is finer). The co-claim is intentional, not double-billing.
+        site=("kitty/providers/ollama_cloud.py:OllamaCloudAdapter.translate_from_upstream",),
+        trigger=Trigger.REPLY_CONTAINS_THINKING_AND_TOOL_USE,
+        paths=(c.reply_part_path(c.WILDCARD),),
+        conditional=True,
+        design_ref="§7.4.1 · §3.2.2 · KBR-267 · KBR-59 comment 3.2",
+        scope=("ollama_cloud",),
+    ),
+    # KBR-309's row, appended after KBR-59's M30/M31/M32 (renamed from M30 to
+    # M33 to keep ids unique; the KBR-271 "register-edit companion sites" lesson).
+    MutationRow(
+        id="M33",
+        # KBR-309: drop an agent's ``context_management`` on the translated
+        # Messages route. Anthropic's ``context_management`` is a **beta**
+        # field — the documented endpoint accepts it only when the request
+        # carries ``anthropic-beta: context-management-2025-06-27``
+        # (platform.claude.com/docs/en/build-with-claude/context-editing,
+        # fetched 2026-09-24). The bridge builds upstream headers from
+        # scratch and forwards no inbound agent header (§4.2 C1), so a
+        # KBR-224-style restore would 400 at the upstream. The drop is the
+        # design posture, not a bug; beta-header carriage is a separate
+        # product decision.
+        #
+        # P23's ``_CODEX_DROPPED_CONTROL_FIELDS`` lists ``context_management``
+        # at the same wire-key address, but P23 is ``openai_subscription``-
+        # specific (the Responses allowlist is the policy point there). The
+        # Messages → CC translation has its own policy point — the
+        # translator, which never reads the field — and this row names it.
+        site=("kitty/bridge/messages/translator.py:MessagesTranslator.translate_request",),
+        trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
+        paths=(c.extra_path("context_management"),),
+        conditional=False,
+        design_ref="§3.2.1 · §3.3.1b",
         scope=_TRANSLATED_MESSAGES_ADAPTERS,
     ),
 )
@@ -1717,6 +2104,13 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # moment the reader grows the slot (the G38 precedent on the Messages
         # twin). Today such a body residualises, which is the honest named
         # failure: the field is present, nobody claims it.
+        #
+        # KBR-308 amendment: the adapter now reads a raw CC body's
+        # `cache_control` as a fallback when the KBR-296 carriage is absent
+        # (DQ-B: carriage wins, raw shape is fallback) and restores it onto
+        # the wire's top-level slot — the KBR-199 drop is closed on the
+        # CC-origin path too; this row stays as the measurement-of-record
+        # and the claim is dormant where the carry runs.
         site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
         # Keyed literal — no wildcard, so the `_SHAPES` test excludes it by
@@ -1740,6 +2134,17 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `_anthropic_system` is a Messages-ingress concern, set by
         # `MessagesTranslator`, stripped on the CC route by P1 — the join
         # stands.
+        #
+        # KBR-308 amendment: the rebuild now emits a blocks-form ``system``
+        # (each text block carrying its marker) when any system part carries a
+        # marker AND ``self.forwards_thinking_signature`` is True — the same
+        # gate the ``_anthropic_system`` restore uses. On ``minimax_token`` and
+        # ``opencode_go``'s Messages-routed models (``forwards_thinking_signature=False``;
+        # MiniMax rejects ``cache_control`` on system blocks outright,
+        # ``minimax_token.py:29-30``) the join stands and the G43 scope-out is
+        # preserved on the CC-origin path too; the new CB-2 pin asserts it.
+        # The row stays as the measurement-of-record; the claim is dormant
+        # where the carve runs.
         site=("kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",),
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
         paths=(c.system_path(c.WILDCARD, "cache_control"),),
@@ -1768,6 +2173,17 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # cache key), so such a body fails the run on residual first — the
         # honest named failure. The row lands now, before the reader grows
         # the slot, on the G38 precedent.
+        #
+        # KBR-308 amendment (tool-message-object half): `_tool_result_block`
+        # now reads a raw `messages[*].cache_control` as a fallback when the
+        # message-level `_cache_control` carriage is absent (DQ-B) and
+        # attaches it onto the rebuilt Anthropic `tool_result` block — the
+        # KBR-199 tool-message drop is closed on the CC-origin path too. The
+        # row stays live for the **user-message-object** half, deliberately
+        # deferred (OD1, PO 2026-09-24 — Anthropic's wire has no message-level
+        # slot, no published CC dialect defines the shape, and any placement
+        # would invent a block choice with no fidelity basis); the CB-2 case
+        # `user-message-object-deferred-dropped` pins the deferral.
         #
         # Anchor contingency: the §3.3.1a path vocabulary names
         # `conversation.turns[*].parts[*].cache_control` (the field-level
@@ -1800,6 +2216,14 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `cache_control` (`_read_tool_calls`'s `_residualise` set names no
         # cache key), so such a body fails the run on residual first, the
         # G38 precedent.
+        #
+        # KBR-308 amendment: `_translate_assistant_msg` now reads a raw
+        # `tool_calls[i].cache_control` and an assistant-message-object
+        # `messages[i].cache_control` as fallbacks when the index-keyed /
+        # message-level carriages are absent (DQ-B) — the KBR-199
+        # tool-call and assistant-message-object drops are closed on the
+        # CC-origin path. The row stays as the measurement-of-record; the
+        # claims are dormant where the fallback reads run.
         site=("kitty/providers/anthropic.py:AnthropicAdapter._translate_assistant_msg",),
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
         paths=(c.part_path(c.WILDCARD, c.WILDCARD, "cache_control"),),
@@ -1816,6 +2240,14 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         # `conversation.tools[<name>].cache_control` today, so this row is
         # **claimable now** — like P27, not anticipatory. The Messages-route
         # twin of this drop is M16's tool-decl path.
+        #
+        # KBR-308 amendment: `_translate_tools` now reads a raw
+        # `tools[i].cache_control` as a fallback when the name-keyed
+        # `_tool_cache_controls` carriage lacks the entry (DQ-B) and
+        # attaches it onto the rebuilt Anthropic tool declaration — the
+        # KBR-199 tool-declaration drop is closed on the CC-origin path.
+        # The row stays as the measurement-of-record; the claim is dormant
+        # where the fallback read runs.
         site=("kitty/providers/anthropic.py:AnthropicAdapter._translate_tools",),
         trigger=Trigger.NON_NATIVE_UPSTREAM_WIRE,
         paths=(c.tool_path(c.WILDCARD, "cache_control"),),
@@ -2060,6 +2492,55 @@ _PROVIDER_ROWS: tuple[MutationRow, ...] = (
         conditional=True,
         design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-137",
         scope=("opencode_go",),
+    ),
+    MutationRow(
+        id="P43",
+        site=(
+            "kitty/providers/anthropic.py:AnthropicAdapter.translate_to_upstream",
+            "kitty/providers/bedrock.py:BedrockAdapter.translate_to_upstream",
+            "kitty/providers/ollama_cloud.py:OllamaCloudAdapter.translate_to_upstream",
+        ),
+        trigger=_ALWAYS,
+        # KBR-305: drop the six KBR-301 sampling keys on the rebuild-trio.
+        # The keys reach the CC body at hop 1 (KBR-301) and the verbatim
+        # forwarders ship them, but the three rebuild-from-allowlist
+        # adapters read only what their destination wire accepts:
+        # Anthropic Messages accepts none of the six; Bedrock
+        # ``InferenceConfiguration`` is exactly
+        # ``{maxTokens, temperature, topP, stopSequences}``; Ollama
+        # ``ChatRequest`` + ``Options`` accepts five of the six on the
+        # wire (``seed``, ``presence_penalty``, ``frequency_penalty`` under
+        # ``options``; ``logprobs`` and ``top_logprobs`` top-level) but has
+        # no ``n``/``num_choices`` field anywhere on Ollama's Go source.
+        # The split is named on the row in TEST_SUITE.md §3.2.2 so a
+        # reader does not mistake the row for a blanket drop.
+        #
+        # ⚠️ Departure from the P31/P32 "paths must be true of every
+        # site" rule, recorded: on ``ollama_cloud`` only ``n`` is
+        # actually dropped; the five carried keys' claims are dormant on
+        # that adapter. The five carries live in the mutmut scope per
+        # TEST_SUITE.md §6.1 (``kitty.providers.* translate_to_upstream``),
+        # so the L1 carry suite is the discriminating guard on that
+        # route; the owner confirmed the one-row shape on 2026-09-23.
+        #
+        # The exact tuple is pinned by
+        # ``test_register.py::test_row_ids_are_unique`` — a data-side drift
+        # turns that assertion red. The L2 agreement guard compares
+        # ids/conditionality/order but not path content, and the markdown
+        # row's path list is held by review; the pin is what makes a
+        # future widening a deliberate edit to both halves rather than a
+        # silent one.
+        paths=tuple(c.sampling_path(key) for key in (
+            "n",
+            "seed",
+            "presence_penalty",
+            "frequency_penalty",
+            "logprobs",
+            "top_logprobs",
+        )),
+        conditional=False,
+        design_ref="§3.2.2 · §3.3.1 · §3.3.1a · KBR-305",
+        scope=_ANTHROPIC_FAMILY + ("bedrock", "ollama_cloud"),
     ),
 )
 

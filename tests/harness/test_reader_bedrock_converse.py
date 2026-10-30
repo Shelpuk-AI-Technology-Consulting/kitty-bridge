@@ -429,6 +429,45 @@ class TestToolChoice:
 
         assert projected.envelope.extra["tool_choice"] == "tool:get_weather"
 
+    def test_an_empty_name_on_a_tool_selector_raises(self) -> None:
+        """``{"tool": {"name": ""}}`` → ``"tool:"`` silently is a defect (KBR-303).
+
+        Empty ``name`` passes ``isinstance(target.get("name"), str)`` and
+        produces the never-corresponds-to-anything selection string.
+        Absent / non-string keep their residualise posture at
+        ``toolConfig.toolChoice.tool`` — controls below.
+        """
+        with pytest.raises(
+            c.UnreadableBodyError, match=r"toolConfig\.toolChoice\.tool\.name"
+        ):
+            project(
+                {
+                    "messages": [],
+                    "toolConfig": {"toolChoice": {"tool": {"name": ""}}},
+                }
+            )
+
+    @pytest.mark.parametrize("name", [None, 42])
+    def test_a_tool_name_absent_or_non_string_residualises(self, name: Any) -> None:
+        """An absent / non-string ``name`` keeps the residualise posture.
+
+        The block residualises whole at ``toolConfig.toolChoice.tool`` —
+        the "identified loss" posture the reader already carries for an
+        unrecognised shape. Empty ``name`` raises (test above); a future
+        widening of the empty-only guard to absent / non-string fails
+        this control loudly.
+        """
+        tool: dict[str, Any] = {}
+        if name is not None:
+            tool["name"] = name
+
+        projected = project_untotalled(
+            {"messages": [], "toolConfig": {"toolChoice": {"tool": tool}}}
+        )
+
+        assert projected.envelope.extra.get("tool_choice") is None
+        assert projected.residual == {"toolConfig.toolChoice.tool": tool}
+
     def test_none_residualises_at_its_own_path(self) -> None:
         """``none`` is not in Converse's published ``ToolChoice`` union.
 

@@ -225,6 +225,7 @@ _SETTINGS_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "CLAUDE_CODE_TMPDIR",
     "ENABLE_CLAUDEAI_MCP_SERVERS",
 )
 
@@ -270,12 +271,17 @@ class ClaudeAdapter(LauncherAdapter):
     ) -> SpawnConfig:
         """Build the spawn configuration for the Claude Code child process.
 
-        Sets the bridge URL, auth, and model env vars. When ``context_tokens``
-        is a positive number it is also exported as
-        ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` so Claude Code uses the model's
-        real context window instead of its 200K fallback for non-claude
-        models. Setting it for ``claude-*`` models is harmless — Claude Code
-        ignores the variable there.
+        Sets the bridge URL, auth, and model env vars. Always exports
+        ``CLAUDE_CODE_TMPDIR=tempfile.gettempdir()`` so Claude Code's
+        cross-session messaging daemon picks a user- or root-owned socket
+        dir (root-owned ``/tmp`` on Linux, per-user ``TMPDIR`` on macOS,
+        per-user ``%TEMP%`` on Windows); without it the daemon defaults to
+        ``/`` and prints a remediation hint on boxes where ``/`` is neither
+        (KBR-314). When ``context_tokens`` is a positive number it is also
+        exported as ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` so Claude Code uses
+        the model's real context window instead of its 200K fallback for
+        non-claude models. Setting it for ``claude-*`` models is harmless —
+        Claude Code ignores the variable there.
 
         Args:
             profile: Resolved profile with provider, model, and base_url.
@@ -289,20 +295,37 @@ class ClaudeAdapter(LauncherAdapter):
         """
         env_overrides = {
             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}",
-            "ANTHROPIC_API_KEY": resolved_key,
-            "ANTHROPIC_AUTH_TOKEN": "kitty-bridge-token",
             "ANTHROPIC_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": profile.model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": profile.model,
+            "CLAUDE_CODE_TMPDIR": tempfile.gettempdir(),
             "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         }
+        # Subscription traffic must retain Claude Code's own OAuth identity.
+        if profile.provider != "anthropic_subscription":
+            env_overrides["ANTHROPIC_API_KEY"] = resolved_key
+            env_overrides["ANTHROPIC_AUTH_TOKEN"] = "kitty-bridge-token"
         if context_tokens is not None and context_tokens > 0:
             env_overrides["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context_tokens)
+        env_clear = list(_CONFLICTING_ENV_VARS)
+        settings_env: dict[str, str] = {}
+        if profile.provider == "anthropic_subscription":
+            # Claude Code merges a --settings env block per variable, so
+            # omitting these keys would leave a user-scope value standing
+            # (direct Claude Code API use) — the child's env_clear cannot
+            # reach settings files. Pinning empty strings in the session file
+            # makes the launch authoritative that no API key participates.
+            # settings_env, not env_overrides: the process env must not
+            # carry the keys at all.
+            settings_env["ANTHROPIC_API_KEY"] = ""
+            settings_env["ANTHROPIC_AUTH_TOKEN"] = ""
+            env_clear.extend(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
         return SpawnConfig(
             cli_args=[],
             env_overrides=env_overrides,
-            env_clear=list(_CONFLICTING_ENV_VARS),
+            env_clear=env_clear,
+            settings_env=settings_env,
         )
 
     @property

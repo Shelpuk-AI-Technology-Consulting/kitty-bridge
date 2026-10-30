@@ -669,6 +669,30 @@ class TestMapError:
         assert "Bad request" in str(error)
         assert error.http_status == 400
 
+    def test_map_error_400_carries_bounded_body_with_empty_message(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """The 2026-10-29 incident shape: empty message, the body says why (R1).
+
+        The exception text folds only the upstream ``message`` field, so an
+        empty one renders as ``OpenAI subscription error 400: `` — the
+        structured body must still ride the error for the DEBUG diagnostic.
+        """
+        error = adapter.map_error(400, {"error": {"type": "invalid_request", "message": "", "param": "model"}})
+        assert str(error).endswith("OpenAI subscription error 400: ")
+        assert error.upstream_body is not None
+        assert "invalid_request" in error.upstream_body
+        assert '"param"' in error.upstream_body
+
+    def test_map_error_body_is_bounded(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """A huge upstream body is truncated before it reaches any log (R1)."""
+        error = adapter.map_error(400, {"error": {"message": "x" * 10_000}})
+        assert error.upstream_body is not None
+        assert len(error.upstream_body) <= 500
+
+    def test_map_error_empty_body_yields_no_carriage(self, adapter: OpenAISubscriptionAdapter) -> None:
+        """No upstream body means nothing to log — the attribute is None."""
+        error = adapter.map_error(400, {})
+        assert error.upstream_body is None
+
     def test_map_error_401_mentions_reauth(self, adapter: OpenAISubscriptionAdapter) -> None:
         error = adapter.map_error(401, {"error": {"message": "Unauthorized", "code": "invalid_api_key"}})
         assert "re-authenticate" in str(error)

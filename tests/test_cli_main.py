@@ -849,3 +849,164 @@ class TestCorruptionReceivers:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "corrupt" in captured.out + captured.err
+
+    def test_launch_target_balancing_all_subscription_pool_rejected_for_non_claude(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An all-subscription pool has no eligible member for a non-Claude launcher."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        member = SimpleNamespace(
+            name="sub-only",
+            provider="anthropic_subscription",
+            model="claude-opus",
+            auth_ref=str(uuid.uuid4()),
+            provider_config={},
+            backup=False,
+        )
+        _balancing_stubs(monkeypatch, member)
+
+        exit_code = cli_main._launch_target_balancing(
+            object(),
+            SimpleNamespace(name="ci-pool"),
+            SimpleNamespace(get=lambda ref: "sk-test-key"),
+            [],
+        )
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "no members eligible" in captured.out + captured.err
+
+
+class TestBridgeModeSubscriptionEligibility:
+    """``kitty bridge`` applies the Claude-only eligibility gate like the launcher.
+
+    A subscription profile has no API key to resolve, so bridge mode must gate
+    on eligibility before any credential lookup: a direct subscription profile
+    is refused with the shared message, a balancing pool skips subscription
+    members, and an all-subscription pool refuses with the no-members message.
+    """
+
+    @staticmethod
+    def _subscription_profile(name: str = "sub") -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            name=name,
+            provider="anthropic_subscription",
+            model="claude-sonnet-4-6",
+            auth_ref="sub-ref",
+            provider_config={},
+            backup=False,
+        )
+
+    @staticmethod
+    def _untouchable_cred_store() -> object:
+        from types import SimpleNamespace
+
+        def _fail(ref: str) -> str:
+            raise AssertionError(f"credential store must not be consulted (got ref {ref!r})")
+
+        return SimpleNamespace(get=_fail)
+
+    def test_run_bridge_refuses_a_subscription_profile_before_credential_lookup(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The direct path names the launcher requirement, not a missing key."""
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        seen = _record_bridge_kwargs(monkeypatch)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli_main._run_bridge(self._subscription_profile(), self._untouchable_cred_store(), validate=False)
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        # The console wraps long lines; compare on collapsed whitespace.
+        flattened = " ".join((captured.out + captured.err).split())
+        assert "requires the Claude Code launcher" in flattened
+        assert "No API key" not in flattened
+        assert seen == [], "BridgeServer must not be constructed for an ineligible profile"
+
+    def test_run_bridge_balancing_all_subscription_pool_refuses_with_the_no_members_message(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An all-subscription pool has no member for generic bridge mode."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        seen = _record_bridge_kwargs(monkeypatch)
+
+        class FakeProfileStore:
+            def __init__(self, *args, **kwargs):
+                """Accept and ignore the real store's arguments."""
+
+        class FakeProfileResolver:
+            def __init__(self, store):
+                """Accept and ignore the store."""
+
+            def resolve_balancing(self, name):
+                """Return one subscription member."""
+                return [self._subscription_profile()]
+
+            def _subscription_profile(self):
+                return TestBridgeModeSubscriptionEligibility._subscription_profile()
+
+        monkeypatch.setattr("kitty.profiles.store.ProfileStore", FakeProfileStore)
+        monkeypatch.setattr("kitty.profiles.resolver.ProfileResolver", FakeProfileResolver)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli_main._run_bridge_balancing(
+                SimpleNamespace(name="ci-pool"), self._untouchable_cred_store(), validate=False
+            )
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "no members eligible" in captured.out + captured.err
+        assert seen == [], "BridgeServer must not be constructed without an eligible member"
+
+    def test_run_bridge_balancing_mixed_pool_skips_the_subscription_member(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Only eligible members are wired; the subscription member is never read."""
+        from types import SimpleNamespace
+
+        import kitty.cli.main as cli_main
+
+        _patch_bridge_prerequisites(monkeypatch)
+        seen = _record_bridge_kwargs(monkeypatch)
+        members = [self._subscription_profile(name="sub"), _profile_stub(name="metered")]
+        resolved_refs: list[str] = []
+
+        class FakeProfileStore:
+            def __init__(self, *args, **kwargs):
+                """Accept and ignore the real store's arguments."""
+
+        class FakeProfileResolver:
+            def __init__(self, store):
+                """Accept and ignore the store."""
+
+            def resolve_balancing(self, name):
+                """Return the mixed member list."""
+                return members
+
+        monkeypatch.setattr("kitty.profiles.store.ProfileStore", FakeProfileStore)
+        monkeypatch.setattr("kitty.profiles.resolver.ProfileResolver", FakeProfileResolver)
+
+        def _record_get(ref: str) -> str:
+            resolved_refs.append(ref)
+            return "sk-test-key"
+
+        with pytest.raises(_WiringSentinel):
+            cli_main._run_bridge_balancing(
+                SimpleNamespace(name="ci-pool"), SimpleNamespace(get=_record_get), validate=False
+            )
+
+        assert resolved_refs == ["ref-1"], "only the eligible member's credential may be resolved"
+        wired = [backend[2].name for backend in seen[0]["backends"]]
+        assert wired == ["metered"]

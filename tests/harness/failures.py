@@ -1,6 +1,8 @@
 """Scripted failure builders for the bridge recorder.
 
-`.system_design/TEST_SUITE.md` §6.3.1, §7.2 · plan task **T-B4** (KBR-43).
+`.system_design/TEST_SUITE.md` §6.3.1, §7.2 · plan task **T-B4** (KBR-43),
+widened by **KBR-302** to serve the Gemini and OpenAI Responses wire grammars
+as well as the original two (Anthropic Messages, Chat Completions).
 
 T-W4 ships only the minimal success responders. This module builds the
 ``Responder`` closures for everything that can go wrong: SSE variants, error
@@ -8,6 +10,13 @@ statuses, Cloudflare blocks, empty responses, context-too-large rejections, and
 mid-stream disconnects at each of §6.3.1's four injection points. Each builder
 produces a deterministic byte sequence — no timing, no sleeps — built on the
 ``Reply`` API the recorder exposes.
+
+The KBR-302 widening added data-only Gemini chunk builders and event-framed
+Responses chunk builders alongside the existing Anthropic Messages and Chat
+Completions builders. The library still serves only the formats its
+:data:`_SERVED_FORMATS` frozenset names — Bedrock Converse and Ollama Chat
+remain out of scope — but a wider Gemini/Responses test cell (T-I8 sibling
+sites) can now drive both routes end to end through the same builder API.
 
 **Import discipline.** The library imports nothing from ``src/kitty``. F9's
 guard in :mod:`tests.harness.test_failures` enforces it structurally, so a
@@ -38,6 +47,7 @@ __all__ = [
     "sse_frame",
     "cc_chunk",
     "CC_DONE",
+    "format_gemini_sse_chunk",
     "error_status",
     "cloudflare_block",
     "context_too_large",
@@ -54,6 +64,24 @@ __all__ = [
 
 #: A literal the §7.2 documented shape uses to terminate CC streams.
 CC_DONE: bytes = b"data: [DONE]\n\n"
+
+
+def format_gemini_sse_chunk(data: dict[str, Any]) -> bytes:
+    """Format a Gemini SSE chunk (``data: <json>\\n\\n``; no ``event:`` line).
+
+    Gemini's wire grammar is data-only — the bridge's Gemini reader keys on the
+    payload's ``candidates`` and ``error`` keys rather than on an SSE event
+    name. Mirrors the shape ``kitty.bridge.gemini.events.format_gemini_sse``
+    emits, kept as a module-private helper here so the library never imports
+    ``src/kitty`` (F9).
+
+    Args:
+        data: The chunk's JSON-serialisable body.
+
+    Returns:
+        The Gemini chunk bytes.
+    """
+    return f"data: {json.dumps(data)}\n\n".encode()
 
 
 def sse_frame(event: str, data: dict[str, Any] | str) -> bytes:
@@ -332,6 +360,272 @@ def _frames_for_cc(point: InjectionPoint) -> tuple[bytes, ...]:
     raise ValueError(f"unknown injection point: {point!r}")
 
 
+# ---------------------------------------------------------------------------
+# Gemini (data-only SSE) — KBR-302.
+# ---------------------------------------------------------------------------
+
+#: Per-format stable IDs the Gemini and Responses builders stamp into their
+#: minimal-success and empty-response envelopes. Split per format so the
+#: Responses wire does not carry Gemini-named IDs — the strings are
+#: observable on the wire and a provider can fingerprint them (review-bot
+#: note, KBR-302 round 2).
+_GEMINI_MODEL_ID = "recorder-gemini-model"
+_GEMINI_RESPONSE_ID = "recorder-gemini-response"
+_RESPONSES_MODEL_ID = "recorder-responses-model"
+_RESPONSES_RESPONSE_ID = "recorder-responses-response"
+
+
+def _gemini_role_chunk() -> bytes:
+    """A Gemini role-only contentless chunk (the empty-ladder trigger on Gemini).
+
+    Returns:
+        ``data: {"candidates":[{"content":{"role":"model","parts":[]}}]}`` — no
+        text in the parts, no finishReason on the candidate. The Gemini reader
+        treats this as contentless.
+    """
+    return format_gemini_sse_chunk(
+        {"candidates": [{"content": {"role": "model", "parts": []}}]}
+    )
+
+
+def _gemini_text_chunk(text: str = _TEXT) -> bytes:
+    """A Gemini content-bearing chunk with one text part.
+
+    Args:
+        text: The visible text content; defaults to :data:`_TEXT`.
+
+    Returns:
+        ``data: {"candidates":[{"content":{"role":"model","parts":[{"text":...}]}}]}``
+    """
+    return format_gemini_sse_chunk(
+        {"candidates": [{"content": {"role": "model", "parts": [{"text": text}]}}]}
+    )
+
+
+def _gemini_finish_chunk(reason: str = "STOP") -> bytes:
+    """A Gemini terminal chunk carrying the chosen stop ``reason``.
+
+    Args:
+        reason: The ``finishReason`` value — the bridge's truncation reader
+            keys on this. Defaults to ``"STOP"``; the KBR-99 R4 widening
+            moves the truncation D3 trigger onto a non-default value (e.g.
+            ``"MAX_TOKENS"``).
+
+    Returns:
+        ``data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":reason}]}``
+    """
+    return format_gemini_sse_chunk(
+        {"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": reason}]}
+    )
+
+
+def _gemini_in_stream_error_chunk(
+    *, code: int = 502, message: str = "upstream blew up", status: str = "UNAVAILABLE"
+) -> bytes:
+    """A Gemini in-stream error chunk (KBR-99 R2).
+
+    Args:
+        code: The numeric error code the bridge's reader classifies.
+        message: The human-readable error message.
+        status: The string status (e.g. ``"UNAVAILABLE"``).
+
+    Returns:
+        ``data: {"error":{"code":<int>,"message":<str>,"status":<str>}}``.
+    """
+    return format_gemini_sse_chunk(
+        {"error": {"code": code, "message": message, "status": status}}
+    )
+
+
+def _frames_for_gemini(point: InjectionPoint) -> tuple[bytes, ...]:
+    """The bytes :func:`drop_at` writes for a Gemini injection point."""
+    if point is InjectionPoint.BEFORE_FIRST_BYTE:
+        return ()
+    if point is InjectionPoint.AFTER_TEXT:
+        return (_gemini_role_chunk(), _gemini_text_chunk())
+    if point is InjectionPoint.MID_TOOL_ARGUMENTS:
+        # A functionCall part carries the tool name; the args are partial.
+        return (
+            format_gemini_sse_chunk(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "role": "model",
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "name": _TOOL_NAME,
+                                            "args": {"arg1": "v"},  # partial
+                                        }
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ),
+        )
+    if point is InjectionPoint.BEFORE_TERMINAL:
+        return (_gemini_role_chunk(), _gemini_text_chunk(), _gemini_finish_chunk())
+    raise ValueError(f"unknown injection point: {point!r}")
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses (event-framed SSE) — KBR-302.
+# ---------------------------------------------------------------------------
+
+#: Sequence number the Responses builder emits on the start/delta/completed
+#: events. A real Responses stream uses monotonically increasing numbers per
+#: event; the library emits 0/1/2 so the byte sequence is deterministic and
+#: the reader's sequence assertions don't depend on a hidden counter.
+_RESPONSES_SEQ_CREATED = 0
+_RESPONSES_SEQ_DELTA = 1
+_RESPONSES_SEQ_COMPLETED = 2
+
+
+def _responses_event(event: str, payload: dict[str, Any]) -> bytes:
+    """Build one OpenAI Responses SSE frame (``event:`` line + ``data:`` line).
+
+    Args:
+        event: The event name (``"response.created"`` etc).
+        payload: The event's JSON body.
+
+    Returns:
+        ``event: <name>\\ndata: <json>\\n\\n`` (the bridge's Responses reader
+        keys on the ``type`` field inside the payload).
+    """
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode()
+
+
+def _responses_created_event() -> bytes:
+    """``response.created`` — the lifecycle opening on a Responses stream.
+
+    Returns:
+        ``event: response.created\\ndata: {"type":"response.created","sequence_number":0,"response":{...}}``
+    """
+    return _responses_event(
+        "response.created",
+        {
+            "type": "response.created",
+            "sequence_number": _RESPONSES_SEQ_CREATED,
+            "response": {
+                "id": _RESPONSES_RESPONSE_ID,
+                "object": "response",
+                "status": "in_progress",
+                "model": _RESPONSES_MODEL_ID,
+                "output": [],
+                "usage": None,
+            },
+        },
+    )
+
+
+def _responses_text_delta_event(text: str = _TEXT) -> bytes:
+    """``response.output_text.delta`` — the content-bearing chunk.
+
+    Args:
+        text: The visible text content; defaults to :data:`_TEXT`.
+
+    Returns:
+        ``event: response.output_text.delta\\ndata: {...,"delta":"<text>"}``
+    """
+    return _responses_event(
+        "response.output_text.delta",
+        {
+            "type": "response.output_text.delta",
+            "sequence_number": _RESPONSES_SEQ_DELTA,
+            "delta": text,
+        },
+    )
+
+
+def _responses_completed_event(*, status: str = "completed") -> bytes:
+    """``response.completed`` — the terminal chunk on a Responses stream.
+
+    Args:
+        status: Either ``"completed"`` (success) or ``"incomplete"``
+            (truncation; the KBR-99 R4 widening moves the truncation D3
+            trigger onto ``"incomplete"`` with ``incomplete_details.reason``).
+
+    Returns:
+        ``event: response.completed\\ndata: {...,"response":{"status":"<status>",...}}``
+    """
+    response: dict[str, Any] = {
+        "id": _RESPONSES_RESPONSE_ID,
+        "object": "response",
+        "status": status,
+        "model": _RESPONSES_MODEL_ID,
+        "output": [],
+        "usage": None,
+    }
+    if status == "incomplete":
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    return _responses_event(
+        "response.completed",
+        {"type": "response.completed", "sequence_number": _RESPONSES_SEQ_COMPLETED, "response": response},
+    )
+
+
+def _responses_error_event(
+    *, code: str = "upstream_error", message: str = "upstream blew up"
+) -> bytes:
+    """``error`` — a Responses in-stream error chunk (KBR-99 R2).
+
+    Args:
+        code: The error code string the bridge's reader classifies.
+        message: The human-readable message.
+
+    Returns:
+        ``event: error\\ndata: {"type":"error","code":"<code>","message":"<msg>"}``
+    """
+    return _responses_event(
+        "error",
+        {"type": "error", "sequence_number": _RESPONSES_SEQ_COMPLETED, "code": code, "message": message},
+    )
+
+
+def _frames_for_responses(point: InjectionPoint) -> tuple[bytes, ...]:
+    """The bytes :func:`drop_at` writes for an OpenAI Responses injection point.
+
+    KBR-99 R5: Responses has no pre-content ``event: error`` equivalent
+    (errors come inline on regular events). The empty/error pre-emission
+    shapes for Responses are served through the AFTER_TEXT path's
+    `response.created` + `response.output_text.delta` (a contentless
+    Responses stream ends without a delta event, while a content-bearing one
+    ends with `response.completed` — the §6.3.1 row 4 oracle). The cell
+    for the inline `event: error` is `_responses_error_event`, exposed for
+    the §6.3.1 grid consumers that need it; this function does not emit
+    error events for any of the four injection points because the
+    streaming-recovery grid reaches them through `frames_for` rather than
+    through the `error` event (review-bot note, KBR-302 round 2).
+    """
+    if point is InjectionPoint.BEFORE_FIRST_BYTE:
+        return ()
+    if point is InjectionPoint.AFTER_TEXT:
+        return (_responses_created_event(), _responses_text_delta_event())
+    if point is InjectionPoint.MID_TOOL_ARGUMENTS:
+        # A function_call_arguments delta is partial — no ``response.completed``.
+        return (
+            _responses_created_event(),
+            _responses_event(
+                "response.function_call_arguments.delta",
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "sequence_number": _RESPONSES_SEQ_DELTA,
+                    "delta": _PARTIAL_TOOL_JSON,
+                },
+            ),
+        )
+    if point is InjectionPoint.BEFORE_TERMINAL:
+        return (
+            _responses_created_event(),
+            _responses_text_delta_event(),
+            _responses_completed_event(),
+        )
+    raise ValueError(f"unknown injection point: {point!r}")
+
+
 def frames_for(fmt: WireFormat, point: InjectionPoint) -> tuple[bytes, ...]:
     """The byte sequence ``drop_at(fmt, point)`` writes before aborting.
 
@@ -347,15 +641,20 @@ def frames_for(fmt: WireFormat, point: InjectionPoint) -> tuple[bytes, ...]:
         The frames in order; empty for ``BEFORE_FIRST_BYTE``.
 
     Raises:
-        ValueError: When ``fmt`` is outside the two formats this library serves
-            or ``point`` is unrecognised.
+        ValueError: When ``fmt`` is outside the four formats this library serves
+            (Anthropic, Chat Completions, Gemini, OpenAI Responses) or
+            ``point`` is unrecognised.
     """
     if fmt is WireFormat.ANTHROPIC_MESSAGES:
         return _frames_for_anthropic(point)
     if fmt is WireFormat.CHAT_COMPLETIONS:
         return _frames_for_cc(point)
+    if fmt is WireFormat.GEMINI:
+        return _frames_for_gemini(point)
+    if fmt is WireFormat.OPENAI_RESPONSES:
+        return _frames_for_responses(point)
     raise ValueError(
-        f"this library serves {{ANTHROPIC_MESSAGES, CHAT_COMPLETIONS}}, not {fmt.value}"
+        f"this library serves {{ANTHROPIC_MESSAGES, CHAT_COMPLETIONS, GEMINI, OPENAI_RESPONSES}}, not {fmt.value}"
     )
 
 
@@ -364,9 +663,16 @@ def frames_for(fmt: WireFormat, point: InjectionPoint) -> tuple[bytes, ...]:
 # ---------------------------------------------------------------------------
 
 
-#: The two formats this library serves — the primary recorder's served set.
+#: The four formats this library serves — the primary recorder's served set,
+#: widened in KBR-302 to drive the Gemini and OpenAI Responses stream
+#: handlers end to end.
 _SERVED_FORMATS: frozenset[WireFormat] = frozenset(
-    {WireFormat.ANTHROPIC_MESSAGES, WireFormat.CHAT_COMPLETIONS}
+    {
+        WireFormat.ANTHROPIC_MESSAGES,
+        WireFormat.CHAT_COMPLETIONS,
+        WireFormat.GEMINI,
+        WireFormat.OPENAI_RESPONSES,
+    }
 )
 
 
@@ -377,10 +683,10 @@ def _check_fmt(fmt: WireFormat) -> None:
         fmt: The format the caller asked for.
 
     Raises:
-        ValueError: When ``fmt`` is not one of the two formats §7.2 assigns to
-            the primary recorder, or is not a :class:`WireFormat` at all. The
-            message reads ``fmt.value`` only after the type check, so a
-            non-enum caller sees this library's ``ValueError`` rather than an
+        ValueError: When ``fmt`` is not one of the four formats this library
+            serves, or is not a :class:`WireFormat` at all. The message reads
+            ``fmt.value`` only after the type check, so a non-enum caller
+            sees this library's ``ValueError`` rather than an
             ``AttributeError`` from the interpolation.
     """
     served = sorted(f.value for f in _SERVED_FORMATS)
@@ -423,6 +729,15 @@ def error_status(
             "type": "error",
             "error": {"type": error_type, "message": message},
         }
+    elif fmt is WireFormat.GEMINI:
+        # The Gemini error envelope carries the numeric code and a string
+        # status — the shape `kitty.bridge.gemini`'s reader (and Google's
+        # documented errors) use.
+        body = {"error": {"code": status, "message": message, "status": error_type}}
+    elif fmt is WireFormat.OPENAI_RESPONSES:
+        # The Responses API's non-streaming error envelope mirrors Chat
+        # Completions' `{"error": {...}}` with the message/type/code triple.
+        body = {"error": {"message": message, "type": error_type, "code": str(status)}}
     else:
         # `code` carries the numeric status as a string — the bridge's
         # `_extract_error_fields` coerces with `str(...)` either way, but a
@@ -512,6 +827,28 @@ def context_too_large(
                 "message": "prompt is too long: 250000 tokens > 8192 maximum context length",
             },
         }
+    elif fmt is WireFormat.GEMINI:
+        body = {
+            "error": {
+                "code": 400,
+                "message": "prompt is too long: 250000 tokens > 8192 maximum context length",
+                "status": "INVALID_ARGUMENT",
+            }
+        }
+    elif fmt is WireFormat.OPENAI_RESPONSES:
+        # The Responses API's rejection envelope mirrors `error_status`'s —
+        # the message/type/code triple with a stringified code. Written as
+        # its own branch rather than falling through to the CC `else:` so
+        # the per-format shape stays explicit (review-bot note, KBR-302
+        # round 1): a future divergence between the two envelopes would
+        # otherwise be silently shared.
+        body = {
+            "error": {
+                "message": "This model's maximum context length is 8192 tokens. Please reduce the length.",
+                "type": "invalid_request_error",
+                "code": str(status),
+            }
+        }
     else:
         # `code` as a string, matching `error_status`'s CC envelope — a
         # consistent contract across both builders, and the shape real
@@ -533,6 +870,79 @@ def context_too_large(
         await response.write_eof()
 
     return responder
+
+
+def _gemini_empty_success_body() -> dict[str, Any]:
+    """The Gemini non-streaming empty body: one candidate, empty parts, STOP.
+
+    Module-private so :mod:`tests.harness.test_failures` can pin the exact
+    JSON shape without driving the responder through the recorder (which
+    deliberately stays two-format; KBR-302 round 2).
+
+    Returns:
+        The JSON-serialisable empty-success body.
+    """
+    return {
+        "candidates": [
+            {"content": {"role": "model", "parts": []}, "finishReason": "STOP"}
+        ],
+        "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 0},
+    }
+
+
+def _responses_empty_success_body() -> dict[str, Any]:
+    """The Responses non-streaming empty body: completed status, empty output.
+
+    Returns:
+        The JSON-serialisable empty-success body.
+    """
+    return {
+        "id": _RESPONSES_RESPONSE_ID,
+        "object": "response",
+        "status": "completed",
+        "model": _RESPONSES_MODEL_ID,
+        "output": [],
+        "usage": None,
+    }
+
+
+def _gemini_content_success_body() -> dict[str, Any]:
+    """The Gemini non-streaming minimal success: one candidate, one text part, STOP.
+
+    Returns:
+        The JSON-serialisable minimal-success body.
+    """
+    return {
+        "candidates": [
+            {
+                "content": {"role": "model", "parts": [{"text": _TEXT}]},
+                "finishReason": "STOP",
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+    }
+
+
+def _responses_content_success_body() -> dict[str, Any]:
+    """The Responses non-streaming minimal success: one message output item.
+
+    Returns:
+        The JSON-serialisable minimal-success body.
+    """
+    return {
+        "id": _RESPONSES_RESPONSE_ID,
+        "object": "response",
+        "status": "completed",
+        "model": _RESPONSES_MODEL_ID,
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": _TEXT}],
+            }
+        ],
+        "usage": None,
+    }
 
 
 def empty_response(
@@ -597,6 +1007,29 @@ def empty_response(
 
         return responder
 
+    if stream and fmt is WireFormat.GEMINI:
+        # F4.e (KBR-302) — the content-less Gemini completion: role chunk +
+        # STOP finish chunk, both data-only, no text part anywhere.
+        async def responder(captured: CapturedRequest, response: Reply) -> None:
+            await response.begin(200, {"Content-Type": "text/event-stream"})
+            await response.write(_gemini_role_chunk())
+            await response.write(_gemini_finish_chunk())
+            await response.write_eof()
+
+        return responder
+
+    if stream and fmt is WireFormat.OPENAI_RESPONSES:
+        # F4.f (KBR-302) — the content-less Responses completion:
+        # response.created + response.completed(status="completed"), no
+        # output_text delta anywhere.
+        async def responder(captured: CapturedRequest, response: Reply) -> None:
+            await response.begin(200, {"Content-Type": "text/event-stream"})
+            await response.write(_responses_created_event())
+            await response.write(_responses_completed_event())
+            await response.write_eof()
+
+        return responder
+
     # Non-streaming: explicit empty shape, NOT `minimal_success_body` which carries
     # non-empty content. The two formats' empty envelopes differ.
     if fmt is WireFormat.ANTHROPIC_MESSAGES:
@@ -609,6 +1042,10 @@ def empty_response(
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 1, "output_tokens": 1},
         }
+    elif fmt is WireFormat.GEMINI:
+        body = _gemini_empty_success_body()
+    elif fmt is WireFormat.OPENAI_RESPONSES:
+        body = _responses_empty_success_body()
     else:
         body = {
             "id": "chatcmpl-kbr-tb4",
@@ -698,13 +1135,72 @@ def success(
     """
     _check_fmt(fmt)
 
-    if stream:
+    # The two formats the recorder's `minimal_success_*` owns delegate to it —
+    # "what a minimal success is" stays in one place for the shapes §7.2
+    # assigns the recorder. The two formats KBR-302 widened (Gemini, OpenAI
+    # Responses) are served inline here because the recorder deliberately
+    # stays two-format; the library's own minimal shapes are the byte source.
+    if stream and fmt not in (WireFormat.GEMINI, WireFormat.OPENAI_RESPONSES):
         chunks = minimal_success_stream(fmt)
 
         async def responder(captured: CapturedRequest, response: Reply) -> None:
             await response.begin(200, {"Content-Type": "text/event-stream"})
             for chunk in chunks:
                 await response.write(chunk)
+            await response.write_eof()
+
+        return responder
+
+    if stream and fmt is WireFormat.GEMINI:
+        chunks_gemini = (
+            _gemini_role_chunk(),
+            _gemini_text_chunk(),
+            _gemini_finish_chunk(),
+        )
+
+        async def responder(captured: CapturedRequest, response: Reply) -> None:
+            await response.begin(200, {"Content-Type": "text/event-stream"})
+            for chunk in chunks_gemini:
+                await response.write(chunk)
+            await response.write_eof()
+
+        return responder
+
+    if stream and fmt is WireFormat.OPENAI_RESPONSES:
+        chunks_responses = (
+            _responses_created_event(),
+            _responses_text_delta_event(),
+            _responses_completed_event(),
+        )
+
+        async def responder(captured: CapturedRequest, response: Reply) -> None:
+            await response.begin(200, {"Content-Type": "text/event-stream"})
+            for chunk in chunks_responses:
+                await response.write(chunk)
+            await response.write_eof()
+
+        return responder
+
+    if fmt is WireFormat.GEMINI:
+        body_success = _gemini_content_success_body()
+        payload = json.dumps(body_success).encode()
+
+        async def responder(captured: CapturedRequest, response: Reply) -> None:
+            response.content_length = len(payload)
+            await response.begin(200, {"Content-Type": "application/json"})
+            await response.write(payload)
+            await response.write_eof()
+
+        return responder
+
+    if fmt is WireFormat.OPENAI_RESPONSES:
+        body_success = _responses_content_success_body()
+        payload = json.dumps(body_success).encode()
+
+        async def responder(captured: CapturedRequest, response: Reply) -> None:
+            response.content_length = len(payload)
+            await response.begin(200, {"Content-Type": "application/json"})
+            await response.write(payload)
             await response.write_eof()
 
         return responder

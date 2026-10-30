@@ -300,18 +300,30 @@ class TestTheParserReadsTheDesignDocument:
 
     def test_the_parser_reads_both_tables(self, markdown: str) -> None:
         """A parser that read only §3.2.1 would still look healthy on the M rows."""
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 27
-        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 52
+        # KBR-59 (T-D10) lands M30/M31/M32 on top of main's 30 (the 27
+        # pre-KBR-55 rows plus KBR-55's M27/M28/M29), and KBR-309 appends
+        # M33 after them: the bridge-level table goes from 30 to 34.
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("M")]) == 34
+        assert len([i for i in r.parse_register_markdown(markdown).live_ids if i.startswith("P")]) == 53
 
     def test_the_parser_reads_the_unconditional_list(self, markdown: str) -> None:
         """§3.2.2's closing paragraph is the only place the exemption is written down."""
         parsed = r.parse_register_markdown(markdown)
 
-        assert len(parsed.unconditional_ids) == 48
-        # KBR-184: the four new unconditional ids (M26, P24, P31, P32) must
-        # appear in the published sentence alongside the long-standing
-        # M14/P20/P21 spot-checks.
-        assert {"M14", "P20", "P21", "M26", "P24", "P31", "P32"} <= set(parsed.unconditional_ids)
+        assert len(parsed.unconditional_ids) == 52
+        # KBR-55 + KBR-184 + KBR-305 + KBR-309: M27 and M29 are KBR-55's two
+        # unconditional ids (M28 is conditional and so belongs on the
+        # complement side, not in the unconditional sentence); P43 is
+        # KBR-305's new unconditional id; M33 is KBR-309's new
+        # unconditional id (id-renumbered from KBR-309's first-draft M27,
+        # then from M30 after KBR-59 took M30/M31/M32). The long-standing
+        # spot-checks
+        # (M14/P20/P21, the KBR-184 KBR-258 KBR-137 KBR-271 families) all
+        # still hold.
+        assert {
+            "M14", "P20", "P21", "M26", "P24", "P31", "P32",
+            "M27", "M29", "M33", "P43",
+        } <= set(parsed.unconditional_ids)
 
     def test_a_document_with_no_register_tables_is_an_error_not_an_empty_result(self) -> None:
         """An empty parse is the failure mode §6.2 exists to prevent.
@@ -935,13 +947,14 @@ class TestEveryScopeNamesRealProviders:
     def test_the_registry_read_finds_the_known_providers(self, registry: dict) -> None:
         """The self-check §6.2 requires — a parser regression cannot pass silently.
 
-        The count is pinned (a 24th adapter is a deliberate edit to this test,
-        exactly like the register's 79-row pin) and three members are named,
+        The count is pinned (a 25th adapter is a deliberate edit to this test,
+        exactly like the register's 79-row pin) and four members are named,
         including the file-class-split case the site↔scope check depends on
         (``zai_coding`` -> ``ZaiAnthropicAdapter``, defined in ``zai_anthropic.py``).
         """
-        assert len(registry) == 23
+        assert len(registry) == 24
         assert registry["anthropic"] == "AnthropicAdapter"
+        assert registry["anthropic_subscription"] == "AnthropicSubscriptionAdapter"
         assert registry["openai_subscription"] == "OpenAISubscriptionAdapter"
         assert registry["zai_coding"] == "ZaiAnthropicAdapter"
 

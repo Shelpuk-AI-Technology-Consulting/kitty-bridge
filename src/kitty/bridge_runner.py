@@ -133,10 +133,21 @@ def main() -> None:
         sys.exit(1)
 
     if isinstance(backend, BalancingProfile):
+        from kitty.profiles.eligibility import filter_launcher_eligible_profiles
         from kitty.profiles.resolver import ProfileResolver
 
         resolver = ProfileResolver(profile_store)
         members = resolver.resolve_balancing(backend.name)
+        # Bridge startup is launcher-agnostic, so the eligibility filter drops
+        # subscription members before any credential read; an empty remainder
+        # is a configuration error, not a fallback.
+        members = filter_launcher_eligible_profiles(members, None)
+        if not members:
+            print(
+                f"Balancing profile {backend.name!r} has no members eligible for 'bridge'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         backends = []
         for mp in members:
             # KBR-87: a corrupt stored value reports cleanly and exits, where
@@ -177,6 +188,17 @@ def main() -> None:
         )
     else:
         profile = backend
+        # The Claude-only gate runs before any credential lookup: bridge
+        # startup is launcher-agnostic, so a subscription profile is
+        # ineligible here by definition.
+        from kitty.profiles.eligibility import ProfileEligibilityError, require_launcher_eligible_profile
+
+        try:
+            require_launcher_eligible_profile(profile, None)
+        except ProfileEligibilityError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
         # KBR-87: a corrupt stored value reports cleanly and exits, where
         # today's missing-key path does.
         try:
