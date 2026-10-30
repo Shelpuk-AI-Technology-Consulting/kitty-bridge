@@ -1011,16 +1011,22 @@ class TestMutationRemeasureResumeLoop:
     def test_the_upload_records_the_measured_sources(self):
         """The artifact carries the fingerprint the staleness gate reads.
 
-        The fingerprint is written by an ``always()`` step ahead of the
-        upload, so a partial tree preserved at the soft deadline still
-        carries it. Deliberately no ``mkdir``: a run that died before
-        mutmut generated anything must fail the write and publish no
-        unusable artifact.
+        The fingerprint is a provenance claim, so it is written by a
+        ``success()`` step, not ``always()`` (review round 9): a leg whose
+        run failed early never measured this checkout's scope, and
+        stamping HEAD's hash onto the restored tree it left behind would
+        read that stale tree as current on the next leg -- the same
+        silent-green the gate exists to close. Soft-deadline legs still
+        stamp, because the run step exits 0 on the timeout codes and the
+        tree on disk is then genuinely this checkout's scope.
+        Deliberately no ``mkdir``: a run that died before mutmut
+        generated anything must fail the write and publish no unusable
+        artifact.
         """
         step = self._step(self._FINGERPRINT)
 
-        assert step.get("if") == "always()", (
-            "the fingerprint must ride along with every uploaded tree"
+        assert step.get("if") == "success()", (
+            "a failed leg must not stamp its restored tree as current"
         )
         assert "git rev-parse HEAD:src/kitty > mutants/TREE_SHA" in step["run"]
         assert "mkdir" not in step["run"], (

@@ -281,18 +281,22 @@ jobs:
         if: always()
         run: python scripts/aggregate_mutation_baseline.py || true
 
-      # `if: always()` like the upload it precedes: a partial tree is worth
-      # keeping, and the fingerprint must ride along with whatever is
-      # uploaded -- it is what lets the next leg tell a current tree from a
-      # stale one (the restore step's staleness gate). Deliberately no
-      # `mkdir`: if the run died before mutmut generated anything, this
-      # write fails and no tree is uploaded. One residual edge stays
-      # possible and is accepted: a restore that fails midway leaves the
-      # empty `mutants/` behind, so a TREE_SHA-only artifact can be
-      # published -- the next leg then fails loudly at the src/ copy, and
-      # the recovery is deleting that artifact.
+      # `if: success()`, not the upload's `always()` -- and that is the
+      # point (review round 9): the fingerprint is a PROVENANCE claim, and
+      # stamping it unconditionally would mark a tree this leg never
+      # measured as current. The run step exits 0 on the soft-deadline
+      # codes (124/130), so a partial-but-real tree still gets stamped; a
+      # genuinely failed leg's tree (say, a stats-phase abort -- the tree
+      # on disk is then still the restored one) uploads without a
+      # fingerprint and the next leg reads it stale, which is the safe
+      # direction. Deliberately no `mkdir`: if the run died before mutmut
+      # generated anything, this write fails and no tree is uploaded. One
+      # residual edge stays possible and is accepted: a restore that fails
+      # midway leaves the empty `mutants/` behind, so a TREE_SHA-only
+      # artifact can be published -- the next leg then fails loudly at the
+      # src/ copy, and the recovery is deleting that artifact.
       - name: Fingerprint the measured sources
-        if: always()
+        if: success()
         run: git rev-parse HEAD:src/kitty > mutants/TREE_SHA
 
       # `if: always()`: a run killed at the timeout (or failed mid-phase) is
