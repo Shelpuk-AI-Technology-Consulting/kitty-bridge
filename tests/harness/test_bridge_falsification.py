@@ -64,11 +64,11 @@ from harness.contract import CapturedRequest, WireFormat
 from harness.recorder import RecordingUpstream, Reply
 from kitty.providers.custom_openai import CustomOpenAIAdapter
 
-#: The format every defect below declares, so the one thing that differs between
-#: them is the defect itself.
 # KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
 pytestmark = pytest.mark.timeout(120)
 
+#: The format every defect below declares, so the one thing that differs between
+#: them is the defect itself.
 FORMAT = WireFormat.ANTHROPIC_MESSAGES
 
 

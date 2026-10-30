@@ -91,3 +91,52 @@ def test_the_profile_name_and_env_var_are_stable_strings() -> None:
     """
     assert MUTMUT_ENV_VAR == "MUTMUT_DEPENDENCY_DEPTH"
     assert PROFILE_NAME == "mutmut"
+
+
+def test_apply_loads_the_profile_under_mutmut_and_restores() -> None:
+    """``apply`` registers and loads the profile exactly when the variable is set.
+
+    ``apply`` is the switch ``tests/conftest.py`` actually calls; the rest of
+    this module pins the parts it is built from. Without this test the
+    module's entire effect is exercised by no CI gate (no gate runs mutmut),
+    so a typo in the registration call surfaces only as a mutation leg dying
+    with ``differing_executors``.
+
+    ``load_profile`` mutates global state: the test restores the ambient
+    profile by name in a ``finally``, so a failure here cannot re-suppress
+    health checks for the rest of the suite.
+    """
+    from hypothesis_mutmut_profile import apply
+
+    ambient_name = settings._current_profile  # noqa: SLF001 - no public reader
+    try:
+        apply(MUTMUT_ENV)
+        assert PROFILE_NAME in settings._profiles  # noqa: SLF001 - registration proof
+        assert HealthCheck.differing_executors in set(
+            settings.default.suppress_health_check
+        )
+    finally:
+        settings.load_profile(ambient_name)
+        assert HealthCheck.differing_executors not in set(
+            settings.default.suppress_health_check
+        )
+
+
+def test_apply_is_a_noop_without_the_mutmut_variable() -> None:
+    """An ordinary run's environment leaves the active profile untouched.
+
+    The suppression exists for mutmut's in-process double
+    ``pytest.main``; a gate leg or a developer run must keep whatever
+    profile the conftest chain loaded, byte for byte -- including the
+    case where the ambient profile already suppresses the check, where a
+    wrongly-eager ``apply`` would still be visible as a profile swap.
+    """
+    from hypothesis_mutmut_profile import apply
+
+    ambient_name = settings._current_profile  # noqa: SLF001 - no public reader
+    ambient = settings.default
+
+    apply(UNSET_ENV)
+
+    assert settings.default is ambient
+    settings.load_profile(ambient_name)

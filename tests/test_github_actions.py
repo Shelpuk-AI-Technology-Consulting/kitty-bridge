@@ -895,6 +895,13 @@ class TestMutationRemeasureResumeLoop:
         return matches[0]
 
     def test_the_restore_step_says_whether_it_restored(self):
+        """The restore step reports its outcome on both paths.
+
+        The run step's cold-start branch keys on the variable reading
+        "false", so a restore that found nothing must export that
+        explicitly -- an unset variable must not be mistaken for a
+        restored tree.
+        """
         script = self._step(self._RESTORE)["run"]
 
         # Both outcomes are exported, not only the happy path: the run
@@ -904,6 +911,13 @@ class TestMutationRemeasureResumeLoop:
         assert '>> "$GITHUB_ENV"' in script
 
     def test_the_run_step_falls_back_to_the_group_patterns_on_a_cold_start(self):
+        """Target selection covers all three resume states.
+
+        Explicit names when the restored tree knows what is left, the
+        "Nothing to test" short-circuit only for an exhausted RESTORED
+        tree, and the group's patterns on a cold start -- a treeless
+        run has no cached verdicts, so nothing is re-tested.
+        """
         script = self._step(self._RUN)["run"]
 
         # Explicit mutant names when the restored tree knows what is left --
@@ -925,6 +939,12 @@ class TestMutationRemeasureResumeLoop:
         assert "mutmut run $TARGETS" in script
 
     def test_the_complete_message_only_fires_for_a_restored_tree(self):
+        """The complete message is guarded on a restored tree.
+
+        A bare ``-z "$REMAINING"`` test is the silent green no-op this
+        class exists to prevent: an empty walk of a nonexistent tree
+        is not a completed measurement.
+        """
         script = self._step(self._RESOLVE)["run"]
 
         # The complete message sits inside the restored-tree guard; a bare
@@ -934,3 +954,26 @@ class TestMutationRemeasureResumeLoop:
             r'if \[ -z "\$REMAINING" \] && \[ "\$\{TREE_RESTORED[^"]*" = "true" \]',
             script,
         ), "the measurement-complete message must be guarded on a restored tree"
+
+    def test_the_remaining_walk_fails_loudly(self):
+        """A resolve-side crash must not read as a completed tree.
+
+        The REMAINING walk is the only thing that can call the
+        measurement complete, so its failure mode is the same silent
+        green no-op the cold-start fix closes: one corrupt .meta in a
+        restored tree (a mid-run kill can truncate one) must fail the
+        leg loudly, not vanish into an empty list. Pinned by the
+        absence of the swallow-and-continue form: the PATTERNS
+        resolution keeps its documented unknown-group swallow, the
+        REMAINING walk may not have one.
+        """
+        script = self._step(self._RESOLVE)["run"]
+
+        assert "if ! REMAINING=" in script, (
+            "the REMAINING walk must fail the step loudly on error"
+        )
+        remaining_start = script.index("if ! REMAINING=")
+        remaining_end = script.index("PYEOF", remaining_start)
+        assert "|| true" not in script[remaining_start:remaining_end], (
+            "the REMAINING walk must not swallow its own failure"
+        )

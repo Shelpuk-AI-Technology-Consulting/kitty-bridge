@@ -161,7 +161,15 @@ jobs:
           # step) and falls back to the group's patterns, which on a
           # treeless run is the full first pass -- the leg-5 fastest-first
           # waste needs a populated tree to thrash.
-          REMAINING="$(python - << 'PYEOF' 2>/dev/null || true
+          # No `2>/dev/null || true` here, deliberately: this walk is the
+          # only thing that can call the measurement complete, so a
+          # swallowed error is the same silent green no-op the cold-start
+          # fix closes -- one corrupt .meta in a restored tree (a mid-run
+          # kill can truncate one) must fail the leg loudly, not vanish
+          # into an empty list. The PATTERNS resolution above keeps its
+          # swallow: there the failure mode is the unknown-group guard,
+          # which this step turns into the actionable ::error.
+          if ! REMAINING="$(python - << 'PYEOF'
           import fnmatch, json, os, sys
           sys.path.insert(0, 'tests')
           from mutmut_scope import patterns_for
@@ -178,7 +186,10 @@ jobs:
                           remaining.append(key)
           print(' '.join(remaining))
           PYEOF
-          )"
+          )"; then
+            echo "::error::the mutants walk failed -- a .meta file may be corrupt; delete the named file and re-dispatch (mutmut re-runs that mutant)."
+            exit 1
+          fi
           echo "REMAINING=$REMAINING" >> "$GITHUB_ENV"
           if [ -z "$REMAINING" ] && [ "${TREE_RESTORED:-false}" = "true" ]; then
             echo "No untested mutants for '$GROUP' -- the measurement is complete."

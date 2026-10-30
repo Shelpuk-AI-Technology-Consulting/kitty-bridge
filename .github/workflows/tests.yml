@@ -108,11 +108,11 @@ jobs:
       #
       # `--durations` is what KBR-272's change added, for a reason §8.2 records:
       # the marked socket-binding L1 modules now carry a 120 s pytest-timeout cap
-      # sized against LINUX measurements, and §8.2 says the Windows and macOS
-      # legs "have a result and no figure yet". Without per-test durations a leg
-      # that legitimately nears the cap is indistinguishable from a hang until
-      # the cap fires (on Windows: the process dies, output truncated). The
-      # slowest-25 listing turns that blind spot into a number every leg prints.
+      # sized against LINUX measurements. A leg that legitimately nears the cap
+      # is indistinguishable from a hang until the cap fires (on Windows: the
+      # process dies, output truncated) -- and the leg-by-leg figures §8.2 wants
+      # can only come from the legs themselves. The slowest-25 listing turns
+      # that blind spot into a number every leg prints.
       - name: Test
         run: >-
           pytest -m "l1 or l2" -q -rsfE --strict-markers --durations=25

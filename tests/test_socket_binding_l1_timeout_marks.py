@@ -64,11 +64,13 @@ def module_level_timeout(tree: ast.Module) -> tuple[int, int] | None:
         hang-prone fixtures and teardowns this registry exists to bound.
     """
     # Python semantics: when a module assigns `pytestmark` more than once,
-    # the LAST assignment wins -- so the helper tracks the latest match
-    # and returns only after the whole module is walked (reviewer
-    # finding, KBR-272 round 6). A single-assignment module -- the
-    # convention everywhere this registry applies -- behaves identically
-    # under either reading.
+    # the LAST assignment wins -- whatever it carries. So each assignment
+    # fully supersedes the previous verdict (reviewer finding, KBR-272
+    # round 6), and a final NON-timeout assignment leaves the module
+    # unbounded even if an earlier assignment carried the mark (round 7):
+    # reporting the earlier `(120, lineno)` there would pass a module that
+    # is no longer bounded. Within one assignment, any timeout-shaped
+    # element counts -- the list form applies every mark it lists.
     latest: tuple[int, int] | None = None
     for node in tree.body:
         if not isinstance(node, ast.Assign):
@@ -81,6 +83,7 @@ def module_level_timeout(tree: ast.Module) -> tuple[int, int] | None:
         # applies the mark to every test in the module, which is the property
         # this registry cares about.
         values = node.value.elts if isinstance(node.value, ast.List) else [node.value]
+        superseded: tuple[int, int] | None = None
         for value in values:
             if not isinstance(value, ast.Call):
                 continue
@@ -96,7 +99,8 @@ def module_level_timeout(tree: ast.Module) -> tuple[int, int] | None:
                 and isinstance(value.args[0], ast.Constant)
                 and isinstance(value.args[0].value, int)
             ):
-                latest = value.args[0].value, node.lineno
+                superseded = value.args[0].value, node.lineno
+        latest = superseded
     return latest
 
 
@@ -142,7 +146,9 @@ def test_a_module_that_loses_its_mark_is_reported() -> None:
     meta-suite's own rule, ``tests/test_layer_markers.py``). Feeding it the
     same module body with the mark present, stripped, and mistyped proves all
     three verdicts come from the parse and not from an accident of the
-    fixture data.
+    fixture data. The multi-assignment cases pin Python's last-wins
+    semantics in both directions (reviewer round 7): the replies for the
+    round-6 fix claimed a regression case here, and none shipped.
     """
     header = "import pytest\n\n"
     marked = header + f"pytestmark = pytest.mark.timeout({REQUIRED_TIMEOUT_SECONDS})\n"
@@ -150,6 +156,23 @@ def test_a_module_that_loses_its_mark_is_reported() -> None:
     wrong_value = header + "pytestmark = pytest.mark.timeout(60)\n"
     listed_form = header + (
         f"pytestmark = [pytest.mark.timeout({REQUIRED_TIMEOUT_SECONDS})]\n"
+    )
+    # Python gives the LAST `pytestmark` assignment precedence: a later
+    # re-timeout supersedes the earlier value, and a later NON-timeout mark
+    # (any shape -- `pytest.mark.integration` is the realistic one) discards
+    # the earlier timeout mark entirely, leaving the module unbounded even
+    # though an earlier assignment carried it.
+    retimed = header + (
+        f"pytestmark = pytest.mark.timeout({REQUIRED_TIMEOUT_SECONDS})\n"
+        "pytestmark = pytest.mark.timeout(90)\n"
+    )
+    marked_then_unmarked = header + (
+        f"pytestmark = pytest.mark.timeout({REQUIRED_TIMEOUT_SECONDS})\n"
+        "pytestmark = pytest.mark.integration\n"
+    )
+    unmarked_then_marked = header + (
+        "pytestmark = pytest.mark.integration\n"
+        f"pytestmark = pytest.mark.timeout({REQUIRED_TIMEOUT_SECONDS})\n"
     )
 
     assert module_level_timeout(ast.parse(marked)) == (
@@ -162,3 +185,9 @@ def test_a_module_that_loses_its_mark_is_reported() -> None:
     )
     assert module_level_timeout(ast.parse(stripped)) is None
     assert module_level_timeout(ast.parse(wrong_value)) == (60, 3)
+    assert module_level_timeout(ast.parse(retimed)) == (90, 4)
+    assert module_level_timeout(ast.parse(marked_then_unmarked)) is None
+    assert module_level_timeout(ast.parse(unmarked_then_marked)) == (
+        REQUIRED_TIMEOUT_SECONDS,
+        4,
+    )

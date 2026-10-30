@@ -53,12 +53,12 @@ from harness.connect_proxy import (
     unattributable_peer_ports,
 )
 
-#: How long a test waits for an asynchronous side effect before failing. Long
-#: enough to absorb a loaded CI runner, short enough that a genuine hang is
-#: reported as a failure rather than as a stuck job.
 # KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
 pytestmark = pytest.mark.timeout(120)
 
+#: How long a test waits for an asynchronous side effect before failing. Long
+#: enough to absorb a loaded CI runner, short enough that a genuine hang is
+#: reported as a failure rather than as a stuck job.
 _SETTLE_TIMEOUT = 5.0
 
 

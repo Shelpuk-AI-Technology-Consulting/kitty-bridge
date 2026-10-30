@@ -40,14 +40,14 @@ import pytest
 
 from kitty.tui.display import print_info
 
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
+
 # Locale codepages a Windows machine really uses, none of which is a superset of
 # the other: cp1252 holds the em dash but not the status glyphs, cp437 holds
 # neither, and ascii is the floor. Testing only cp1252 would miss that
 # `kitty --version` crashes, because cp1252 happens to contain the one character
 # the banner needs.
-# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
-pytestmark = pytest.mark.timeout(120)
-
 HOSTILE_ENCODINGS = ("cp1252", "cp437", "ascii")
 
 # Every command a non-interactive caller can reach. `--version` and `--help` are

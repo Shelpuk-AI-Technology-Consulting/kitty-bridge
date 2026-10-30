@@ -32,7 +32,8 @@ Their division of labour is the thing to hold when reviewing a change here:
   input — a single `mutmut run` on `ubuntu-latest` that uploads the `mutants/`
   tree as an artifact. It is **not** a gate: nothing here calls it; the nightly
   schedule and per-group thresholds are KBR-91's scope. Its 300-minute cap is
-  sized against KBR-266's recorded numbers in the workflow's own comment.
+  sized in the workflow's own comment, from KBR-272's hosted-runner
+  measurements and the `ubuntu-latest` job ceiling.
   Adding it to `ci-required`'s `needs:` would make every pull request wait on a
   mutation run — flag such a move.
 

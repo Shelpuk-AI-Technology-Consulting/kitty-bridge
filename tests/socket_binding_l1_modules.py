@@ -1,6 +1,6 @@
 """The §8.2 socket-binding L1 module registry -- shared source of truth.
 
-``.system_design/TEST_SUITE.md`` §8.2 enumerates fifteen modules that bind
+``.system_design/TEST_SUITE.md`` §8.2 enumerates sixteen modules that bind
 real sockets or spawn real processes and so are ``l1`` by path default
 today. Two guards read this tuple, on different schedules:
 

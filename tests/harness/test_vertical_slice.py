@@ -130,15 +130,17 @@ from harness.recorder import RecordingUpstream, Reply
 #: elapsed time and both ladder costs, which is a better diagnostic than a
 #: budget message.
 #:
-#: Asserted with :func:`time.monotonic`: ``pytest-timeout`` is not in the dev
-#: extras and ``asyncio.timeout`` is 3.11+ against a 3.10–3.13 matrix. CI is the
-#: authority for this number, across every leg — the four Linux versions and the
-#: pinned Windows and macOS legs (§8.4) — and a platform- or version-dependent
-#: failure means raising it, never skipping the case. The healthy margin is
-#: ~200×, so a slower runner has a great deal of room before it matters.
 # KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
 pytestmark = pytest.mark.timeout(120)
 
+#: Asserted with :func:`time.monotonic`: ``pytest-timeout`` (in the dev extras
+#: since KBR-272) bounds a hang at 120 s, but this slice asserts a promptness
+#: budget, and ``asyncio.timeout`` is 3.11+ against a 3.10–3.13 matrix. CI is
+#: the authority for this number, across every leg — the four Linux versions
+#: and the pinned Windows and macOS legs (§8.4) — and a platform- or
+#: version-dependent failure means raising it, never skipping the case. The
+#: healthy margin is ~200×, so a slower runner has a great deal of room before
+#: it matters.
 _SLICE_BUDGET_SECONDS = 4.0
 
 #: The query the driven request carries upstream. Both properties are load-bearing

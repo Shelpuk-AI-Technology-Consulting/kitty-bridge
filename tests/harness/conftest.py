@@ -218,6 +218,25 @@ def _all_landed_slice_phases_ran() -> bool:
     return all(bool(outcomes) for _prefix, _names, outcomes, _teardown, _row in _SLICES)
 
 
+def _in_mutants_tree(path: Path) -> bool:
+    """Return whether ``path`` lives in mutmut's copied tree.
+
+    Args:
+        path: The conftest's own path, or any test-tree path.
+
+    Returns:
+        ``True`` exactly when three ancestors up the resolved path is
+        ``mutants`` — the shape ``…/mutants/tests/harness/conftest.py``
+        and nothing else this suite produces. A repository checkout
+        (``<repo>/tests/harness/conftest.py``) reads ``tests`` there and
+        stays gated. Extracted as a predicate so the ancestor count and
+        the name it matches are pinned by test, not by convention: a
+        drift in either re-fires the gate red on every mutation leg, and
+        an over-match stands it down in ordinary runs, silently.
+    """
+    return path.resolve().parent.parent.parent.name == "mutants"
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _enforce_containment_completeness() -> Iterator[None]:
     """Fail the session when a **landed** slice's verdict row is invalid.
@@ -268,7 +287,7 @@ def _enforce_containment_completeness() -> Iterator[None]:
     # path (…/mutants/tests/harness/conftest.py) is present in both full
     # and resumed runs, because mutmut runs every pytest invocation with
     # the mutants tree as its working directory.
-    if Path(__file__).resolve().parent.parent.parent.name == "mutants":
+    if _in_mutants_tree(Path(__file__)):
         return
     if not _all_landed_slice_phases_ran():
         return

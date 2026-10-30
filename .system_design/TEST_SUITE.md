@@ -4426,7 +4426,9 @@ It is a claim about one **pair** of axes and not about either alone (§7.5.1): i
 the ladder must make the suite **red**, not merely slow — the defect commit `691e974` fixed that
 once already. Three mechanisms were rejected before the one that ships:
 
-- `pytest-timeout` is **not** in the dev extras.
+- `pytest-timeout` was **not** in the dev extras when this was chosen;
+  KBR-272 later added it with a coarser 120 s bound (§8.2), which flags a
+  hang but does not assert this slice's 4.0 s promptness budget.
 - `asyncio.timeout` is **3.11+**, and the matrix is 3.10–3.13.
 - `BridgeFixture.post`'s own client timeout **does not bound the slice**. Measured: a `post()`
   given 2 seconds against a still-sleeping ladder exited its block after **62 seconds**, because
