@@ -851,3 +851,86 @@ class TestEveryJobVerifiesTheCategoriesItClaims:
                 gaps.append(f"{command!r} selects {sorted(unverified)} without requiring it")
 
         assert gaps == []
+class TestMutationRemeasureResumeLoop:
+    """Pin the cold-start recovery of ``mutation-remeasure.yml``.
+
+    🔴 **The loop's resume support made artifact expiry unrecoverable.** Each
+    leg restores the latest ``mutants-compaction_and_pairing`` artifact
+    (14-day retention) and computes the remaining untested mutants from the
+    restored tree. With no artifact left, ``mutants/`` never exists: the
+    resolve step computed an empty ``REMAINING``, the run step short-circuited
+    "Nothing to test", the upload warned and uploaded nothing — and the leg
+    went green claiming "the measurement is complete". These tests pin the
+    contract that makes a cold start measure the whole group instead: the
+    restore step says whether it restored, the run step falls back to the
+    group's patterns when nothing was restored, and the complete message only
+    fires for a restored, fully-tested tree.
+    """
+
+    _RESTORE = "Restore the previous mutants tree"
+    _RESOLVE = "Resolve the group's patterns"
+    _RUN = "Run mutmut for the remaining mutants"
+
+    def _step(self, name_prefix: str) -> dict:
+        """Return the one ``mutation-remeasure.yml`` step named ``name_prefix``.
+
+        Args:
+            name_prefix: Exact start of the step's ``name:`` field.
+
+        Returns:
+            The single matching step mapping.
+
+        Raises:
+            AssertionError: When zero or several steps match, since a
+                renamed or duplicated step must fail loudly here rather than
+                let the assertions below inspect the wrong block.
+        """
+        workflow = _load_workflow("mutation-remeasure.yml")
+        matches = [
+            step
+            for step in _get_all_steps(workflow)
+            if step.get("name", "").startswith(name_prefix)
+        ]
+        assert len(matches) == 1, f"expected exactly one {name_prefix!r} step, got {len(matches)}"
+        return matches[0]
+
+    def test_the_restore_step_says_whether_it_restored(self):
+        script = self._step(self._RESTORE)["run"]
+
+        # Both outcomes are exported, not only the happy path: the run
+        # step's cold-start branch keys on the variable reading "false".
+        assert 'echo "TREE_RESTORED=false"' in script
+        assert 'echo "TREE_RESTORED=true"' in script
+        assert '>> "$GITHUB_ENV"' in script
+
+    def test_the_run_step_falls_back_to_the_group_patterns_on_a_cold_start(self):
+        script = self._step(self._RUN)["run"]
+
+        # Explicit mutant names when the restored tree knows what is left --
+        # the documented force-rerun shape that dodges mutmut's fastest-first
+        # re-testing of cached mutants.
+        assert 'TARGETS="$REMAINING"' in script
+        # "Nothing to test" fires only when a restored tree is exhausted;
+        # unguarded, an empty walk of a nonexistent tree claims the same.
+        assert re.search(
+            r'elif .*TREE_RESTORED.*\n.*Nothing to test', script
+        ), "the Nothing-to-test short-circuit must be guarded on TREE_RESTORED"
+        assert "${TREE_RESTORED:-false}" in script, (
+            "an unset restore result must take the safe cold-start branch"
+        )
+        # The cold start measures the whole group through its patterns: with
+        # no restored tree there are no cached verdicts, so the leg-5
+        # fastest-first waste cannot occur.
+        assert 'TARGETS="$PATTERNS"' in script
+        assert "mutmut run $TARGETS" in script
+
+    def test_the_complete_message_only_fires_for_a_restored_tree(self):
+        script = self._step(self._RESOLVE)["run"]
+
+        # The complete message sits inside the restored-tree guard; a bare
+        # `-z "$REMAINING"` test is the silent green no-op this class exists
+        # to prevent.
+        assert re.search(
+            r'if \[ -z "\$REMAINING" \] && \[ "\$\{TREE_RESTORED[^"]*" = "true" \]',
+            script,
+        ), "the measurement-complete message must be guarded on a restored tree"

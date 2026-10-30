@@ -95,8 +95,10 @@ jobs:
           ARTIFACT_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}" --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty')" || true
           if [ -z "${ARTIFACT_ID:-}" ]; then
             echo "No previous ${ARTIFACT_NAME} artifact -- starting a fresh tree."
+            echo "TREE_RESTORED=false" >> "$GITHUB_ENV"
             exit 0
           fi
+          echo "TREE_RESTORED=true" >> "$GITHUB_ENV"
           echo "Restoring artifact ${ARTIFACT_ID} (${ARTIFACT_NAME})."
           gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > "${RUNNER_TEMP}/mutants.zip"
           mkdir -p ${RUNNER_TEMP}/restored mutants
@@ -148,8 +150,17 @@ jobs:
           # zero new verdicts). Explicit names re-run exactly those mutants
           # -- the documented force-rerun shape -- and the restored .meta
           # carries the rest of the group's verdicts, so the aggregated
-          # score stays valid for the whole group. An empty list means the
-          # measurement is complete; the run step short-circuits.
+          # score stays valid for the whole group. An empty list is
+          # ambiguous -- a completed measurement (tree restored) or a COLD
+          # START (no artifact left, so the walk saw nothing; artifacts
+          # expire after 14 days) -- and reading it as "complete" made
+          # expiry unrecoverable: the run step skipped, the upload had no
+          # tree to upload, and every later dispatch repeated the no-op
+          # while claiming the measurement was done. The run step tells
+          # the two apart via TREE_RESTORED (exported by the restore
+          # step) and falls back to the group's patterns, which on a
+          # treeless run is the full first pass -- the leg-5 fastest-first
+          # waste needs a populated tree to thrash.
           REMAINING="$(python - << 'PYEOF' 2>/dev/null || true
           import fnmatch, json, os, sys
           sys.path.insert(0, 'tests')
@@ -169,8 +180,10 @@ jobs:
           PYEOF
           )"
           echo "REMAINING=$REMAINING" >> "$GITHUB_ENV"
-          if [ -z "$REMAINING" ]; then
+          if [ -z "$REMAINING" ] && [ "${TREE_RESTORED:-false}" = "true" ]; then
             echo "No untested mutants for '$GROUP' -- the measurement is complete."
+          elif [ -z "$REMAINING" ]; then
+            echo "Cold start: no restored tree, so the run step measures the whole group."
           else
             echo "Remaining untested mutants: $(wc -w <<< "$REMAINING")"
           fi
@@ -194,12 +207,20 @@ jobs:
       - name: Run mutmut for the remaining mutants
         timeout-minutes: 285
         run: |
-          if [ -z "$REMAINING" ]; then
+          # Target selection, and why three branches: explicit names when
+          # the restored tree knows what is left (see the resolve step's
+          # note), "Nothing to test" only for an exhausted RESTORED tree,
+          # and the group's patterns on a cold start.
+          if [ -n "$REMAINING" ]; then
+            TARGETS="$REMAINING"
+          elif [ "${TREE_RESTORED:-false}" = "true" ]; then
             echo "Nothing to test -- the restored tree already covers the whole group."
             exit 0
+          else
+            TARGETS="$PATTERNS"
           fi
           rc=0
-          timeout -s INT -k 60 240m mutmut run $REMAINING || rc=$?
+          timeout -s INT -k 60 240m mutmut run $TARGETS || rc=$?
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 130 ]; then
             echo "Soft deadline reached at 240 minutes; the partial tree is on disk and the upload step preserves it. Re-dispatch to continue."
             exit 0
