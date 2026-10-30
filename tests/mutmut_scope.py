@@ -157,6 +157,16 @@ TARGET_GROUPS: dict[str, list[Target]] = {
         Target("kitty.bridge.server", None, "_cc_chunk_carries_content"),
         Target("kitty.bridge.server", "BridgeServer", "_is_empty_cc_response"),
     ],
+    # The last-resort crossing's failure surface (§16, 2026-10-29): the
+    # shared envelope renderer for a failed relay attempt, the request-shaped
+    # bar that keeps known-bad bodies off the relay, and the status extractor
+    # the exception-derived sites feed it. Same pragma scheme as
+    # compaction_and_pairing — measured, unmarked defs.
+    "subscription_relay_crossing": [
+        Target("kitty.bridge.server", "BridgeServer", "_relay_failure_envelope"),
+        Target("kitty.bridge.server", "BridgeServer", "_crossing_barred"),
+        Target("kitty.bridge.server", None, "_surfaced_status"),
+    ],
     # Supporting correctness: tool auditing, profile schema/resolver,
     # response-time URL validation.
     "supporting": [

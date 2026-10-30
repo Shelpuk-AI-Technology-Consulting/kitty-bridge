@@ -372,6 +372,10 @@ def test_main_exits_zero_when_a_group_is_fully_tested(
             # predicate and the non-streaming detector's Chat Completions
             # arm (mirror per KBR-277). Module-level fn example key.
             "kitty.bridge.server.x__cc_chunk_carries_content__mutmut_1": 1,
+            # subscription_relay_crossing: §16 — the envelope renderer
+            # (BridgeServer method), the request-shaped bar (staticmethod),
+            # and the status extractor (module fn).
+            "kitty.bridge.server.xǁBridgeServerǁ_relay_failure_envelope__mutmut_1": 1,
         },
     )
     rc = agg.main()
@@ -426,6 +430,9 @@ def test_render_markdown_table_renders_but_does_not_fail_on_unmatched(
             # predicate and the non-streaming detector's Chat Completions
             # arm (mirror per KBR-277). Module-level fn example key.
             "kitty.bridge.server.x__cc_chunk_carries_content__mutmut_1": 1,
+            # subscription_relay_crossing: §16 — one killed mutant clears
+            # the group's guards like every other group's.
+            "kitty.bridge.server.xǁBridgeServerǁ_relay_failure_envelope__mutmut_1": 1,
             # Plus one unscoped mutant — its module is not in the
             # registry, so it lands in __unmatched__ with no_tests=1
             # (a finished run, just outside scope).
