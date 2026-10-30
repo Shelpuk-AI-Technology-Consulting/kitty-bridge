@@ -31,7 +31,34 @@ import pytest
 if TYPE_CHECKING:
     from types import ModuleType
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+def _find_repo_root(start: Path) -> Path:
+    """Walk up from ``start`` to the enclosing git worktree's root.
+
+    In a checkout that is the usual ``tests/`` parent; under mutmut the
+    test file is copied to ``mutants/tests/`` and the walk must continue
+    past the mutants tree to the real repository, because the KBR-285
+    fixture tests run ``git diff`` with a ``src/kitty/`` pathspec that git
+    resolves relative to the working directory -- pointing ``cwd`` at the
+    mutants copy yields an empty diff against the pinned historical range
+    (leg 4, 2026-10-30). The mutants tree carries no ``.git``; the
+    checkout does. A ``.git`` file counts as well as a directory (git
+    worktrees and submodules use the file form).
+
+    Args:
+        start: A path inside the tree to walk up from (a file or
+            directory; ``Path.parents`` is walked either way).
+
+    Returns:
+        The first ancestor containing ``.git``, or the ``tests/`` parent
+        as a fallback for a tree checked out without git at all.
+    """
+    for parent in start.resolve().parents:
+        if (parent / ".git").exists():
+            return parent
+    return Path(__file__).resolve().parent.parent
+
+
+_REPO_ROOT = _find_repo_root(Path(__file__))
 _SCRIPT = _REPO_ROOT / "scripts" / "measure_changed_code_mutation.py"
 _FIXTURE = _REPO_ROOT / "tests" / "data" / "kbr285_diff_snapshot.json"
 
@@ -77,6 +104,36 @@ def kbr285_snapshot() -> dict[str, Any]:
 # --------------------------------------------------------------------------
 # R1 — diff → module mapping
 # --------------------------------------------------------------------------
+
+
+def test_repo_root_walks_up_past_a_non_repo_directory(tmp_path: Path) -> None:
+    """The mutants-tree shape resolves to the enclosing checkout's root.
+
+    mutmut's clean phase imports this module from ``mutants/tests/``, whose
+    ancestors carry no ``.git`` until the real checkout -- the walk must
+    land there, or the ``git diff`` pathspec resolves against the mutants
+    copy and every KBR-285 fixture test sees an empty diff (leg 4).
+    """
+    checkout = tmp_path / "checkout"
+    sentinel = checkout / "mutants" / "tests" / "sentinel.py"
+    sentinel.parent.mkdir(parents=True)
+    (checkout / ".git").write_text("", encoding="utf-8")
+    sentinel.write_text("", encoding="utf-8")
+
+    assert _find_repo_root(sentinel) == checkout
+
+
+def test_repo_root_resolves_inside_a_git_worktree() -> None:
+    """The module-level root is a real worktree root in every context.
+
+    A cheap live invariant: in a checkout it pins the usual derivation,
+    and in mutmut's copied tree it fails the stats phase here -- with the
+    walk's reason in the message -- instead of four KBR-285 assertions
+    later.
+    """
+    assert (_REPO_ROOT / ".git").exists(), (
+        f"_REPO_ROOT must be a git worktree root, got {_REPO_ROOT}"
+    )
 
 
 def test_module_for_maps_src_paths_to_dotted_modules(mcm: ModuleType) -> None:
