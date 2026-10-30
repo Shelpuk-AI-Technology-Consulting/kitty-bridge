@@ -1040,3 +1040,24 @@ class TestMutationRemeasureResumeLoop:
         assert names.index(self._FINGERPRINT) < next(
             i for i, n in enumerate(names) if n.startswith("Upload the mutants tree")
         ), "the fingerprint must precede the upload that archives it"
+
+    def test_the_checkout_fetches_full_history(self):
+        """The leg's checkout carries the history the clean phase needs.
+
+        mutmut's stats phase runs the whole suite, including the KBR-285
+        fixture tests, which ``git diff`` a pinned historical range.
+        ``tests.yml`` checks out with ``fetch-depth: 0`` for exactly that
+        reason and says so in its comment; this workflow's default-shallow
+        checkout made every stats phase die in ``bad revision '30a91a0^1'``
+        (leg 3, 2026-10-30 -- the September legs predate the merge that
+        brought the fixture to this branch, which is why they never saw
+        it).
+        """
+        workflow = _load_workflow("mutation-remeasure.yml")
+        checkouts = [
+            step
+            for step in _get_all_steps(workflow)
+            if step.get("uses", "").startswith("actions/checkout")
+        ]
+        assert len(checkouts) == 1
+        assert checkouts[0].get("with", {}).get("fetch-depth") == 0

@@ -69,6 +69,13 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+        # `fetch-depth: 0`, same as tests.yml and for the same reason (its
+        # comment names the test): mutmut's stats phase runs the whole
+        # suite, and the KBR-285 fixture tests `git diff` a pinned
+        # historical range -- a default-shallow checkout dies in
+        # `bad revision '30a91a0^1'` (leg 3, 2026-10-30).
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
