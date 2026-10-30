@@ -336,6 +336,12 @@ session — never another member's API key. Three things follow:
   subscription member of a pool the same model.
 - **Non-Claude agents skip it.** Other launchers (or a balancing pool used by them) ignore subscription members, as
   described above — the subscription member only participates under Claude Code.
+- **Failover respects the identity boundary.** Failover among the pool's API-key members never dispatches the
+  subscription member — it serves only through the raw relay. When an API-key failover walk is exhausted before your
+  agent has received any response, kitty makes one attempt through the subscription member's relay with the request
+  exactly as your agent formed it. That attempt spends your Claude subscription quota and keeps the model your agent
+  formed, even if the API-key members had rewritten the request for a smaller context. Once your agent has received
+  the first byte of a response, a failure is never re-attempted on another member.
 
 ### Backup members
 

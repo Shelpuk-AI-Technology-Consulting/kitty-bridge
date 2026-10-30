@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from enum import Enum
@@ -10,6 +11,11 @@ from urllib.parse import urlsplit, urlunsplit
 # Stands in for anything withheld from a message or a log. Spelled the same as
 # `kitty.egress._MASK`, which masks a proxy password, so one convention covers both.
 _MASK = "****"
+
+# Upper bound on an upstream Retry-After hint: a broken header cannot bench a
+# member for more than an hour, while a genuinely long rate limit still gets a
+# real cooldown (it re-parks on the next 429).
+_RETRY_AFTER_HINT_CAP = 3600
 
 
 class WireShape(Enum):
@@ -641,6 +647,23 @@ class ProviderAdapter(ABC):
     def map_error(self, status_code: int, body: dict) -> Exception:
         """Map an HTTP error status and body to a typed exception."""
 
+    @staticmethod
+    def _bounded_upstream_body(body: dict) -> str | None:
+        """Serialize an error body for the ``ProviderError.upstream_body`` carriage.
+
+        Bounded here so no consumer can log the raw body unbounded; the
+        empty-body case carries no diagnostic and stays ``None``. The body is
+        carried as-is — not redacted — which is why the bridge's consumer
+        logs it at DEBUG only.
+
+        Args:
+            body: The parsed upstream error body.
+
+        Returns:
+            The bounded JSON text, or ``None`` when there is nothing to carry.
+        """
+        return json.dumps(body, ensure_ascii=False)[:500] if body else None
+
     # ── Custom transport ─────────────────────────────────────────────────
 
     @property
@@ -836,6 +859,11 @@ class ProviderError(Exception):
     is_cloudflare = False
     http_status: int = 0
     retry_after: int | None = None
+    #: Bounded, JSON-encoded upstream body the bridge renders at DEBUG —
+    #: the exception text folds only the provider's ``message`` field, so an
+    #: empty one would otherwise leave a log line with nothing after the
+    #: colon (2026-10-29 diagnosis). ``None`` when there is no body.
+    upstream_body: str | None = None
 
 
 class UnsupportedModelError(ProviderError):
@@ -865,14 +893,19 @@ def parse_retry_after_seconds(value: object) -> int | None:
     """Parse an upstream ``Retry-After`` header value into whole seconds.
 
     The one rule every consumer applies — plain seconds form, floored at one
-    second, unparseable values refused — so the cooldown hint cannot drift
-    between the subscription adapters and the relay.
+    second, unparseable values refused, capped at a bounded maximum — so the
+    cooldown hint cannot drift between the subscription adapters and the
+    relay. The cap bounds the damage of a broken upstream header (review
+    2026-10-29: ``Retry-After: 86400`` would otherwise bench a member for a
+    day); a genuinely long rate limit re-parks the member on its next 429
+    instead, costing one request per cap period.
 
     Args:
         value: The raw header value.
 
     Returns:
-        Whole seconds, or ``None`` when the value carries no usable hint.
+        Whole seconds in ``[1, 3600]``, or ``None`` when the value carries
+        no usable hint.
     """
     if value is None:
         return None
@@ -880,7 +913,7 @@ def parse_retry_after_seconds(value: object) -> int | None:
         seconds = int(float(str(value).strip()))
     except (TypeError, ValueError):
         return None
-    return max(1, seconds)
+    return min(_RETRY_AFTER_HINT_CAP, max(1, seconds))
 
 
 __all__ = ["ProviderAdapter", "ProviderError", "UnsupportedModelError", "parse_retry_after_seconds"]

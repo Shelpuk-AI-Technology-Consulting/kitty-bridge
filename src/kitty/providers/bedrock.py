@@ -889,6 +889,21 @@ class BedrockAdapter(ProviderAdapter):
         return result
 
     def map_error(self, status_code: int, body: dict) -> Exception:
+        """Map a Bedrock HTTP error to a provider error carrying the bounded body.
+
+        Args:
+            status_code: The upstream HTTP status.
+            body: The parsed upstream error body.
+
+        Returns:
+            The provider error, with ``upstream_body`` set when there is a
+            body.
+        """
         error_msg = body.get("error", body.get("message", body))
         msg = error_msg.get("message", str(error_msg)) if isinstance(error_msg, dict) else str(error_msg)
-        return ProviderError(f"Bedrock error {status_code}: {msg}")
+        err = ProviderError(f"Bedrock error {status_code}: {msg}")
+        # Bounded body carriage (sibling of the OpenAI subscription adapter):
+        # a Bedrock error whose message field is empty renders bare, and the
+        # structured body is what diagnoses it.
+        err.upstream_body = self._bounded_upstream_body(body)
+        return err

@@ -1406,6 +1406,34 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
             logger.info("OpenAI subscription rate limited; retry_after=%ds", retry_after)
 
     def map_error(self, status_code: int, body: dict) -> ProviderError:
+        """Translate an upstream status into a provider error.
+
+        The exception text folds the upstream ``message`` field only, so an
+        empty one renders bare (the 2026-10-29 incident); the bounded body
+        rides along as ``upstream_body`` for the bridge's DEBUG diagnostic.
+
+        Args:
+            status_code: The upstream HTTP status.
+            body: The parsed upstream body.
+
+        Returns:
+            The provider error carrying status text and bounded body.
+        """
+        err = self._map_error_by_status(status_code, body)
+        err.upstream_body = self._bounded_upstream_body(body)
+        return err
+
+    def _map_error_by_status(self, status_code: int, body: dict) -> ProviderError:
+        # pragma: no mutate block
+        """Build the status-specific provider error.
+
+        Args:
+            status_code: The upstream HTTP status.
+            body: The parsed upstream body.
+
+        Returns:
+            The provider error with its branch-specific wording.
+        """
         error_obj = body.get("error", body)
         msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
         if status_code == 401:
