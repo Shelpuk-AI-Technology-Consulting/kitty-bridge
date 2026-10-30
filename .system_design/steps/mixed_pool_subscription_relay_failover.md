@@ -120,7 +120,7 @@ duplicating it.
 
 ## Implementation notes — review round 4 (on 1ad24af), applied 2026-10-30
 
-- Request-shaped failures are barred from the crossing (`_crossing_forbidden_for`,
+- Request-shaped failures are barred from the crossing (`_crossing_barred`,
   400/404/413/422): F4 already establishes the body is bad, and relaying it parked a healthy
   subscription member on Anthropic's identical 400 while turning the non-retryable client error
   into a 503. Wired at all four error-terminal crossings; auth/rate-limit/upstream statuses stay

@@ -2542,7 +2542,7 @@ anything else → a bug that propagates), so a stalled crossing answers 504 from
 including the non-streaming arm and the streaming plain arm, whose stall previously leaked into
 the dispatch-loop's catch-all and surfaced as a mangled 502 (review 2026-10-29). The relay is
 offered only for member-shaped failures: a 400/404/413/422 from the last translated attempt bars
-the crossing (`_crossing_forbidden_for`) — F4 already establishes the body itself is bad, so
+the crossing (`_crossing_barred`) — F4 already establishes the body itself is bad, so
 relaying it would park a healthy subscription member on Anthropic's identical 400 and dress a
 non-retryable client error up as a retryable 503 (review round 4). Auth, rate-limit, and
 upstream-breakage statuses stay eligible: those are member-shaped, and the member's own OAuth

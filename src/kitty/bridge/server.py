@@ -2035,6 +2035,19 @@ class UpstreamError(Exception):
         super().__init__(f"Upstream error {status}: {body}")
 
 
+def _surfaced_status(exc: BaseException) -> int | None:
+    """Extract the upstream status a translated-walk failure carries, if any.
+
+    Args:
+        exc: The failure about to surface (``UpstreamError`` on the plain
+            arms, a mapped ``ProviderError`` on the custom arms).
+
+    Returns:
+        The upstream status, or ``None`` when the failure carries none.
+    """
+    return getattr(exc, "status", None) or getattr(exc, "http_status", None)
+
+
 _SUBSCRIPTION_PROVIDER_TYPE = "anthropic_subscription"
 
 #: Bound on an upstream error body the subscription relay carries. Failure
@@ -5672,7 +5685,7 @@ class BridgeServer:
                 try:
                     relay_response = (
                         None
-                        if self._crossing_forbidden_for(exc)
+                        if self._crossing_barred(_surfaced_status(exc))
                         else await self._relay_last_resort(request, body)
                     )
                 except Exception as relay_exc:
@@ -5985,7 +5998,7 @@ class BridgeServer:
                 applies. Callers render the relay's terminal envelope via
                 :meth:`_relay_failure_envelope` and re-raise what it does
                 not own (a bug). Callers also bar request-shaped failures
-                (:meth:`_crossing_forbidden_for`) before offering — "every
+                (:func:`_surfaced_status` + :meth:`_crossing_barred`) before offering — "every
                 translated attempt has failed" means member-shaped
                 failures (auth, rate limit, upstream breakage); a body two
                 members already rejected with 400 is not offered again.
@@ -6007,8 +6020,8 @@ class BridgeServer:
         return await self._relay_subscription_messages(request, body, raw)
 
     @staticmethod
-    def _crossing_forbidden_for(exc: Exception) -> bool:
-        """Report whether the surfaced failure is request-shaped, barring the relay.
+    def _crossing_barred(status: int | None) -> bool:
+        """Report whether a surfaced upstream status bars the relay.
 
         A 400/404/413/422 from the last translated attempt means the request
         itself is bad — F4 stops the walk on it and D3's rationale says the
@@ -6019,12 +6032,12 @@ class BridgeServer:
         member-shaped: the crossing is exactly what serves them.
 
         Args:
-            exc: The failure the translated walk is about to surface.
+            status: The surfaced upstream status (``None`` — no upstream
+                exchange, e.g. a transport failure — never bars).
 
         Returns:
             True when the relay must not be offered for this failure.
         """
-        status = getattr(exc, "status", None) or getattr(exc, "http_status", None)
         return status in (400, 404, 413, 422)
 
     def _relay_failure_envelope(self, exc: Exception) -> web.Response | None:
@@ -6600,7 +6613,7 @@ class BridgeServer:
                             try:
                                 relay_response = (
                                     None
-                                    if self._crossing_forbidden_for(exc)
+                                    if self._crossing_barred(_surfaced_status(exc))
                                     else await self._relay_last_resort(request, body)
                                 )
                             except Exception as relay_exc:
@@ -7285,7 +7298,7 @@ class BridgeServer:
                                     try:
                                         relay_response = (
                                             None
-                                            if self._crossing_forbidden_for(upstream)
+                                            if self._crossing_barred(upstream.status)
                                             else await self._relay_last_resort(request, body)
                                         )
                                     except Exception as relay_exc:
@@ -8222,7 +8235,7 @@ class BridgeServer:
                                 try:
                                     relay_response = (
                                         None
-                                        if self._crossing_forbidden_for(exc)
+                                        if self._crossing_barred(_surfaced_status(exc))
                                         else await self._relay_last_resort(request, body)
                                     )
                                 except Exception as relay_exc:
