@@ -52,7 +52,14 @@ permissions:
 
 jobs:
   remeasure:
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: during the ubuntu-latest -> Ubuntu 26
+    # migration (announced to begin 2026-10-19) legs on the rolling label
+    # were reclaimed 50-90 minutes in -- twenty consecutive measurement
+    # legs lost across ~40 hours (2026-10-30 19:13 -> 11-01 10:30 UTC),
+    # each annotated "The operation was canceled." A 4-hour measurement
+    # job needs a runner that survives its window, and a pinned label
+    # sidesteps the migrating pool and keeps the runner reproducible.
+    runs-on: ubuntu-24.04
     # A cap, not a budget. The first attempt at 180 minutes hit the cap on
     # the per-mutant phase (KBR-272); after two capped runs 459 mutants
     # remained of 648 -- the ticket's 5–30-minute estimate was low by an

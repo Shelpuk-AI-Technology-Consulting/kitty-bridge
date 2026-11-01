@@ -1081,3 +1081,21 @@ class TestMutationRemeasureResumeLoop:
             "the artifact lookup must not swallow its own failure"
         )
         assert "the artifact lookup failed" in script[lookup_start:lookup_end]
+
+    def test_the_job_pins_a_specific_runner_label(self):
+        """The leg runs on a pinned Ubuntu version, not the rolling label.
+
+        A 4-hour measurement job needs a runner that survives its window.
+        During the ubuntu-latest -> Ubuntu 26 migration (announced to
+        begin 2026-10-19), legs on the rolling label were reclaimed
+        50-90 minutes in -- twenty consecutive measurement legs lost
+        across ~40 hours (2026-10-30 19:13 -> 11-01 10:30 UTC), every
+        job annotated "The operation was canceled." with no traceback.
+        A pinned label sidesteps the migrating pool and keeps the
+        measurement's runner reproducible.
+        """
+        workflow = _load_workflow("mutation-remeasure.yml")
+        runs_on = workflow["jobs"]["remeasure"]["runs-on"]
+
+        assert runs_on == "ubuntu-24.04"
+        assert runs_on not in ("ubuntu-latest",)
