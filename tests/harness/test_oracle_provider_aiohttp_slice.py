@@ -52,11 +52,12 @@ recorder-level: both products captured, in order, on **one recorder
 instance** — the §7.2.2 dual-product load the T-B1 tests (which cover the leg
 in isolation) never exercise.
 
-**Layer.** No `pytestmark`; harness tests default to `l1` per
+**Layer.** No layer marker; harness tests default to `l1` per
 `tests/layers.py` and the T-D1/T-D2/T-D4/T-D6 precedent. §3.4 calls this
 surface L3 and T-K6 owns `l3` activation. The module binds a real
 `BridgeServer` and the recorder (two sockets per run), so it is listed in
-`tests/socket_binding_l1_modules.py` (§8.2).
+`tests/socket_binding_l1_modules.py` (§8.2), which bounds it at 120 s per
+module (KBR-272's mark; KBR-266 ran an unbounded stall here).
 """
 
 from __future__ import annotations
@@ -78,6 +79,9 @@ from harness.provider_aiohttp import oauth_token_endpoint
 from harness.provider_recorder import OAUTH_TOKEN_SUFFIX, OLLAMA_CHAT_SUFFIX
 from kitty.auth import openai_oauth
 from kitty.providers.ollama_cloud import OllamaCloudAdapter
+
+# KBR-272: bounded by the §8.2 registry (tests/test_socket_binding_l1_timeout_marks.py).
+pytestmark = pytest.mark.timeout(120)
 
 #: The path the ``ollama_cloud`` adapter publishes as its endpoint
 #: (``{base}/api/chat``, no query — the binding's ``base_url`` is

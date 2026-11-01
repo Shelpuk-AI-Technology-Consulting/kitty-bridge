@@ -481,6 +481,14 @@ class TestTheWholeSuiteIsCoherent:
             # section 6.1's mutation-target table) must agree with the live
             # source. Two artifacts edited by hand, held against each other.
             "tests/test_mutmut_scope.py",
+            # KBR-272. A §6.2.3 doc-vs-source contract: the socket-binding
+            # L1 module list (TEST_SUITE.md §8.2 + the KBR-10 paragraph's
+            # module) must agree with the registry here, and every listed
+            # module must carry the `pytest.mark.timeout(120)` mark whose
+            # absence is what hung mutmut's clean-test phase in KBR-266.
+            # Two artifacts (the doc enumeration and the test sources' AST),
+            # so a contract test rather than a unit one.
+            "tests/test_socket_binding_l1_timeout_marks.py",
             # KBR-88 (T-H1). A §6.2.3 contract against mutmut's per-file
             # `.meta` JSON shape and the aggregator's bucket routing --
             # the script is mutmut-coupled (its exit-code mapping comes
