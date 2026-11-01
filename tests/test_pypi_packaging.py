@@ -245,10 +245,12 @@ class TestBuildArtifacts:
 class TestVersionConsistency:
     """Verify cross-file consistency the build and resolvers depend on.
 
-    Two responsibilities: the shipped version agrees between
-    ``src/kitty/__init__.py`` and ``pyproject.toml``, and the declared
-    curl_cffi range matches the pin policy recorded in TEST_SUITE.md
-    section 6.2.4 (KBR-283).
+    Three responsibilities: the shipped version agrees between
+    ``src/kitty/__init__.py`` and ``pyproject.toml``, the OpenAPI
+    document's ``info.version`` tracks the package (KBR-82 created it
+    equal to the version of the day), and the declared curl_cffi range
+    matches the pin policy recorded in TEST_SUITE.md section 6.2.4
+    (KBR-283).
     """
 
     def test_version_in_init_matches_pyproject(self):
@@ -268,6 +270,35 @@ class TestVersionConsistency:
 
         assert init_version == pyproject_version, (
             f"Version mismatch: __init__.py={init_version}, pyproject.toml={pyproject_version}"
+        )
+
+    def test_openapi_document_version_tracks_the_package(self):
+        """The shipped OpenAPI document's info.version agrees with the package.
+
+        The document was created (KBR-82, commit 8dc622b) with
+        ``info.version`` equal to the package version of the day, so the
+        field tracks the package; it then silently froze at ``1.14.0``
+        for four minor releases until the round-1 review of the 1.21.0
+        release PR caught the drift. This pin turns the release
+        description's "version consistency across packaging surfaces"
+        into an enforced invariant: a release that bumps the package
+        without the document fails here.
+        """
+        document = (ROOT / "openapi" / "kitty-bridge.yaml").read_text()
+        m = re.search(r'^\s*version:\s*"([^"]+)"', document, re.MULTILINE)
+        assert m, "info.version not found in openapi/kitty-bridge.yaml"
+
+        pyproject = (ROOT / "pyproject.toml").read_text()
+        for line in pyproject.splitlines():
+            if line.startswith("version ="):
+                pyproject_version = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+        else:
+            pytest.fail("version not found in pyproject.toml")
+
+        assert m.group(1) == pyproject_version, (
+            f"OpenAPI document version drift: "
+            f"openapi/kitty-bridge.yaml={m.group(1)}, pyproject.toml={pyproject_version}"
         )
 
     def test_curl_cffi_pin_matches_recorded_policy(self):
