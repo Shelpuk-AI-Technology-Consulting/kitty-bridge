@@ -176,7 +176,7 @@ class TestTheRecorderPassesEveryConformanceCheck:
 
         The silent connection's peer port fills in asynchronously: the
         recorder creates the record at accept time with ``peer_port = -1``
-        and :meth:`~harness.curl_recorder.CurlRecordingUpstream.connection_made`
+        and :meth:`~harness.curl_recorder.CurlLoggingServer.connection_made`
         completes it on a later loop iteration, when the server-side
         handshake finishes — which can be *after* the client-side
         ``wrap_socket`` that :func:`_open_only` returns on (measured on the
@@ -318,17 +318,13 @@ class TestSocketLevelConnectionLogging:
     ) -> None:
         """§5.2.1's bypass shape, over TLS.
 
-        The peer port fills in asynchronously: the recorder creates the
-        record at accept time with ``peer_port = -1`` and
-        :meth:`~harness.curl_recorder.CurlLoggingServer.connection_made`
-        completes it on a later loop iteration, when the server-side
-        handshake finishes — which can be *after* the client-side
-        ``wrap_socket`` that :func:`_open_only_sync` returns on (measured on the
-        macOS leg, 2026-11-01: this assertion read the log between the two
-        and saw the record still carrying ``-1``). So the test waits on the
-        condition — the record carrying the reported port — with the same
-        bounded timeout every other async-appearing assertion in this file
-        uses.
+        The peer port is attributed asynchronously, so the log is read only
+        after a wait confirms it: the sibling ``test_per_session_check``
+        above states the mechanism, and :func:`_wait_until` the rule this
+        file follows — wait on the condition, never on a fixed sleep. This
+        is the second site of that race; the sibling's was fixed by commit
+        235fdff, and this one surfaced as the v1.21.0 publish run's macOS
+        leg (2026-11-01).
 
         Args:
             recorder: The started recorder.
