@@ -323,7 +323,7 @@ class TestSocketLevelConnectionLogging:
         :meth:`~harness.curl_recorder.CurlLoggingServer.connection_made`
         completes it on a later loop iteration, when the server-side
         handshake finishes — which can be *after* the client-side
-        ``wrap_socket`` that :func:`_open_only` returns on (measured on the
+        ``wrap_socket`` that :func:`_open_only_sync` returns on (measured on the
         macOS leg, 2026-11-01: this assertion read the log between the two
         and saw the record still carrying ``-1``). So the test waits on the
         condition — the record carrying the reported port — with the same
