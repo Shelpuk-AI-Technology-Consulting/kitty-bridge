@@ -9,12 +9,16 @@ depends_on: []
 
 §7.2.3's contract is that the recorder's connection record is created at
 accept time with `peer_port = -1` and filled in by `connection_made` on
-handshake success, so that "every port it opens is filled in before the
-check runs". One check did not wait: `test_curl_recorder.py`'s
-silent-connection test read the log the moment its client-side handshake
-returned. The server-side handshake — the one that fills the port — can
-complete a loop iteration later, so on the macOS leg the record still
-carried the placeholder and the assertion read `assert -1 == <port>`.
+handshake success. Its "every port it opens is filled in before the check
+runs" is scoped to the conformance driver's probes: a probe's reply cannot
+arrive before the server-side handshake completes, so the reply is its
+synchronisation — and the silent connection this step fixes sends none, so
+its check must wait explicitly. One check did not wait:
+`test_curl_recorder.py`'s silent-connection test read the log the moment
+its client-side handshake returned. The server-side handshake — the one
+that fills the port — can complete a loop iteration later, so on the macOS
+leg the record still carried the placeholder and the assertion read
+`assert -1 == <port>`.
 
 This step closes that gap the way the file's other async-appearing
 assertions already do: wait on the condition — the record carrying the
