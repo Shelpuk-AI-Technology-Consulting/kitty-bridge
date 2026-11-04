@@ -616,6 +616,26 @@ async def test_a_different_unknown_variant_strips_nothing():
     assert all("redacted_thinking" in _block_types(body) for body, _ in calls)
 
 
+@pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
+@pytest.mark.asyncio
+async def test_a_rejection_with_no_block_to_remove_is_not_remembered(stream):
+    """R6 — §18.3's echoed error text matches the detector, but nothing was refused.
+
+    Remembering the backend here would cost it every later redacted block until restart.
+
+    Args:
+        stream: Whether the client request streams.
+    """
+    server = _server()
+    history = [{"role": "user", "content": "hello"}]
+
+    status, _calls = await _drive(server, lambda _b, _h: (422, _REJECTION), stream=stream, history=history)
+
+    assert status == 422
+    assert server._redacted_thinking_strip_backends == set()
+    assert server._session_stats()["thinking_stripped"] == 0
+
+
 # ── R7: the recovery is visible ─────────────────────────────────────────────
 
 
