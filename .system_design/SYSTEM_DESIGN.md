@@ -2499,7 +2499,7 @@ error — in which case no request reaches the bridge at all — or its token-le
 Anthropic and parks the subscription member as `auth`. The translated members then serve under
 their own keys (the recovery contract below), and the credential-rejection headline, whose
 remediation is `claude auth login`, not a key change, surfaces only when no member can serve;
-until then the login problem is visible only in the bridge log and `/stats`. The park does not end when the user signs in again: an `auth` park runs a fixed 900 s
+until then the login problem shows only as a cooldown on `/stats` and, under `--debug`, in the bridge log. The park does not end when the user signs in again: an `auth` park runs a fixed 900 s
 cooldown that only expiry clears, so after `claude auth login` the member rejoins the pool only
 when that cooldown lapses, and the API-key members keep serving until then. Recording a
 subscription-aware headline for that terminal is a deliberate non-goal
@@ -2656,11 +2656,11 @@ out the read timeout; a failure after the first byte still closes the stream; an
 failure (`ClientResponseError`) still propagates. Accepted consequences: a request-shaped fall-over
 can reach a **backup** member while the plan is healthy, since the walk cannot see the subscription
 member; an account-state 400 (not verified on the OAuth path) would repeat without a park, visible only
-in the log. A prompt-too-long 400 falls over, but compaction there is not assured: the budget is a
+in the log under `--debug`. A prompt-too-long 400 falls over, but compaction there is not assured: the budget is a
 character estimate over the pool's smallest window, nothing remembers the rejection, so each relay pick
 repeats it, and Claude Code never sees the overflow error it would otherwise compact on. Every relay
-upstream error reply logs its status and body, in every mode, because the park alone records only its
-kind, which is how this defect stayed invisible.
+upstream error reply logs its status and body, in pool and single-profile mode alike, because the park alone records only its
+kind, which is how this defect stayed invisible. That log reaches a file only under `--debug` or `--debug-file`; without them, `/stats` is the only trace.
 
 ### 16.2 Decisions, and why
 
