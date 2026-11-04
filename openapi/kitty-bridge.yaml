@@ -5,7 +5,7 @@ info:
   # document's creation, KBR-82); pinned by
   # tests/test_pypi_packaging.py::TestVersionConsistency -- bump it with
   # the release.
-  version: "1.21.0"
+  version: "1.22.0"
   description: |
     The local API bridge between Claude Code / Codex / Gemini CLI agents and
     upstream LLM providers. Published so the agents — third parties on their
