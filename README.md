@@ -542,8 +542,10 @@ and `grep 'tool_use audit:'` for the offending payloads.
 
 `thinking_stripped` counts the thinking blocks the bridge had to strip and retry because the upstream rejected their
 signatures — which, since the signed history is carried through, means the conversation history was edited (by
-compaction or truncation) and the model lost reasoning that was still valid. It is reported per backend and as a
-session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
+compaction or truncation) and the model lost reasoning that was still valid. On a Claude subscription member it has a
+second meaning: the relay removed reasoning Anthropic can't verify, usually another pool member's, after a refusal or
+before relaying, so a rising count on a mixed pool is expected and doesn't point at compaction. It is reported per backend
+and as a session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
 A compaction-heavy session whose reasoning keeps degrading shows up here.
 
 `recovery_holds` counts the arrival recovery holds: each time the bridge held a request because *every* member of the

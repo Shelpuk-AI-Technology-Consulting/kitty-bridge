@@ -2625,7 +2625,10 @@ MiniMax sat healthy. The same 503 followed a 429 on a background request. Three 
   normally costs one rejected attempt for the bridge's life, shared by subagents and `/clear`
   (concurrent first requests may each pay one). If Anthropic still refuses, the translated routes'
   `_recover_rejected_thinking` escalates (normally one or two more attempts) and the recorded signatures
-  are forgotten. Strips count in `thinking_stripped` on `/stats`. Bytes change only when a block was removed: a request with nothing to remove stays
+  are forgotten. That set is shared, so a concurrent request relayed after the escalation also removes
+  reasoning Anthropic did issue, once: accepted because escalation needs Anthropic to refuse its own
+  blocks, corrupts nothing, and the set refills from the next reply. Strips count in
+  `thinking_stripped` on `/stats`. Bytes change only when a block was removed: a request with nothing to remove stays
   byte-identical, and a bridge whose reasoning Anthropic has never refused edits nothing. This holds
   in single-backend mode too. Only the refusal texts in `_THINKING_SIGNATURE_PATTERNS` engage it; a
   differently worded refusal falls over instead. Anthropic accepting the stripped history, including
