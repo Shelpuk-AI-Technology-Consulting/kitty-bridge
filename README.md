@@ -189,19 +189,22 @@ $ kitty claude
 
 Sign in to Claude Code first (`claude auth login`) — Kitty checks that local session during setup and never copies or
 stores your OAuth token. This profile works **only with Claude Code**: Kitty relays Claude Code's request to Anthropic
-exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
-rejected subscription account cools down like any other backend and recovers automatically.
+exactly as formed, with one exception below, and other launchers (or a balancing pool used by them) skip subscription
+members. A rate-limited or rejected subscription account cools down like any other backend and recovers automatically; a
+rejection of the request itself (HTTP 400, 413 or 422) doesn't cool it down, because the account isn't at fault.
 
-The subscription also works as a member of a balancing pool next to other providers, with two differences from a
-subscription-only setup. If Anthropic can't serve a request before any reply has started, another member of the pool
-usually answers that turn instead of Claude Code stopping with an error, so a turn may come from a different provider
-(an error you'd otherwise see, such as a request for an unknown model or an expired sign-in, may only appear in the debug
-log; `kitty doctor` checks the sign-in). And Anthropic can't verify other providers' reasoning, so after it first refuses
-some, Kitty removes the reasoning it can't recognise as signed by Anthropic through this bridge from what it relays for as
-long as the bridge runs, subagents and `/clear` included. Requests with nothing to remove are still relayed byte for byte.
+**The one exception:** Anthropic can't verify reasoning that another provider wrote. After it first refuses some, Kitty
+removes the reasoning it can't recognise as signed by Anthropic through this bridge from what it relays for as long as the
+bridge runs, subagents and `/clear` included. This applies to this profile too, for example on a resumed session. Requests
+with nothing to remove are still relayed byte for byte.
 
-The subscription profile hands your Model value to Anthropic exactly as typed — the relay is byte-for-byte, and Kitty
-neither rewrites the model nor translates anything else in the request — so the dot names from Kitty's bundled model
+The subscription also works as a member of a balancing pool next to other providers. If Anthropic can't serve a request
+before any reply has started, another member of the pool usually answers that turn instead of Claude Code stopping with an
+error, so a turn may come from a different provider (an error you'd otherwise see, such as a request for an unknown model
+or an expired sign-in, may only appear in the debug log; `kitty doctor` checks the sign-in).
+
+The subscription profile hands your Model value to Anthropic exactly as typed — the relay doesn't rewrite the model and
+Kitty translates nothing else in the request — so the dot names from Kitty's bundled model
 catalog (`src/kitty/providers/model_metadata.json`, refreshed from OpenRouter — e.g. `anthropic/claude-opus-5.5`) and a
 `vendor/` prefix are not valid here: both reach Anthropic as typed and are rejected with a model-not-found error. What
 the value must do is name a model Anthropic serves, in the dash-separated id form Anthropic documents. Current ids at

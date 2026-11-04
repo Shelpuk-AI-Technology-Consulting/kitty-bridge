@@ -2575,10 +2575,11 @@ localhost-to-Anthropic hop and aiohttp regenerates them. The raw relay is not av
 Completions, Responses, or Gemini ingress.
 
 Raw relay failures retain status, a bounded response body, and parsed `Retry-After` before entering
-the existing backend-health state. Rate limits use that hint when present; OAuth failures park as
+the existing backend-health state, except the request-shaped 400/413/422, which never enter it
+(`_RELAY_REQUEST_SHAPED_STATUSES`; see the recovery contract below). Rate limits use that hint when present; OAuth failures park as
 `auth`; plan denials park as `entitlement`; transport and other upstream failures use their existing
 kinds. Non-streaming and pre-emission SSE failures share this classifier. A stalled upstream is the
-one classified non-parking failure: before the first byte reaches the client, the relay answers the
+one other non-parking failure: before the first byte reaches the client, the relay answers the
 translated Messages streaming path's 504 `api_error` envelope, parking no backend and failing over
 to none — one timeout semantics for both stream modes. This deliberately diverges from the
 translated path's non-streaming arms (a 500 envelope single-backend; park-and-failover when
