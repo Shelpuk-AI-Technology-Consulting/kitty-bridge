@@ -336,3 +336,47 @@ class TestVersionConsistency:
             "pyproject.toml and in this test in the same PR, then runs "
             "tests/test_curl_cffi_transport_contract.py against the new resolution."
         )
+
+
+# ── R6: Runtime dependency declarations ───────────────────────────────────
+
+
+class TestRuntimeDependencyDeclarations:
+    """Verify the runtime dependencies the product's own contracts require.
+
+    A dependency the product needs but does not declare is invisible until
+    a fresh install meets an environment that happens to lack it.
+    """
+
+    def test_brotli_decoder_is_declared(self):
+        """The Brotli decoder is a declared runtime dependency.
+
+        The Anthropic subscription relay forwards Claude Code's
+        end-to-end headers upstream, ``Accept-Encoding`` included, and
+        Anthropic has answered ``Content-Encoding: br`` when brotli
+        is advertised. aiohttp decodes that only with the optional
+        Brotli package; without it the relay fails inside the decoder
+        before it can read the upstream reply, and the failure surfaces
+        as an opaque decoding error rather than the upstream's own
+        status.
+
+        The floor is aiohttp's own: since 3.13.3 it requires Brotli 1.2 or
+        newer, and kitty does not install the ``speedups`` extra that would
+        impose it. The requirement is declared directly rather than through that
+        extra, which would also add ``aiodns`` and change DNS resolution
+        for every provider route.
+        """
+        pyproject = (ROOT / "pyproject.toml").read_text()
+        declared = [
+            line.strip().strip(',"')
+            for line in pyproject.splitlines()
+            if line.strip().startswith('"Brotli')
+        ]
+        assert len(declared) == 1, (
+            f"expected exactly one Brotli dependency line in pyproject.toml, found {declared!r}"
+        )
+        assert declared[0] == "Brotli>=1.2", (
+            f"Brotli floor drifted from aiohttp's requirement (Brotli>=1.2, required since "
+            f"aiohttp 3.13.3), found {declared[0]!r}. "
+            "A deliberate change updates the range here and in pyproject.toml in the same PR."
+        )

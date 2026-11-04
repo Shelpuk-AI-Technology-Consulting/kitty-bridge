@@ -26,6 +26,18 @@ classifiers = [
 ]
 dependencies = [
     "aiohttp>=3.11,<3.14",
+    # The Anthropic subscription relay forwards Claude Code's end-to-end
+    # headers upstream, `Accept-Encoding` included. Anthropic has answered with
+    # `Content-Encoding: br` on every reply measured with brotli advertised (error
+    # replies; successes were not sampled), and aiohttp can
+    # decode that only with the optional Brotli package -- without it the
+    # relay dies inside the decoder before it can read the upstream reply.
+    # Declared directly rather than through `aiohttp[speedups]`, which would
+    # also add aiodns and change DNS resolution for every provider route.
+    # The floor is aiohttp's own: since 3.13.3 it requires Brotli 1.2 or newer,
+    # and kitty does not install the extra that would impose it. Verified by
+    # tests/bridge/test_subscription_messages_relay.py.
+    "Brotli>=1.2",
     # Bounded by decision (KBR-283, 2026-09-18): the only unbounded HTTP
     # transport the code drove directly carried the OAuth refresh leg,
     # and curl_cffi 0.16.3 already showed same-release platform drift

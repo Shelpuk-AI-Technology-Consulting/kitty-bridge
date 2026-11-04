@@ -883,6 +883,75 @@ def _strip_thinking_blocks(body: dict, *, through_message: int | None = None) ->
     return changed
 
 
+def _strip_thinking_not_issued(body: dict, issued: set[str]) -> bool:
+    # pragma: no mutate block
+    """Remove reasoning Anthropic did not issue through this bridge, keeping what it did.
+
+    A mixed pool's history holds blocks other members signed, which Anthropic
+    refuses, next to blocks it signed itself. Removing only the former keeps the
+    model's fresh reasoning on later turns, the reason :func:`_strip_thinking_blocks`
+    is targeted (``TEST_SUITE.md`` M17). A block signed in an earlier bridge is
+    indistinguishable from a foreign one and goes too, and so does every
+    ``redacted_thinking`` block, which carries no signature to recognise.
+    Copy-on-write, with message indices preserved, for the reasons that function gives.
+
+    Args:
+        body: The outgoing Messages body. Its ``messages`` key is rebound when
+            anything changes; the original list and messages are untouched.
+        issued: Signatures Anthropic returned through this bridge.
+
+    Returns:
+        True if at least one block was removed.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    stripped = messages.copy()
+    changed = False
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
+            continue
+        kept = [
+            block
+            for block in msg["content"]
+            if not (
+                isinstance(block, dict)
+                and block.get("type") in ("thinking", "redacted_thinking")
+                and not (isinstance(block.get("signature"), str) and block["signature"] in issued)
+            )
+        ]
+        if len(kept) != len(msg["content"]):
+            stripped[index] = {**msg, "content": kept}
+            changed = True
+    if changed:
+        body["messages"] = stripped
+    return changed
+
+
+def _anthropic_sse_signature(line: bytes) -> str | None:
+    # pragma: no mutate block
+    """Read the thinking signature one relayed SSE line carries, if any.
+
+    Args:
+        line: One raw SSE line from the upstream stream.
+
+    Returns:
+        The signature of a ``signature_delta`` event, otherwise ``None``.
+    """
+    stripped = line.strip()
+    if not stripped.startswith(b"data:"):
+        return None
+    try:
+        event = json.loads(stripped[5:])
+    except ValueError:
+        return None
+    delta = event.get("delta") if isinstance(event, dict) else None
+    if isinstance(delta, dict) and delta.get("type") == "signature_delta":
+        signature = delta.get("signature")
+        return signature if isinstance(signature, str) and signature else None
+    return None
+
+
 def _is_unverifiable_thinking(block: object, *, in_range: bool) -> bool:
     # pragma: no mutate block
     """Return whether a content block is thinking the strip must remove.
@@ -2056,6 +2125,15 @@ _SUBSCRIPTION_PROVIDER_TYPE = "anthropic_subscription"
 #: the head, and structured API errors are far smaller than this.
 _SUBSCRIPTION_MAX_ERROR_CHARS = 16_384
 
+#: Relay rejections usually aimed at the request rather than the member, so nobody is parked for
+#: them (§16). 404 is absent on purpose: a member's unknown model repeats for its alias traffic,
+#: which is what a cooldown is for; ``_crossing_barred`` reads the same status as "do not retry".
+_RELAY_REQUEST_SHAPED_STATUSES = frozenset({400, 413, 422})
+
+#: Request-scoped mark that the relay already refused this request, so the translated walk it
+#: fell over to does not offer it back through the last-resort crossing (§16).
+_RELAY_REFUSED_REQUEST_KEY = "subscription_relay_refused"
+
 #: Inbound headers the subscription relay never forwards. Authority, framing,
 #: and hop-by-hop headers describe the localhost hop, not the Anthropic one;
 #: aiohttp regenerates them for the upstream connection.
@@ -2217,6 +2295,14 @@ class BridgeServer:
         # mode.  Mutated only by `set.add` with no await in between, which is
         # atomic across the concurrent request tasks sharing this loop.
         self._thinking_repair_backends: set[int] = set()
+
+        # Set once Anthropic refuses a relayed transcript's reasoning. A pool's
+        # transcript keeps its foreign-signed blocks, so later relayed requests on
+        # this bridge (subagents and /clear included) strip them before relaying
+        # instead of paying a rejected round trip each (§16). The signatures
+        # Anthropic returned here are what the strip keeps.
+        self._relay_strip_thinking = False
+        self._relay_issued_signatures: set[str] = set()
 
         # Backend health tracking (parallel to _backends)
         self._backend_health: list[dict] = []
@@ -2389,8 +2475,8 @@ class BridgeServer:
             require_streaming: Exclude backends whose provider does not
                 implement a custom transport ``stream_request()`` override.
             require_subscription: Exclude backends that are not subscription
-                relays, so a raw subscription request never fails over to
-                an API-key translation path.
+                relays, for the relay's own attempts: a raw request carries
+                Claude Code's identity, so only a relay may post it.
             allow_subscription: Admit subscription relays into a translated
                 selection. Defaults to False: subscription members carry no
                 stored credential, so a translated dispatch to one answers a
@@ -3286,8 +3372,8 @@ class BridgeServer:
 
         When require_streaming is True, only selects backends whose provider
         overrides stream_request() from the base ProviderAdapter. When
-        require_subscription is True, only selects subscription backends, so
-        a raw subscription request never crosses into an API-key path. By
+        require_subscription is True, only selects subscription backends: the
+        relay's own attempts, whose raw request carries Claude Code's identity. By
         default (``allow_subscription=False``) a translated selection skips
         subscription backends entirely — they carry no stored credential and
         cannot authenticate a translated dispatch (§16); only the arrival
@@ -5606,7 +5692,8 @@ class BridgeServer:
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
         # Subscription traffic is Claude Code's own request: relay it byte for
-        # byte instead of translating it. `request.read()` serves the cached
+        # byte (until Anthropic refuses its reasoning, §16) instead of translating
+        # it. `request.read()` serves the cached
         # bytes `request.json()` consumed above, so this performs no second I/O.
         if _is_subscription_provider(self._active_provider):
             if not isinstance(body, dict):
@@ -5620,12 +5707,20 @@ class BridgeServer:
                     },
                 )
             try:
-                return await self._relay_subscription_messages(request, body, await request.read())
+                relayed = await self._relay_subscription_messages(
+                    request, body, await request.read(), may_fall_over=True
+                )
             except Exception as exc:
                 envelope = self._relay_failure_envelope(exc)
                 if envelope is None:
                     raise
                 return envelope
+            if relayed is not None:
+                return relayed
+            # The relay failed before any byte reached the client and selected a
+            # translated member: the walk below serves the request under that
+            # member's own key. Claude Code's OAuth headers go no further (§16).
+            request[_RELAY_REFUSED_REQUEST_KEY] = True
 
         try:
             _normalize_messages_request(body)
@@ -5977,10 +6072,11 @@ class BridgeServer:
         The overflow role a mixed pool's subscription member exists to play
         (§16): when every translated attempt has failed and the error would
         surface before any byte has reached the client, the healthy member is
-        selected and the ORIGINAL inbound bytes are relayed under Claude
-        Code's own headers. The relay keeps all of its semantics — byte
-        preservation, confinement to subscription members, the shared health
-        classifier, and its own terminal envelopes when it fails too.
+        selected and the original inbound bytes, not any compacted form, are
+        relayed under Claude Code's own headers. The relay keeps all of its
+        semantics — its refused-reasoning recovery, the shared health classifier,
+        and its own terminal envelopes when it fails too. It does not fall over
+        again: the translated walk has already been exhausted.
 
         Args:
             request: The inbound client request (raw bytes are re-read from
@@ -5991,7 +6087,8 @@ class BridgeServer:
         Returns:
             The relay's response, or ``None`` when the crossing does not
             apply: single-backend mode, the relay forbidden, no healthy
-            member, or the original bytes unreadable.
+            member, the relay already refused this request, or the original
+            bytes unreadable.
 
         Raises:
             Exception: Whatever the relay attempt raises once the crossing
@@ -6004,6 +6101,9 @@ class BridgeServer:
                 members already rejected with 400 is not offered again.
         """
         if not self._backends or self._subscription_relay_forbidden():
+            return None
+        # This walk may itself be the relay's fall-over; relaying again would only repeat the refusal.
+        if request.get(_RELAY_REFUSED_REQUEST_KEY):
             return None
         if not self._any_healthy_backend(require_subscription=True):
             return None
@@ -6025,10 +6125,8 @@ class BridgeServer:
 
         A 400/404/413/422 from the last translated attempt means the request
         itself is bad — F4 stops the walk on it and D3's rationale says the
-        agent will not retry. Offering the crossing would post a body known
-        to be malformed to the subscription member, park it ``hard`` for
-        Anthropic's identical 400, and turn a non-retryable request error
-        into a 503 (review round 4). Auth and rate-limit statuses stay
+        agent will not retry, so another attempt at a body known to be malformed
+        gains nothing (review round 4). Auth and rate-limit statuses stay
         member-shaped: the crossing is exactly what serves them.
 
         Args:
@@ -6097,17 +6195,30 @@ class BridgeServer:
             )
         return None
 
-    async def _relay_subscription_messages(self, request: web.Request, body: dict, raw: bytes) -> web.StreamResponse:
+    async def _relay_subscription_messages(
+        self, request: web.Request, body: dict, raw: bytes, *, may_fall_over: bool = False
+    ) -> web.StreamResponse | None:
         # pragma: no mutate block
         """Relay Claude Code's Messages request to Anthropic byte for byte.
 
+        The body changes only after Anthropic refuses its reasoning (see
+        :meth:`_relay_attempt_recovering_thinking`). A failure that leaves no
+        subscription sibling falls over to a translated member when the caller
+        allows it, so one rejected attempt does not end the turn while the rest
+        of the pool is healthy (§16).
+
         Args:
             request: The inbound client request.
-            body: Parsed only for the stream flag and upstream URL.
+            body: Parsed for the stream flag, the upstream URL and any recovery;
+                a fall-over always serves it unedited.
             raw: The inbound JSON bytes, exactly as received.
+            may_fall_over: Whether a translated walk can take over. True on the
+                arrival path; False on the last-resort crossing, whose translated
+                walk has already been exhausted.
 
         Returns:
-            The upstream JSON or SSE reply as received.
+            The upstream JSON or SSE reply as received, a terminal envelope, or
+            ``None`` when a translated member was selected to serve the request.
 
         Raises:
             UpstreamError: When the relay's retry policy exhausts.
@@ -6122,33 +6233,24 @@ class BridgeServer:
         if not self._backends:
             while True:
                 try:
-                    return await self._relay_subscription_attempt(request, body, raw, url, headers)
+                    return await self._relay_attempt_recovering_thinking(request, body, raw, url, headers)
                 except Exception as exc:
                     # Single-backend mode honours the same grace before
                     # surfacing: the handler's transport arm answers once the
                     # window is spent.
                     if not await self._wait_out_transport_blip(exc, grace):
                         raise
-        consecutive_400_count = 0
         while True:
             try:
-                response = await self._relay_subscription_attempt(request, body, raw, url, headers)
+                response = await self._relay_attempt_recovering_thinking(request, body, raw, url, headers)
             except UpstreamError as exc:
                 self._mark_subscription_unhealthy(exc)
-                # F4: after 2 members reject the same body with 400, stop
-                # burning members — the request itself is bad, and the third
-                # would only add a 300s cooldown to a healthy profile.
-                if exc.status == 400:
-                    consecutive_400_count += 1
-                    if consecutive_400_count >= 2:
-                        logger.warning(
-                            "Subscription request rejected by %d members (400) — "
-                            "stopping failover, surfacing error to client",
-                            consecutive_400_count,
-                        )
-                        return self._subscription_error_message_envelope(exc)
-                else:
-                    consecutive_400_count = 0
+                # Subscription siblings share one identity and would refuse the
+                # same request, and nothing was parked, so retrying could not end.
+                if exc.status in _RELAY_REQUEST_SHAPED_STATUSES:
+                    if self._fall_over_to_translated(may_fall_over):
+                        return None
+                    return self._subscription_error_message_envelope(exc)
             except Exception as exc:
                 # A dropped wire to Anthropic first rides out the same
                 # transport grace every translated route honours: retry the
@@ -6170,22 +6272,114 @@ class BridgeServer:
             # Checked before selecting so the cooldown gamble cannot send an
             # already-parked member another doomed attempt.
             if not self._any_healthy_backend(require_subscription=True):
-                return self._all_unhealthy_response(self._subscription_all_unhealthy(), style="anthropic")
+                if self._fall_over_to_translated(may_fall_over):
+                    return None
+                return self._all_unhealthy_response(
+                    self._subscription_all_unhealthy(whole_pool=may_fall_over), style="anthropic"
+                )
             try:
                 self._select_backend(require_subscription=True)
-            except AllBackendsUnhealthyError as unhealthy:
+            except AllBackendsUnhealthyError:
                 # Lost a race with another request, which parked the last
                 # eligible member between the check and the selection.
-                return self._all_unhealthy_response(unhealthy, style="anthropic")
+                if self._fall_over_to_translated(may_fall_over):
+                    return None
+                return self._all_unhealthy_response(
+                    self._subscription_all_unhealthy(whole_pool=may_fall_over), style="anthropic"
+                )
             url = self._build_upstream_url(body)
 
-    def _subscription_all_unhealthy(self) -> AllBackendsUnhealthyError:
+    def _fall_over_to_translated(self, may_fall_over: bool) -> bool:
+        # pragma: no mutate block
+        """Select a translated member to serve a request the relay could not.
+
+        Args:
+            may_fall_over: Whether the caller has a translated walk to continue into.
+
+        Returns:
+            True when a translated member is now the active backend.
+        """
+        if not may_fall_over or not self._backends or not self._any_healthy_backend():
+            return False
+        try:
+            self._select_backend()
+        except AllBackendsUnhealthyError:
+            return False
+        logger.warning(
+            "Subscription relay failed; falling over to translated member %s",
+            self._backends[self._current_backend_idx][2].name,
+        )
+        return True
+
+    async def _relay_attempt_recovering_thinking(
+        self, request: web.Request, body: dict, raw: bytes, url: str, headers: dict[str, str]
+    ) -> web.StreamResponse:
+        # pragma: no mutate block
+        """Post one relay attempt, removing reasoning Anthropic refuses to verify.
+
+        A mixed pool's transcript carries ``thinking`` blocks other members signed,
+        and Anthropic rejects the whole request for them. The first attempt stays
+        byte-exact: only Anthropic can say which signatures it accepts, and guessing
+        from their shape would edit transcripts it would have served. A refusal
+        removes the reasoning Anthropic did not issue through this bridge and
+        retries the same member, and later requests do that before relaying. If
+        Anthropic still refuses, the translated routes' escalating strip takes
+        over and the issued signatures are forgotten, since they could not be
+        trusted. Bytes change only when a block was actually removed.
+
+        Args:
+            request: The inbound client request.
+            body: The parsed inbound body; never edited.
+            raw: The inbound JSON bytes, exactly as received.
+            url: The upstream Messages endpoint.
+            headers: The relayed end-to-end headers.
+
+        Returns:
+            The upstream reply.
+
+        Raises:
+            UpstreamError: When the upstream fails for any other reason, or the
+                strip has nothing left to remove.
+        """
+        working = dict(body)
+        payload = raw
+        if self._relay_strip_thinking and _strip_thinking_not_issued(working, self._relay_issued_signatures):
+            logger.debug("Subscription relay removed reasoning Anthropic did not issue before relaying")
+            self._record_thinking_stripped()
+            payload = json.dumps(working).encode()
+        strips_done = 0
+        while True:
+            try:
+                return await self._relay_subscription_attempt(request, working, payload, url, headers)
+            except UpstreamError as exc:
+                # The park alone says "hard"; without the upstream's words a rejection cannot be diagnosed.
+                logger.error("Subscription relay upstream error %d: %s", exc.status, exc.body)
+                if not _is_thinking_signature_error(exc.status, exc.body):
+                    raise
+                self._relay_strip_thinking = True
+                if not _strip_thinking_not_issued(working, self._relay_issued_signatures):
+                    if not _recover_rejected_thinking(working, exc.body, strips_done):
+                        raise
+                    strips_done += 1
+                    # Anthropic refused blocks it had signed, so recognising them proves nothing.
+                    self._relay_issued_signatures.clear()
+                self._record_thinking_stripped()
+                logger.warning("Subscription relay removed reasoning Anthropic refused; retrying the same member")
+                payload = json.dumps(working).encode()
+
+    def _subscription_all_unhealthy(self, *, whole_pool: bool = False) -> AllBackendsUnhealthyError:
         # pragma: no mutate block
         """Build the all-unhealthy error for an exhausted subscription pool.
 
-        Carries every subscription member's remaining cooldown and cause so
-        the 503 names the rate limit, auth, or entitlement failure that took
-        the pool down — the same shape selection failures produce.
+        Carries each member's remaining cooldown and cause so the 503 names the
+        rate limit, auth, or entitlement failure that took the pool down — the
+        same shape selection failures produce.
+
+        Args:
+            whole_pool: Report every member. True when the fall-over was refused
+                because the rest of the pool is down too, so the 503 does not name
+                one backend while several are out. False on the crossing, which
+                speaks only for the subscription subset.
 
         Returns:
             The error to render with :meth:`_all_unhealthy_response`.
@@ -6194,7 +6388,7 @@ class BridgeServer:
         backend_status = []
         remaining_periods: list[int] = []
         for idx, backend in enumerate(self._backends or []):
-            if not _is_subscription_provider(backend[0]):
+            if not whole_pool and not _is_subscription_provider(backend[0]):
                 continue
             health = self._backend_health[idx]
             remaining = 0
@@ -6222,7 +6416,9 @@ class BridgeServer:
         down exactly like any other backend. Rate limits honor the upstream
         ``Retry-After`` hint the failure carries, when present. Transport
         blips never arrive here — they bypass :class:`UpstreamError` and are
-        parked by the relay loop itself.
+        parked by the relay loop itself. A rejection of the request itself
+        parks nobody: the member is healthy, and a cooldown would only take it
+        away from the requests it can serve (§16).
 
         Args:
             exc: The relay failure carrying status, body, and retry hint.
@@ -6231,6 +6427,8 @@ class BridgeServer:
         if idx < 0:
             return
         text = exc.body if isinstance(exc.body, str) else json.dumps(exc.body, ensure_ascii=False)
+        if exc.status in _RELAY_REQUEST_SHAPED_STATUSES:
+            return
         if exc.status == 429:
             failure_kind = "rate_limit"
         elif isinstance(exc.body, str) and self._is_cloudflare_block(exc.status, exc.body):
@@ -6261,7 +6459,7 @@ class BridgeServer:
         Args:
             request: The inbound client request.
             body: The parsed inbound body, read only for the stream flag.
-            raw: The inbound JSON bytes, exactly as received.
+            raw: The JSON bytes to post: the inbound bytes unless reasoning was removed.
             url: The upstream Messages endpoint.
             headers: The relayed end-to-end headers.
 
@@ -6296,6 +6494,10 @@ class BridgeServer:
                 parsed = None
             if isinstance(parsed, dict):
                 self._log_usage(_anthropic_usage_for_attribution(parsed.get("usage")))
+                for block in parsed.get("content") or []:
+                    signature = block.get("signature") if isinstance(block, dict) else None
+                    if isinstance(signature, str) and signature and block.get("type") == "thinking":
+                        self._relay_issued_signatures.add(signature)
         return web.Response(body=raw_upstream, status=status, headers=response_headers)
 
     async def _relay_subscription_messages_stream(
@@ -6312,7 +6514,7 @@ class BridgeServer:
 
         Args:
             request: The inbound client request.
-            raw: The inbound JSON bytes, exactly as received.
+            raw: The JSON bytes to post: the inbound bytes unless reasoning was removed.
             url: The upstream Messages endpoint.
             headers: The relayed end-to-end headers.
 
@@ -6365,6 +6567,10 @@ class BridgeServer:
                         line, _, sse_buffer = sse_buffer.partition(b"\n")
                         if _anthropic_sse_usage(line, stream_usage):
                             usage_seen = True
+                        elif b"signature_delta" in line:
+                            signature = _anthropic_sse_signature(line)
+                            if signature:
+                                self._relay_issued_signatures.add(signature)
             except ClientDisconnectedError:
                 return sr
             except Exception as exc:

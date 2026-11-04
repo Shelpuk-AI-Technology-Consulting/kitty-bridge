@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import aiohttp
 import pytest
+from aiohttp import web
 from aioresponses import aioresponses
 
 from kitty.bridge.server import BridgeServer
@@ -62,6 +63,27 @@ _EXACT_REPLY_BYTES = (
     b'"usage" : {"input_tokens" : 3 , "output_tokens" : 0}}'
 )
 
+#: ``_EXACT_REPLY_BYTES`` compressed with brotli (quality 11). Anthropic
+#: answers with ``Content-Encoding: br`` whenever the request advertises
+#: brotli, which Claude Code always does -- so the relay must be able to
+#: decode it. The compressed form is committed as bytes rather than
+#: compressed at test time: the test then needs no encoder to run, and
+#: reproduces the production failure verbatim when no decoder is present.
+_BROTLI_EXACT_REPLY_BYTES = bytes.fromhex(
+    "1bc400088cd315f723b4cd27735ba95f76202886a52acf787ee379786698263140e0df763060fbef768345c3b23ca98c4"
+    "24d3786510ce5623953ac8df90b0ced46c2a7d28857be01693c1468cd13c5d52f813204fecf7f2f358ae16e932ab5a0b036d9"
+    "10f73457418a09540778a347cae15b800b3fc69a6acfe700"
+)
+
+#: ``_SSE_REPLY`` compressed with brotli (quality 11), for the streaming
+#: counterpart of the decode guard.
+_BROTLI_SSE_REPLY = bytes.fromhex(
+    "1b9801001c076eacd8932875d3311544702d5fc1e1ab063af0ceaf2c169d00193cb7121a983da2ed5ce101daa2073ef0cdafd"
+    "b84083c7bd6449dca718308d30aba2aff79f445963b2184c03afc32b5efd175285e7061407a3956a90b8c71597e25cd5addd"
+    "b4ebd1efbdedd5447f5c00abc4c3285ebed3815227b9c3622ce9068e63d1dae60ad188d9f579a068efbed94ffff5fa468219e56c8"
+    "a615abbc58fa1a2d031d286828a0561f565f91ca0113124f049e2bbdf1385dfb38f9b922"
+)
+
 #: Every header the relay must strip, plus the end-to-end set it must keep.
 _ALL_STRIPPED = [
     "host",
@@ -91,13 +113,19 @@ _UPSTREAM_REPLY = {
 #: End-to-end headers Claude Code sends that the relay must preserve.
 _INBOUND_HEADERS = {
     "Authorization": "Bearer sk-ant-oat-test",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
     "anthropic-beta": "test-beta",
     "anthropic-version": "2023-06-01",
 }
 
 
-def _make_server() -> BridgeServer:
+def _make_server(provider: AnthropicSubscriptionAdapter | None = None) -> BridgeServer:
     """Build a bridge-mode server fronting the subscription provider.
+
+    Args:
+        provider: The subscription adapter to front. Defaults to the real
+            Anthropic upstream; the brotli tests pass one pointed at a
+            local upstream.
 
     Returns:
         A server bound to an ephemeral port, not yet started. The resolved
@@ -106,7 +134,7 @@ def _make_server() -> BridgeServer:
     """
     return BridgeServer(
         adapter=None,
-        provider=AnthropicSubscriptionAdapter(),
+        provider=provider if provider is not None else AnthropicSubscriptionAdapter(),
         resolved_key="",
         host="127.0.0.1",
         port=0,
@@ -130,6 +158,70 @@ def _shipped_kwargs(m: aioresponses) -> dict:
     request_list = m.requests.get(("POST", aiohttp.client.URL(_UPSTREAM_URL)), [])
     assert len(request_list) == 1, f"expected exactly one upstream POST, got {len(request_list)}"
     return request_list[0].kwargs
+
+
+class _LocalUpstreamProvider(AnthropicSubscriptionAdapter):
+    """Subscription adapter whose upstream is a local test server.
+
+    The relay's upstream address comes from the adapter's base URL, so
+    pointing it at a loopback server lets a test serve a real HTTP
+    response -- brotli-compressed bytes with a ``Content-Encoding``
+    header -- instead of a mock that never exercises the decoder.
+
+    Args:
+        base_url: The base URL of the local upstream.
+    """
+
+    def __init__(self, base_url: str) -> None:
+        """Point the adapter at a local upstream.
+
+        Args:
+            base_url: The base URL of the local upstream.
+        """
+        self._base_url = base_url
+
+    @property
+    def default_base_url(self) -> str:
+        """Return the local upstream's base URL.
+
+        Returns:
+            The base URL the local test server was started on.
+        """
+        return self._base_url
+
+
+async def _start_brotli_upstream(body: bytes, content_type: str) -> tuple[web.AppRunner, str]:
+    """Serve one brotli-compressed body from a local upstream.
+
+    Args:
+        body: The already-compressed response bytes.
+        content_type: The response content type.
+
+    Returns:
+        The runner and the base URL the upstream is reachable at. The
+        caller closes the runner.
+    """
+    app = web.Application()
+
+    async def handler(request: web.Request) -> web.Response:
+        """Answer one relay attempt with the compressed body.
+
+        Args:
+            request: The relay's upstream request.
+
+        Returns:
+            The compressed reply, labelled with its content encoding.
+        """
+        await request.read()
+        return web.Response(body=body, headers={"Content-Type": content_type, "Content-Encoding": "br"})
+
+    app.router.add_post("/v1/messages", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    return runner, f"http://127.0.0.1:{port}"
 
 
 class TestSubscriptionExactRelay:
@@ -185,6 +277,11 @@ class TestSubscriptionExactRelay:
 
         sent_headers = {k.lower(): v for k, v in _shipped_kwargs(m).get("headers", {}).items()}
         assert sent_headers.get("authorization") == "Bearer sk-ant-oat-test"
+        assert sent_headers.get("accept-encoding") == "gzip, deflate, br, zstd", (
+            "Accept-Encoding never reached Anthropic: the upstream picks its "
+            "response encoding from this header, so losing it here would retire "
+            "the Brotli decoder the relay needs"
+        )
         assert sent_headers.get("anthropic-beta") == "test-beta"
         assert sent_headers.get("anthropic-version") == "2023-06-01"
         assert sent_headers.get("x-api-key") == "inbound-key-kept"
@@ -239,6 +336,71 @@ class TestSubscriptionExactRelay:
         shipped = _shipped_kwargs(m)
         assert shipped.get("json") is None
         assert shipped.get("data") == _RAW_STREAM_BODY
+
+    @pytest.mark.asyncio()
+    async def test_non_streaming_relay_decodes_brotli_encoded_upstream_reply(self) -> None:
+        """Decode a brotli-compressed upstream reply and ship the plain bytes.
+
+        Anthropic compresses its reply whenever the request advertises
+        brotli, and Claude Code always advertises it. The relay forwards
+        that header unchanged -- pinned by
+        ``test_relay_headers_strips_full_hop_set`` -- so it must be able to
+        decode the reply it asked for.
+
+        The upstream here serves brotli unconditionally. It must not be
+        made conditional on the request advertising it: a conditional
+        upstream would answer with plain bytes when the relay stopped
+        forwarding the header, and the assertion below would then pass
+        without the decoder ever running.
+        """
+        runner, base_url = await _start_brotli_upstream(_BROTLI_EXACT_REPLY_BYTES, "application/json")
+        server = _make_server(_LocalUpstreamProvider(base_url))
+        port = await server.start_async()
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_BODY,
+                    headers={"Content-Type": "application/json", **_INBOUND_HEADERS},
+                ) as resp,
+            ):
+                assert resp.status == 200, await resp.text()
+                client_bytes = await resp.read()
+        finally:
+            await server.stop_async()
+            await runner.cleanup()
+
+        assert client_bytes == _EXACT_REPLY_BYTES
+
+    @pytest.mark.asyncio()
+    async def test_streaming_relay_decodes_brotli_encoded_upstream_sse(self) -> None:
+        """Decode a brotli-compressed upstream SSE reply and forward the events.
+
+        The streaming arm pumps the upstream body chunk by chunk, so a
+        compressed reply reaches the client only if the decoder runs on
+        that path too. The upstream serves brotli unconditionally for the
+        reason the non-streaming test gives.
+        """
+        runner, base_url = await _start_brotli_upstream(_BROTLI_SSE_REPLY, "text/event-stream")
+        server = _make_server(_LocalUpstreamProvider(base_url))
+        port = await server.start_async()
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    data=_RAW_STREAM_BODY,
+                    headers={"Content-Type": "application/json", **_INBOUND_HEADERS},
+                ) as resp,
+            ):
+                assert resp.status == 200, await resp.text()
+                client_bytes = await resp.content.read()
+        finally:
+            await server.stop_async()
+            await runner.cleanup()
+
+        assert client_bytes == _SSE_REPLY
 
 
 class TestSubscriptionRouteBoundary:
@@ -308,10 +470,18 @@ class TestSubscriptionRouteBoundary:
             await server.stop_async()
 
     def test_relay_headers_strips_full_hop_set(self) -> None:
-        """Strip every routing/framing header and keep every end-to-end one."""
+        """Strip every routing/framing header and keep every end-to-end one.
+
+        ``Accept-Encoding`` is the one kept header that carries a product
+        dependency: the upstream picks its response encoding from what this
+        list advertises, so stripping it would silently retire the Brotli
+        decoder the relay now needs. Pinning it here makes that retirement a
+        failing test rather than a quiet drift.
+        """
         server = _make_server()
         inbound = {
             "Authorization": "Bearer sk-ant-oat-test",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
             "anthropic-beta": "test-beta",
             "anthropic-version": "2023-06-01",
             "x-api-key": "inbound-key-kept",
@@ -326,6 +496,11 @@ class TestSubscriptionRouteBoundary:
         for name in _ALL_STRIPPED:
             assert name not in lowered
         assert lowered["authorization"] == "Bearer sk-ant-oat-test"
+        assert lowered.get("accept-encoding") == "gzip, deflate, br, zstd", (
+            "the relay must forward Accept-Encoding unchanged: the upstream chooses "
+            "its response encoding from this list, and dropping it would silently "
+            "retire the Brotli decoder the relay needs"
+        )
         assert lowered["anthropic-beta"] == "test-beta"
         assert lowered["anthropic-version"] == "2023-06-01"
         assert lowered["x-api-key"] == "inbound-key-kept"

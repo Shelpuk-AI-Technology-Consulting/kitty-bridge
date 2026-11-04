@@ -192,6 +192,14 @@ stores your OAuth token. This profile works **only with Claude Code**: Kitty rel
 exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
 rejected subscription account cools down like any other backend and recovers automatically.
 
+The subscription also works as a member of a balancing pool next to other providers, with two differences from a
+subscription-only setup. If Anthropic can't serve a request before any reply has started, another member of the pool
+usually answers that turn instead of Claude Code stopping with an error, so a turn may come from a different provider
+(an error you'd otherwise see, such as a request for an unknown model or an expired sign-in, may only appear in the debug
+log; `kitty doctor` checks the sign-in). And Anthropic can't verify other providers' reasoning, so after it first refuses
+some, Kitty removes the reasoning it can't recognise as signed by Anthropic through this bridge from what it relays for as
+long as the bridge runs, subagents and `/clear` included. Requests with nothing to remove are still relayed byte for byte.
+
 The subscription profile hands your Model value to Anthropic exactly as typed — the relay is byte-for-byte, and Kitty
 neither rewrites the model nor translates anything else in the request — so the dot names from Kitty's bundled model
 catalog (`src/kitty/providers/model_metadata.json`, refreshed from OpenRouter — e.g. `anthropic/claude-opus-5.5`) and a
@@ -324,7 +332,8 @@ subscription member starts Claude Code **from that member**: for it, the agent p
 session — never another member's API key. Three things follow:
 
 - **Sign in first.** The pool's subscription member works only while your Claude Code session is live. If it has
-  expired, that member's request is rejected with a credential error (503, `Retry-After` countdown) until you run
+  expired, the pool's other members serve that member's requests, and you see a credential error (503, `Retry-After`
+  countdown) only when none of them can, until you run
   `claude auth login` — a key change does not help, and the member stays out of the pool for the rest of its
   cooldown (up to 15 minutes). The pool's API-key members keep serving meanwhile,
   unless Claude Code itself stops at its login prompt — then nothing reaches the bridge until you sign in.
@@ -337,9 +346,11 @@ session — never another member's API key. Three things follow:
 - **Non-Claude agents skip it.** Other launchers (or a balancing pool used by them) ignore subscription members, as
   described above — the subscription member only participates under Claude Code.
 - **Failover respects the identity boundary.** Failover among the pool's API-key members never dispatches the
-  subscription member — it serves only through the raw relay. When an API-key failover walk is exhausted before your
-  agent has received any response, kitty makes one attempt through the subscription member's relay with the request
-  exactly as your agent formed it. That attempt spends your Claude subscription quota and keeps the model your agent
+  subscription member — it serves only through the raw relay, and your Claude sign-in never reaches another provider.
+  When the relay can't serve a request before any reply has started, the API-key members take over under their own keys;
+  that can include a **backup** member, because the subscription isn't available to that request. When an API-key failover walk is exhausted before your
+  agent has received any response, kitty tries the subscription member's relay with your agent's original request
+  (not the compacted one), minus any reasoning Anthropic has refused. That attempt spends your Claude subscription quota and keeps the model your agent
   formed, even if the API-key members had rewritten the request for a smaller context. Once your agent has received
   the first byte of a response, a failure is never re-attempted on another member.
 
@@ -1043,7 +1054,7 @@ This is a manual, best-effort configuration. Some IDE-specific features may not 
 ### Can I use my Anthropic (Claude Pro/Team) subscription with Kitty?
 
 Yes — with Claude Code. Set up the **Anthropic Claude.ai Subscription** provider (`kitty setup`), and launch with
-`kitty claude`. Kitty relays Claude Code's request to Anthropic exactly as formed: it translates nothing, stores no
+`kitty claude`. Kitty relays Claude Code's request to Anthropic exactly as formed, apart from removing reasoning Anthropic refuses: it translates nothing, stores no
 token, and your login stays entirely in Claude Code's hands. The profile works **only with Claude Code** — other
 launchers refuse it, and a balancing pool used by another agent skips subscription members. Kitty with Anthropic's API
 directly (per-token billing) remains available through the `anthropic` provider.
