@@ -504,13 +504,23 @@ async def test_a_later_turn_does_not_pay_another_rejection(stream):
 
 
 @pytest.mark.asyncio
-async def test_the_memory_belongs_to_the_backend_that_rejected():
-    """R4 — a sibling that never rejected keeps receiving the block."""
-    strict_key = "key-member-1"
-    seen_by_sibling: list[list[str]] = []
+async def test_the_memory_belongs_to_the_backend_that_rejected(monkeypatch):
+    """R4 — a sibling that never rejected keeps receiving the block.
+
+    The pool draw is scripted because the order is what proves this: the sibling
+    must be asked after the strict member refused, and the strict member again after that.
+
+    Args:
+        monkeypatch: Scripts the pool draw.
+    """
+    draw = [0]
+    monkeypatch.setattr(server_module.random, "choices", lambda _population, weights=None, k=1: list(draw))
 
     def answer(body: dict, headers: dict) -> tuple[int, object]:
-        """Reject on one pool member only.
+        """Reject on one pool member only, and hand each next turn to the other member.
+
+        The draw moves on an answered turn, not per selection, because the number of
+        selections in a turn is not part of what this test pins.
 
         Args:
             body: The captured upstream body.
@@ -519,18 +529,20 @@ async def test_the_memory_belongs_to_the_backend_that_rejected():
         Returns:
             ``(status, reply)``.
         """
-        if headers.get("x-api-key") != strict_key:
-            seen_by_sibling.append(_block_types(body))
-            return 200, _REPLY
-        if "redacted_thinking" in _block_types(body):
+        if headers.get("x-api-key") == "key-member-1" and "redacted_thinking" in _block_types(body):
             return 422, _REJECTION
+        draw[0] = 1 - draw[0]
         return 200, _REPLY
 
-    status, _calls = await _drive(_server(pool=True), answer, stream=False, history=_TOOL_HISTORY, turns=8)
+    status, calls = await _drive(_server(pool=True), answer, stream=False, history=_TOOL_HISTORY, turns=3)
 
     assert status == 200
-    assert seen_by_sibling, "the pool never selected the second member"
-    assert all("redacted_thinking" in types for types in seen_by_sibling)
+    assert [(headers.get("x-api-key"), "redacted_thinking" in _block_types(body)) for body, headers in calls] == [
+        ("key-member-1", True),
+        ("key-member-1", False),
+        ("key-member-2", True),
+        ("key-member-1", False),
+    ]
 
 
 # ── R5: the #32 repair stays available ──────────────────────────────────────
