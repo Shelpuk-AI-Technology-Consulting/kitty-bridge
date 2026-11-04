@@ -2727,3 +2727,73 @@ driving compaction and oversized-request handling) and the launcher's
   (including new `:free` variants) resolve the default unless pinned.
 - The runtime sync fetches over the network; a machine that never reaches
   GitHub runs on the packaged catalog indefinitely.
+
+---
+
+## 18. Upstreams that reject `redacted_thinking`
+
+Claude Code replays `redacted_thinking` blocks produced by Anthropic models. After a mid-session
+switch or failover, the history can reach an Anthropic-compatible upstream that implements `thinking`
+but not `redacted_thinking`, and its parser refuses the whole request with a 4xx:
+``unknown variant `redacted_thinking`, expected one of ...``. Claude Code re-sends the history every
+turn, so without recovery the session stays blocked until the user clears it.
+
+### 18.1 The rule
+
+- `_is_redacted_thinking_unsupported_error` matches a 4xx whose *rejected* variant is
+  `redacted_thinking`.
+- `_strip_redacted_thinking_blocks` removes those blocks from the serialized body, copy-on-write,
+  leaving every other block and every message index in place.
+- `_stream_messages` and `_make_upstream_request` run this and re-send to the same backend: ahead of
+  the M9 fallback on the stream (the non-streaming route has no M9), and ahead of the M17 signature
+  strip on the non-streaming route. The backend index joins `_redacted_thinking_strip_backends`, and `_upstream_body_for`
+  strips up front for those backends, ahead of the issue-#32 carrier repair.
+
+### 18.2 Decisions, and why
+
+- **Strip only after a rejection, never by provider.** Anthropic requires these blocks back unchanged,
+  and `custom_anthropic` may point at Anthropic itself, so a provider-level rule would break a valid
+  route. The upstream's own answer is the only evidence that holds for a user-chosen endpoint.
+- **Match the rejected variant, not the word.** These errors list accepted variants, so a substring
+  match would strip reasoning from an upstream that supports the block and rejected something else.
+- **Run ahead of M9.** The error's "expected" list names `tool_use`, so `_is_tool_use_format_error`
+  also matches it. M9 cannot help, because the KBR-228 carriage restores the same block on signature
+  forwarding routes. `_is_tool_use_format_error` keeps its broad match: narrowing it would change M9 for
+  other wordings, which this change has no evidence about.
+- **Keep `thinking`.** These upstreams accept it, and some require it back (the issue-#32 contract), so
+  M17's strip of both block types would cause the next rejection.
+- **Remember the backend, as `_thinking_repair_backends` does.** The history returns every turn, so
+  without memory each turn pays a rejected round-trip on a body that can be megabytes. The cost is that
+  an upstream which later adds support gets no redacted reasoning until the bridge restarts. It could
+  not read that encrypted data before either.
+- **Do not touch `strip_body`/`strip_count`.** They bar the #32 repair after a signature strip, because
+  an unsigned carrier would be rejected again. This upstream asks for that carrier, so the repair stays
+  open on the stream, the only place that repair runs today.
+- **Two call sites, not five.** The block originates in an Anthropic reply replayed by a Messages client.
+  Responses and Gemini clients have no way to carry one: their translators never produce it, and the
+  native body that the report came from exists only on `/v1/messages`.
+- **Register row M34, not an M17 amendment.** M17's trigger is a signature rejection. A remembered
+  backend strips with no rejection on that request, so M17 could not describe it truthfully.
+- **The subscription relay is untouched.** Its bytes go to Anthropic, which accepts the block, and §16
+  forbids editing them.
+
+### 18.3 Known limits
+
+- Only the `unknown variant` wording is recognised, the one seen from real upstreams. A different
+  parser's wording still reaches the user until it is reported and added.
+- A turn holding nothing but `redacted_thinking` keeps `content: []`, as M17 does. Whether every
+  third-party upstream accepts an empty assistant turn is unverified.
+- The memory is per bridge process and is not persisted.
+- A 4xx that echoes a transcript containing this exact error text also matches, for example a gateway
+  quoting a request in which someone pasted it. That backend then loses its redacted reasoning until the
+  bridge restarts. The request still succeeds, so a stricter parse of each dialect is not worth its cost.
+- An upstream that also demands thinking back recovers only on the stream. On the non-streaming route the
+  issue-#32 carrier repair does not exist, so a turn with no `thinking` block still gets that upstream's
+  400. That gap predates this change and has nothing to do with `redacted_thinking`.
+- A hand-built `/v1/chat/completions` request that sets the internal `_thinking_blocks` key can put the
+  block on the wire on a stream, and that handler has no recovery. No real client does this.
+
+### 18.4 Verification
+
+`tests/bridge/test_redacted_thinking_unsupported.py`; register row M34 (`TEST_SUITE.md` §3.2.1); step
+record `.system_design/steps/redacted_thinking_unsupported_upstream.md`.

@@ -137,7 +137,7 @@ class ArrangingBy(Enum):
       ``provider.dispatch == "_cc_to_responses"``.
     * :attr:`RESPONSE` — a property of the upstream response, arranged by a
       scripted recorder (``M6``, ``M8``, ``M9``, ``M12``, ``M17``,
-      ``M30``, ``M31``, ``M32``). T-D8 reads these from a named
+      ``M30``, ``M31``, ``M32``, ``M34``). T-D8 reads these from a named
       scripted-recorder test, not from the corpus.
     * :attr:`PROFILE` — derived from the profile (``M1`` — profile model;
       ``M4`` / ``M5`` — compaction budget from profile model, and on a
@@ -212,6 +212,9 @@ class Trigger(Enum):
     ORPHAN_TOOL_RESULT = ("orphan_tool_result", ArrangingBy.REQUEST)
     THINKING_ROUNDTRIP_REJECTED = ("thinking_roundtrip_rejected", ArrangingBy.RESPONSE)
     THINKING_SIGNATURE_REJECTED = ("thinking_signature_rejected", ArrangingBy.RESPONSE)
+    # This backend answered a 4xx naming ``redacted_thinking`` as an unknown
+    # variant, on this request or an earlier one (SYSTEM_DESIGN section 18).
+    REDACTED_THINKING_UNSUPPORTED = ("redacted_thinking_unsupported", ArrangingBy.RESPONSE)
     NATIVE_TOOL_USE_FORMAT_ERROR = ("native_tool_use_format_error", ArrangingBy.RESPONSE)
     GEMINI_PROTOCOL = ("gemini_protocol", ArrangingBy.ROUTE)
     GEMINI_NON_STREAMING = ("gemini_non_streaming", ArrangingBy.REQUEST)
@@ -1487,6 +1490,21 @@ _BRIDGE_ROWS: tuple[MutationRow, ...] = (
         conditional=False,
         design_ref="§3.2.1 · §3.3.1b",
         scope=_TRANSLATED_MESSAGES_ADAPTERS,
+    ),
+    MutationRow(
+        id="M34",
+        site=(
+            f"{_SERVER}:BridgeServer._recover_unsupported_redacted_thinking",
+            f"{_SERVER}:_strip_redacted_thinking_blocks",
+        ),
+        trigger=Trigger.REDACTED_THINKING_UNSUPPORTED,
+        # Removes whole parts, so later parts shift index: the same §3.3.1a prefix
+        # anchor M8 and M17 use. Not an M17 amendment: M17's trigger is a signature
+        # rejection, and a remembered backend strips with no rejection on that request.
+        paths=(c.part_path(c.WILDCARD, c.WILDCARD),),
+        conditional=True,
+        design_ref="§3.2.1 · §3.3.1a · §4.3 C3",
+        scope=(ALL_PROVIDERS,),
     ),
 )
 
