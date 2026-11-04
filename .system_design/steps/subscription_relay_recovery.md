@@ -17,6 +17,18 @@ SYSTEM_DESIGN §16.2 holds the reasoning: why the earlier "raw requests stay in 
 subset" rule was reversed, and why recovery reacts to Anthropic's refusal instead of filtering by
 signature shape.
 
+**This step supersedes parts of two earlier records,** which stay as written because a step file
+records its own stage: the relay-to-API-key half of the one-way crossing doctrine, and the shape of
+`_relay_last_resort`'s call, in `mixed_pool_subscription_relay_failover`; and the "two 400s across
+members" rule in `kbr319_subscription_health`. SYSTEM_DESIGN §16 is the design of record.
+
+**This module is not in `SOCKET_BINDING_L1_MODULES`, deliberately.** It binds a real `BridgeServer`
+socket like its unregistered siblings `test_subscription_messages_relay.py`,
+`test_subscription_relay_health.py` and `test_mixed_pool_subscription_failover.py`. The registry also
+feeds the nightly mutation run's `--ignore` rows, so registering the relay's tests would remove the
+coverage of `subscription_relay_crossing`, a change wider than this fix; reclassifying these modules
+belongs with T-K6. It carries the registry's 120 s timeout anyway.
+
 ## Implementation notes
 
 Landed in `src/kitty/bridge/server.py`: `_relay_attempt_recovering_thinking`,

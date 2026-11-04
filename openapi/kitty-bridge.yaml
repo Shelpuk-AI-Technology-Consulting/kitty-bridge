@@ -146,6 +146,10 @@ paths:
           $ref: "#/components/responses/MessagesError"
         "401":
           $ref: "#/components/responses/MessagesUnauthorized"
+        "413":
+          $ref: "#/components/responses/MessagesError"
+        "422":
+          $ref: "#/components/responses/MessagesError"
         "502":
           $ref: "#/components/responses/MessagesUpstreamError"
         "503":

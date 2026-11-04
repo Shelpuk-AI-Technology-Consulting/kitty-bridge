@@ -31,7 +31,7 @@ from kitty.providers.anthropic_subscription import AnthropicSubscriptionAdapter
 from kitty.providers.custom_anthropic import CustomAnthropicAdapter
 
 #: An unbounded relay loop must fail here, not spin for the client's five-minute timeout.
-pytestmark = pytest.mark.timeout(60)
+pytestmark = pytest.mark.timeout(120)
 
 #: Endpoint of the raw subscription relay.
 _RELAY_URL = "https://api.anthropic.com/v1/messages"
