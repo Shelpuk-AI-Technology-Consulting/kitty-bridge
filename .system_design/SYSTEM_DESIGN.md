@@ -2496,19 +2496,20 @@ subscription members should agree on a model. The trade's known failure mode: a 
 rests on a live Claude Code
 session. With an expired or absent session the child either fails with Claude Code's own login
 error — in which case no request reaches the bridge at all — or its token-less request 401s at
-Anthropic and parks the subscription member as `auth` —
-the terminal 503 then speaks the credential-rejection headline, whose remediation is
-`claude auth login`, not a key change (pre-fix, the pool's API-key members still served most
-requests). The park does not end when the user signs in again: an `auth` park runs a fixed 900 s
+Anthropic and parks the subscription member as `auth`. The translated members then serve under
+their own keys (the recovery contract below), and the credential-rejection headline, whose
+remediation is `claude auth login`, not a key change, surfaces only when no member can serve;
+until then the login problem shows only as a cooldown on `/stats` and, under `--debug`, in the bridge log. The park does not end when the user signs in again: an `auth` park runs a fixed 900 s
 cooldown that only expiry clears, so after `claude auth login` the member rejoins the pool only
 when that cooldown lapses, and the API-key members keep serving until then. Recording a
 subscription-aware headline for that terminal is a deliberate non-goal
 here. For a non-Claude balancing launch, Kitty excludes
 subscription members before it constructs backend state; remaining members keep their configured
 order and backup flags. No remaining member is a configuration error, not a fallback to an
-unapproved provider. A Claude-launched mixed pool may retry or fail over a raw subscription request
-only to another subscription member, so that request never crosses into an API-key translation path.
-A BridgeServer guard preserves this boundary for embedded callers.
+unapproved provider. A Claude-launched mixed pool fails a raw subscription request over to another
+subscription member first and, when none is eligible, to a translated member under that member's own
+key (the recovery contract below). A BridgeServer guard refuses subscription pools on any server not
+launched for Claude Code, for embedded callers.
 
 The mirror direction — a translated request's failover walk reaching the subscription
 member — is closed separately (2026-10-29 live diagnosis: the walk selected the member,
@@ -2521,14 +2522,14 @@ request). Translated failover selections skip subscription backends by default:
 round-robin can still land on the member and the relay engages). In exchange the Messages
 routes gain one explicit crossing: when the translated walk is exhausted and the error would
 surface before any byte has reached the client, the bridge selects the healthy subscription
-member and serves the ORIGINAL inbound bytes through the raw relay
+member and serves the original inbound bytes, not a compacted form, through the raw relay
 (`_relay_last_resort`). The crossing is pre-emission-only (the post-emission rule stands),
 exists only on the Messages terminals (streaming plain transport, streaming custom transport,
 non-streaming from both of its error arms) and on the Messages empty-response terminals — the
 five points where every translated member answered content-less and nothing has reached the
 client (streaming plain and custom exhaustion, native streaming ladder exhaustion, and both
 non-streaming gates; a count guard pins one crossing call per terminal, review 2026-10-29) —
-reuses the relay's loop with its confinement, health
+reuses the relay's loop without its fall-over (`may_fall_over=False`), with its health
 classifier, and terminal envelopes intact, and is structurally unreachable from Chat Completions,
 Responses, and Gemini ingress, whose failovers never see the member. The custom-transport
 streaming arm's 429 mark carries `self._retry_after_from_exc(exc)`, matching the other three
@@ -2543,13 +2544,13 @@ including the non-streaming arm and the streaming plain arm, whose stall previou
 the dispatch-loop's catch-all and surfaced as a mangled 502 (review 2026-10-29). The relay is
 offered only for member-shaped failures: a 400/404/413/422 from the last translated attempt bars
 the crossing (`_crossing_barred`) — F4 already establishes the body itself is bad, so
-relaying it would park a healthy subscription member on Anthropic's identical 400 and dress a
-non-retryable client error up as a retryable 503 (review round 4). Auth, rate-limit, and
+another attempt gains nothing (review round 4). Auth, rate-limit, and
 upstream-breakage statuses stay eligible: those are member-shaped, and the member's own OAuth
 identity is exactly what can serve them. The crossing serves the original bytes, so any compaction the translated walk
 performed is discarded: a request that only fit after compaction may be rejected by Anthropic on
-size — an accepted trade-off, deliberate rather than accidental (relaying rewritten bytes would
-end the byte-exact contract §16 exists to keep). Three companion disciplines keep the exclusion
+size — an accepted trade-off, deliberate rather than accidental (relaying compacted bytes would
+end the byte-exact contract §16 exists to keep; the relay's only edit is removing reasoning
+Anthropic refused). Three companion disciplines keep the exclusion
 honest: every walk-internal "is anyone healthy?" guard carries the same subscription visibility
 as the selection it precedes (a guard that passes on a member the selection will refuse converts
 the excluded member into an uncaught `AllBackendsUnhealthyError` — a generic 500); the
@@ -2564,7 +2565,7 @@ separate decision this change does not make.
 
 For an eligible subscription backend on `/v1/messages`, the bridge reads the inbound JSON bytes
 once, validates only enough to return the normal invalid-JSON response, then posts those same bytes
-using `data=`. It does not call model normalization, a translator, compaction, truncation, provider
+using `data=` (until Anthropic refuses reasoning: the recovery contract below). It does not call model normalization, a translator, compaction, truncation, provider
 normalization, synthetic upstream authentication, or token refresh. End-to-end incoming headers —
 including Claude Code's OAuth `Authorization`, `anthropic-beta`, `anthropic-version`, and any
 incoming `x-api-key`, retained when Claude Code sent it — pass through untouched; only synthetic
@@ -2574,10 +2575,11 @@ localhost-to-Anthropic hop and aiohttp regenerates them. The raw relay is not av
 Completions, Responses, or Gemini ingress.
 
 Raw relay failures retain status, a bounded response body, and parsed `Retry-After` before entering
-the existing backend-health state. Rate limits use that hint when present; OAuth failures park as
+the existing backend-health state, except the request-shaped 400/413/422, which never enter it
+(`_RELAY_REQUEST_SHAPED_STATUSES`; see the recovery contract below). Rate limits use that hint when present; OAuth failures park as
 `auth`; plan denials park as `entitlement`; transport and other upstream failures use their existing
 kinds. Non-streaming and pre-emission SSE failures share this classifier. A stalled upstream is the
-one classified non-parking failure: before the first byte reaches the client, the relay answers the
+one other non-parking failure: before the first byte reaches the client, the relay answers the
 translated Messages streaming path's 504 `api_error` envelope, parking no backend and failing over
 to none — one timeout semantics for both stream modes. This deliberately diverges from the
 translated path's non-streaming arms (a 500 envelope single-backend; park-and-failover when
@@ -2588,6 +2590,77 @@ honours — same-member retries while it lasts, park-and-fail-over once it is sp
 single-backend mode the same grace before the handler's 500 envelope. The existing selection,
 failover, all-unhealthy response, healthz/stats, and recovery-hold paths remain the one system for
 every balancing member.
+
+The relay forwards Claude Code's `Accept-Encoding` verbatim, so **Kitty** — not Claude Code —
+terminates the content-coding negotiation on the client-to-Anthropic hop: the upstream chooses
+an encoding from the forwarded list, and Kitty is the party that must decode the answer and hand
+plain bytes to the client. Kitty therefore needs a decoder for every encoding the upstream may
+choose, which makes the decoders a product dependency rather than an environment detail.
+Measured against `api.anthropic.com` on 2026-11-04, on error replies only: Anthropic answered
+`Content-Encoding: br` whenever brotli was advertised and sent no compression when it was not,
+including when zstd was advertised alone. `Brotli` is therefore a declared runtime dependency. No
+zstd decoder is declared, but that rests on that limited sample, not on a statement that Anthropic
+cannot send zstd: a successful reply was not measured. The trigger to revisit it is a
+`Can not decode content-encoding: zstandard (zstd)` error in the bridge log — at which point `backports.zstd`
+joins the dependency list under the same `python_version < "3.14"` marker aiohttp's own extra uses.
+
+The failure this dependency prevents was quiet in a way worth recording. aiohttp raises its
+decoding failure with HTTP status 400, so an upstream 400 and a decode failure are
+indistinguishable in the relay's own log line — `Handler error: 400, message='Can not decode
+content-encoding: brotli (br)...'` — and Anthropic's actual status was never read. The relay
+raised before the reply, so the member was left healthy and no upstream status was recorded: the
+pool looked idle rather than broken, and the only symptom was a request that answered nothing.
+
+**Recovery from a rejected relay attempt** (reproduced live 2026-11-04, owner-confirmed the same day).
+One interactive Claude Code session on a `minimax-mid` + `anthropic` pool stalled the moment a turn
+moved to the subscription: MiniMax's turns had left `thinking` blocks signed with 64-hex values in
+the history, Anthropic answered 400 ``messages.3.content.0: Invalid `signature` in `thinking`
+block``, the member was parked 300 s as `hard`, and the client received `503 All 1 backends` while
+MiniMax sat healthy. The same 503 followed a 429 on a background request. Three rules address it:
+
+- **Signature rejection: recover on the same member.** The first attempt stays byte-exact. On
+  Anthropic's refusal the relay removes, from a copy of the parsed body, the reasoning Anthropic did
+  not issue through this bridge (`_strip_thinking_not_issued`, keeping the signatures recorded from
+  relayed replies) and retries; the member is not parked. The bridge remembers the refusal
+  (`_relay_strip_thinking`) and does the same before relaying later requests, so a mixed history
+  normally costs one rejected attempt for the bridge's life, shared by subagents and `/clear`
+  (concurrent first requests may each pay one). If Anthropic still refuses, the translated routes'
+  `_recover_rejected_thinking` escalates (normally one or two more attempts) and the recorded signatures
+  are forgotten. That set is shared, so a concurrent request relayed after the escalation also removes
+  reasoning Anthropic did issue, once: accepted because escalation needs Anthropic to refuse its own
+  blocks, corrupts nothing, and the set refills from the next reply. Strips count in
+  `thinking_stripped` on `/stats`. Bytes change only when a block was removed: a request with nothing to remove stays
+  byte-identical, and a bridge whose reasoning Anthropic has never refused edits nothing. This holds
+  in single-backend mode too. Only the refusal texts in `_THINKING_SIGNATURE_PATTERNS` engage it; a
+  differently worded refusal falls over instead. Anthropic accepting the stripped history, including
+  assistant turns left with `content: []`, rests on the live run recorded in the step file, on one pool.
+- **No subscription sibling left: fall over to a translated member.** An upstream or transport
+  failure before the first byte reaches the client that leaves no eligible subscription member selects
+  a translated member, and `_handle_messages` continues into its ordinary walk with the unedited
+  body (the strip works on a copy). That walk builds headers from the member's own key, so Claude
+  Code's OAuth token goes no further than Anthropic. A request the relay refused is not offered back
+  through `_relay_last_resort` (a request-scoped mark), so if the walk also fails, the walk's own
+  terminal answers and Anthropic's reason is only in the log. The 503 remains only for a pool with no
+  member able to take the request and then names the whole pool; the crossing keeps its terminal
+  envelopes, because its translated walk has already been exhausted. The walk starts a fresh
+  transport-grace budget, so a dropped wire can wait out the window twice.
+- **Request-shaped rejection: park nobody.** 400, 413 and 422 are usually about the request rather
+  than the member, so they end the relay after one post: to a translated member when one is available,
+  otherwise as the provider's envelope rather than a 503. Subscription siblings are not tried, because
+  they share one identity. 404 still parks: a member's unknown model repeats for its alias traffic.
+  An explicit model id from a subagent or `/model` can also 404 and park the member for other traffic;
+  accepted for now. `_crossing_barred` reads the same status from the translated side as "do not retry".
+
+Limits, deliberate: a stall keeps its 504 and does not fall over, because the client has already waited
+out the read timeout; a failure after the first byte still closes the stream; and a response-decoding
+failure (`ClientResponseError`) still propagates. Accepted consequences: a request-shaped fall-over
+can reach a **backup** member while the plan is healthy, since the walk cannot see the subscription
+member; an account-state 400 (not verified on the OAuth path) would repeat without a park, visible only
+in the log under `--debug`. A prompt-too-long 400 falls over, but compaction there is not assured: the budget is a
+character estimate over the pool's smallest window, nothing remembers the rejection, so each relay pick
+repeats it, and Claude Code never sees the overflow error it would otherwise compact on. Every relay
+upstream error reply logs its status and body, in pool and single-profile mode alike, because the park alone records only its
+kind, which is how this defect stayed invisible. That log reaches a file only under `--debug` or `--debug-file`; without them, `/stats` is the only trace.
 
 ### 16.2 Decisions, and why
 
@@ -2623,10 +2696,29 @@ every balancing member.
   member can present. Building the spawn config from the subscription member therefore keeps one
   rule — "a subscription launch presents Claude Code's identity" — instead of a second,
   pool-specific auth path in the relay.
-- **Keep raw subscription attempts inside their own balancing subset.** The raw OAuth request has no
-  permitted translation/authentication fallback. Allowing it to fail over to an ordinary member
-  would silently abandon the byte-exact subscription contract, so a mixed Claude pool can only
-  choose another subscription member for that request.
+- **A failed raw attempt may fall over to the rest of the pool** (reverses an earlier rule, by the
+  product owner's decision of 2026-11-04). The earlier rule kept a raw request inside the subscription
+  subset to protect the byte-exact contract. Live use on one mixed pool showed the cost: the session hit
+  a rejection, the single parked member ended the turn while the pool was healthy, and the owner removed
+  the member from that pool. The contract still governs what reaches Anthropic; what changes
+  is that a request Anthropic will not serve may be served by a member the owner placed in the same
+  pool. The accepted consequence is that a turn may be answered by a different provider than the
+  arrival pick, which is already what a balancing pool means for its other members. No credential
+  crosses: translated members authenticate with their own keys.
+- **Recover on rejection rather than filter by signature shape.** Stripping blocks that do not look
+  like Anthropic's before the first attempt would avoid one rejected round trip, but the format is not
+  a documented contract: 64-hex describes one provider as observed, and a wrong guess silently edits
+  transcripts Anthropic would have served. Anthropic's own refusal is the only reliable signal, and
+  reusing the translated routes' escalation keeps one last-resort recovery in the codebase. The accepted
+  cost is normally one rejected attempt per bridge.
+- **Remember issued signatures rather than strip everything after a refusal.** Stripping every block
+  once the flag is set would be simpler, but it reverses the owner's 2026-09-13 decision (`TEST_SUITE.md`
+  M17: stripping everything erases fresh reasoning on every later turn), which the 2026-11-04 decision did
+  not touch; that decision covered removing the blocks Anthropic cannot verify. A signature Anthropic
+  returned here is exactly such a verifiable block. Accepted limits: reasoning signed before this
+  bridge started, as on `--resume`, cannot be told from foreign and is removed after a refusal;
+  `redacted_thinking` has no signature to recognise and is always removed after one; and the recorded
+  set grows with the bridge's life, one short string per thinking block, which is not worth a cap.
 - **Exclude the subscription member from translated failover; cross into the relay only as a
   pre-emission last resort.** The translated transport authenticates a member with its stored
   key, and a subscription member's stored key is empty by construction, so an unfiltered
@@ -2641,6 +2733,21 @@ every balancing member.
   every cheap-provider blip, inverting the pool's economics.
 - **Reuse the health state, not a subscription-specific circuit breaker.** Two circuits would diverge
   in cooldown, failover, observability, and recovery semantics for otherwise equivalent members.
+- **Declare the Brotli decoder; do not strip `Accept-Encoding`.** Two ways to stop the upstream
+  compressing with brotli: remove the encoding from the forwarded header, or teach the bridge to
+  decode it. Stripping it would contradict the byte-preservation contract — `Accept-Encoding` is
+  an end-to-end client header, and the relay's whole purpose is to forward Claude Code's request
+  unchanged — and it would also decide the encoding for the client rather than for the hop that
+  does the decoding. Declaring `Brotli>=1.2` keeps the contract and puts the decoder where the
+  decoding happens. The dependency is declared directly rather than as `aiohttp[speedups]`, whose
+  `aiodns` would change DNS resolution for every provider route to obtain a response decoder. The
+  floor is aiohttp's own requirement rather than a preference: since aiohttp 3.13.3 aiohttp needs
+  Brotli 1.2 or newer, and 3.13.3 is inside the `aiohttp>=3.11,<3.14` range this package
+  supports. Kitty does not install the extra that would impose it, so it is stated here.
+- **Declare no zstd decoder, for now.** On the error replies measured 2026-11-04, advertising zstd,
+  alone or with gzip and deflate, produced no compression, and the relay has one upstream. That sample
+  does not prove Anthropic never sends zstd, so this is a judgement that the dependency is not yet
+  worth paying for, not a guarantee; §16.1 names the log line that reverses it.
 
 ### 16.3 Verification
 
@@ -2653,9 +2760,23 @@ every balancing member.
 - L3 aiohttp tests compare captured raw body bytes and headers for normal and SSE Messages relays,
   then exercise subscription-only cooldown/failover, 429 retry hints, entitlement, recovery
   through BridgeServer, and the pre-emission timeout's 504/no-park/no-failover semantics.
+- `tests/bridge/test_subscription_relay_recovery.py` pins the recovery contract: strip-and-retry on
+  the same member, the once-per-session rejection, byte-exactness of an unchanged body, fall-over for
+  member-shaped and transport failures and streaming, no OAuth token at a translated member, one post and
+  no parking for a request-shaped rejection, no re-relay from the fall-over's walk, an unedited body on
+  fall-over, survival of signatures Anthropic issued, and the 503 only when the whole pool is down.
+- Loopback tests (collected as `l1`, like the rest of `tests/bridge/`) drive the relay against a
+  local upstream that serves brotli-compressed
+  bytes, on both the plain and the streaming arm, and assert the client receives the decoded
+  bytes. The compressed form is committed as bytes rather than compressed at test time, so the
+  test needs no encoder to run and reproduces the production decoding failure verbatim when no
+  decoder is present. An L2 packaging test pins the `Brotli` requirement in `pyproject.toml`,
+  so a fresh install cannot silently lose the decoder.
 - The step records are `.system_design/steps/kbr319_subscription_profile.md`,
   `kbr319_launcher_eligibility.md`, `kbr319_exact_messages_relay.md`,
-  `kbr319_subscription_health.md`, and `balancing_subscription_spawn_identity.md`; each receives
+  `kbr319_subscription_health.md`, `balancing_subscription_spawn_identity.md`,
+  `mixed_pool_subscription_relay_failover.md`, `brotli_subscription_relay.md`, and
+  `subscription_relay_recovery.md`; each receives
   implementation notes when its stage lands.
 
 

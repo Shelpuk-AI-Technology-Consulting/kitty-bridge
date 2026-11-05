@@ -3,9 +3,9 @@
 These cover the one claim no unit test can make: that a raw-relay failure
 leaves the shared balancing health in the right state — the failed member
 parks under the existing failure kind (rate limits honor the upstream
-``Retry-After`` hint), the request fails over only to another subscription
-member, and a pool with no eligible member left returns the existing
-all-unhealthy response. Driving the real
+``Retry-After`` hint), the request fails over to another subscription member
+and then to the rest of the pool, and a pool with no eligible member left
+returns the existing all-unhealthy response. Driving the real
 :class:`~kitty.bridge.server.BridgeServer` matters because the wiring under
 test is selection, marking, and the relay loop together; stubbing any of
 them would stub out the defect.
@@ -295,8 +295,8 @@ class TestSubscriptionRelayHealth:
         assert parked[0][1] == "entitlement"
 
     @pytest.mark.asyncio()
-    async def test_failover_never_crosses_to_api_key_member(self) -> None:
-        """With no subscription sibling left, answer 503 — never translate."""
+    async def test_no_subscription_sibling_falls_over_to_api_key_member(self) -> None:
+        """With no subscription sibling left, the rest of the pool serves the request."""
         backends = [_subscription_member("sub-only"), _api_key_member("metered-key")]
         server = _make_server(backends)
         sub_calls: list = []
@@ -322,12 +322,12 @@ class TestSubscriptionRelayHealth:
                         headers={"Content-Type": "application/json", "Authorization": "Bearer sub-token"},
                     ) as resp,
                 ):
-                    assert resp.status == 503, await resp.text()
+                    assert resp.status == 200, await resp.text()
         finally:
             await server.stop_async()
 
         assert len(sub_calls) == 1
-        assert key_calls == []
+        assert len(key_calls) == 1
         assert _parked(server) == [(0, "rate_limit")]
 
     @pytest.mark.asyncio()
@@ -367,7 +367,10 @@ class TestSubscriptionRelayHealth:
     async def test_deterministic_400_stops_burning_members_and_surfaces_the_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A deterministically-bad body surfaces Anthropic's 400, not a 503."""
+        """A deterministically-bad body surfaces Anthropic's 400 at once, not a 503.
+
+        Subscription members share one identity, so a sibling could only repeat it.
+        """
         monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_DELAYS", (0.0,))
         monkeypatch.setattr("kitty.bridge.server._TRANSPORT_GRACE_PERIOD", 1.0)
         backends = [_subscription_member("sub-0"), _subscription_member("sub-1"), _subscription_member("sub-2")]
@@ -395,8 +398,7 @@ class TestSubscriptionRelayHealth:
         finally:
             await server.stop_async()
 
-        # Two members saw the same 400; the third was not burned.
-        assert len(calls) == 2
+        assert len(calls) == 1
         assert payload["error"]["type"] == "api_error"
         assert "model is withdrawn" in payload["error"]["message"]
 

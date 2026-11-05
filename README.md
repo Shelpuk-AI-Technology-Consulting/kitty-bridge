@@ -164,7 +164,7 @@ No API key required — kitty authenticates with your ChatGPT Plus or Pro accoun
 profile gets its own independent session.
 
 The Model value is sent to OpenAI's subscription backend (Kitty strips a `vendor/` prefix if you typed one — unlike the
-Claude subscription relay below, which is byte-for-byte), and OpenAI rotates that list independently of Kitty releases
+Claude subscription relay below, which never rewrites the model), and OpenAI rotates that list independently of Kitty releases
 — `gpt-5.3-codex` (the wizard's suggested default), `gpt-5.4` and `gpt-5.5` have all retired from it. Current ids at
 the time of writing: `gpt-6-sol`, `gpt-6-luna` and the newer `gpt-6.1-sol` from the GPT-6 generation, plus the
 still-served GPT-5.6 generation `gpt-5.6-terra` (mid-tier — OpenAI's ["balance of capability, speed, and cost for
@@ -189,11 +189,22 @@ $ kitty claude
 
 Sign in to Claude Code first (`claude auth login`) — Kitty checks that local session during setup and never copies or
 stores your OAuth token. This profile works **only with Claude Code**: Kitty relays Claude Code's request to Anthropic
-exactly as formed, and other launchers (or a balancing pool used by them) skip subscription members. A rate-limited or
-rejected subscription account cools down like any other backend and recovers automatically.
+exactly as formed, with one exception below, and other launchers (or a balancing pool used by them) skip subscription
+members. A rate-limited or rejected subscription account cools down like any other backend and recovers automatically; a
+rejection of the request itself (HTTP 400, 413 or 422) doesn't cool it down, because the account isn't at fault.
 
-The subscription profile hands your Model value to Anthropic exactly as typed — the relay is byte-for-byte, and Kitty
-neither rewrites the model nor translates anything else in the request — so the dot names from Kitty's bundled model
+**The one exception:** Anthropic can't verify reasoning that another provider wrote. After it first refuses some, Kitty
+removes the reasoning it can't recognise as signed by Anthropic through this bridge from what it relays for as long as the
+bridge runs, subagents and `/clear` included. This applies to this profile too, for example on a resumed session. Requests
+with nothing to remove are still relayed byte for byte.
+
+The subscription also works as a member of a balancing pool next to other providers. If Anthropic can't serve a request
+before any reply has started, another member of the pool usually answers that turn instead of Claude Code stopping with an
+error, so a turn may come from a different provider (an error you'd otherwise see, such as a request for an unknown model
+or an expired sign-in, may only appear in the debug log; `kitty doctor` checks the sign-in).
+
+The subscription profile hands your Model value to Anthropic exactly as typed — the relay doesn't rewrite the model and
+Kitty translates nothing else in the request — so the dot names from Kitty's bundled model
 catalog (`src/kitty/providers/model_metadata.json`, refreshed from OpenRouter — e.g. `anthropic/claude-opus-5.5`) and a
 `vendor/` prefix are not valid here: both reach Anthropic as typed and are rejected with a model-not-found error. What
 the value must do is name a model Anthropic serves, in the dash-separated id form Anthropic documents. Current ids at
@@ -319,12 +330,14 @@ Novita or Z.AI — your agent never sees the failure.
 ### Subscription members in a pool
 
 A pool can mix an [Anthropic subscription profile](#example-use-your-claude-subscription-with-claude-code) with
-API-key profiles. Kitty relays subscription traffic exactly as your agent formed it, so a pool containing a
+API-key profiles. Kitty relays subscription traffic as your agent formed it, apart from removing reasoning Anthropic
+refuses, so a pool containing a
 subscription member starts Claude Code **from that member**: for it, the agent presents your own logged-in Anthropic
 session — never another member's API key. Three things follow:
 
 - **Sign in first.** The pool's subscription member works only while your Claude Code session is live. If it has
-  expired, that member's request is rejected with a credential error (503, `Retry-After` countdown) until you run
+  expired, the pool's other members serve that member's requests, and you see a credential error (503, `Retry-After`
+  countdown) only when none of them can, until you run
   `claude auth login` — a key change does not help, and the member stays out of the pool for the rest of its
   cooldown (up to 15 minutes). The pool's API-key members keep serving meanwhile,
   unless Claude Code itself stops at its login prompt — then nothing reaches the bridge until you sign in.
@@ -332,14 +345,16 @@ session — never another member's API key. Three things follow:
   aliases) come from the subscription member rather than the pool's first member. For API-key members this is only a
   hint — kitty rewrites the request model to the selected member's; the subscription member receives the model
   exactly as your agent formed it. A pool that lists several subscription members hints the first one's model, and
-  subscription traffic is relayed exactly as your agent formed it — so the others receive that same model. Give every
+  subscription traffic keeps the model your agent formed — so the others receive that same model. Give every
   subscription member of a pool the same model.
 - **Non-Claude agents skip it.** Other launchers (or a balancing pool used by them) ignore subscription members, as
   described above — the subscription member only participates under Claude Code.
 - **Failover respects the identity boundary.** Failover among the pool's API-key members never dispatches the
-  subscription member — it serves only through the raw relay. When an API-key failover walk is exhausted before your
-  agent has received any response, kitty makes one attempt through the subscription member's relay with the request
-  exactly as your agent formed it. That attempt spends your Claude subscription quota and keeps the model your agent
+  subscription member — it serves only through the raw relay, and your Claude sign-in never reaches another provider.
+  When the relay can't serve a request before any reply has started, the API-key members take over under their own keys;
+  that can include a **backup** member, because the subscription isn't available to that request. When an API-key failover walk is exhausted before your
+  agent has received any response, kitty tries the subscription member's relay with your agent's original request
+  (not the compacted one), minus any reasoning Anthropic has refused. That attempt spends your Claude subscription quota and keeps the model your agent
   formed, even if the API-key members had rewritten the request for a smaller context. Once your agent has received
   the first byte of a response, a failure is never re-attempted on another member.
 
@@ -531,11 +546,11 @@ and `grep 'tool_use audit:'` for the offending payloads.
 
 `thinking_stripped` counts the thinking blocks the bridge had to strip and retry because the upstream rejected their
 signatures — which, since the signed history is carried through, means the conversation history was edited (by
-compaction or truncation) and the model lost reasoning that was still valid. It is reported per backend and as a
-session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
-A compaction-heavy session whose reasoning keeps degrading shows up here. It also counts one strip when a backend
-first refuses `redacted_thinking` blocks, which points at that upstream's support rather than edited history; the
-WARNING log line tells the two apart.
+compaction or truncation) and the model lost reasoning that was still valid. On a Claude subscription member it has a
+second meaning: the relay removed reasoning Anthropic can't verify, usually another pool member's, after a refusal or
+before relaying, so a rising count on a mixed pool is expected and doesn't point at compaction. It is reported per backend
+and as a session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
+A compaction-heavy session whose reasoning keeps degrading shows up here.
 
 `recovery_holds` counts the arrival recovery holds: each time the bridge held a request because *every* member of the
 pool was cooling down but at least one would recover within 5 minutes (each held wait counts once, so a request held
@@ -1045,7 +1060,7 @@ This is a manual, best-effort configuration. Some IDE-specific features may not 
 ### Can I use my Anthropic (Claude Pro/Team) subscription with Kitty?
 
 Yes — with Claude Code. Set up the **Anthropic Claude.ai Subscription** provider (`kitty setup`), and launch with
-`kitty claude`. Kitty relays Claude Code's request to Anthropic exactly as formed: it translates nothing, stores no
+`kitty claude`. Kitty relays Claude Code's request to Anthropic exactly as formed, apart from removing reasoning Anthropic refuses: it translates nothing, stores no
 token, and your login stays entirely in Claude Code's hands. The profile works **only with Claude Code** — other
 launchers refuse it, and a balancing pool used by another agent skips subscription members. Kitty with Anthropic's API
 directly (per-token billing) remains available through the `anthropic` provider.
