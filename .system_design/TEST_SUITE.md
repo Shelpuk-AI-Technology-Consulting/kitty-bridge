@@ -143,23 +143,23 @@ body. Established by reading `src/kitty/bridge/server.py` and all 23 adapters in
 
 #### 3.2.1 Bridge-level
 
-Twenty-nine request-path rows — the original fourteen (M1–M11, M15, M16 and M17), two
+Thirty request-path rows — the original fourteen (M1–M11, M15, M16 and M17), two
 id-synthesis rows added by KBR-195 (M18, M19), six KBR-194 Gemini-side slot drops on
 the Gemini inbound route (M20–M25), KBR-184's M26 (the Anthropic-family `metadata`
 drop, G31), KBR-271's M9a and M9b (the M9 fallback converter's cache-breakpoint drops,
 G43's register half), KBR-55's M27 (the translated-route `top_k` drop), M28 (the empty
-`stop_sequences` omit), and M29 (the string-form `stop` rewrite), and KBR-309's M33
+`stop_sequences` omit), and M29 (the string-form `stop` rewrite), KBR-309's M33
 (the translated-route `context_management` drop, beta-gated; renamed from M30 after
-KBR-59 took M30/M31/M32) — one response-path
+KBR-59 took M30/M31/M32), and M34 (the `redacted_thinking` strip) — one response-path
 row (M12), and the routing row **M14** (§3.3.5), which is listed here because the destination
-is a mutation surface the body cannot show. Thirty-two rows in all. The former substitution row
+is a mutation surface the body cannot show. Thirty-three rows in all. The former substitution row
 M13 is **withdrawn** — KBR-5 replaced it with a downstream error, so it mutates nothing —
-leaving **thirty-one live** bridge-level rows. **KBR-59 (T-D10)** adds
+leaving **thirty-two live** bridge-level rows. **KBR-59 (T-D10)** adds
 the three response-direction rows **M30, M31, M32** at the table immediately below — a Gemini
 response-direction `functionCall.id` echo, the Ollama canonical tool-calling `reply.stop_reason`
 delta, and the rare Ollama-vs-CC part-ordering disagreement on Thinking+ToolUse replies
-(KBR-257 / KBR-267 comment 3.1 / KBR-267 comment 3.2) — thirty-five rows in all and
-**thirty-four live** bridge-level rows.
+(KBR-257 / KBR-267 comment 3.1 / KBR-267 comment 3.2) — thirty-six rows in all and
+**thirty-five live** bridge-level rows.
 
 | # | Mutation | Site | Trigger | Why it is necessary |
 |---|---|---|---|---|
@@ -198,6 +198,7 @@ delta, and the rare Ollama-vs-CC part-ordering disagreement on Thinking+ToolUse 
 | M31 | Map Ollama `done_reason: "stop"` to `reply.stop_reason = "end_turn"` on the canonical tool-calling exchange | `OllamaCloudAdapter.translate_from_upstream` (`kitty/providers/ollama_cloud.py`) | Captured Ollama reply: `message.tool_calls` non-empty AND `done_reason == "stop"` | KBR-59 / T-D10 / KBR-267 comment 3.1. Ollama's single wire value `"stop"` covers both CC's `"stop"` (text completion) and CC's `"tool_calls"` (tool-calling). `OllamaChatReplyProjection._DONE_REASON_MAP` maps it to `end_turn` per KBR-267's *independent-oracle* rule — inferring `tool_use` from the presence of `message.tool_calls` would read the CC side of the comparison into an Ollama projection. The delta surfaces when the bridge emits on a wire shape using a finer stop-reason vocabulary (CC on the agent side). Anchored at the bare keyed literal `reply.stop_reason`. Scope `("ollama_cloud",)`. Renumbered from M28 at the 2026-10-18 merge of origin/main. |
 | M32 | Order parts Text → Thinking → ToolUse → Image (Ollama reader) vs Text → refusal → ToolUse → Thinking (Chat Completions reader) on rare Thinking+ToolUse replies | `OllamaCloudAdapter.translate_from_upstream` (`kitty/providers/ollama_cloud.py`) | Captured Ollama reply: `message.thinking` non-empty AND `message.tool_calls` non-empty | KBR-59 / T-D10 / KBR-267 comment 3.2. The §7.4.1 "two readers disagree about a part boundary report a delta on every subsequent part" rule, applied to the two readers' ordering of Thinking+ToolUse. Anchored at the bare-collection pattern `reply.parts[*]` — the broad anchor that the rule names. The complement (a reply with Text+ToolUse only) produces identical orderings via the empty-content convergence rule and must not fire this row. Scope `("ollama_cloud",)`. **Co-claim note**: M32 (broad, `reply.parts[*]`) and M30 (narrow, `reply.parts[*].id`) co-claim a tool-call-id delta on a Thinking+ToolUse reply under the prefix rule; `_conditional_violations`'s specificity attribution handles this — when M30 is *triggered* on a Thinking+ToolUse reply's id-bearing delta, M32 is exempt (M30 is finer). The corpus builder is told explicitly so the co-claim is not a surprise. Renumbered from M29 at the 2026-10-18 merge of origin/main. |
 | M33 | **Drop an agent's `context_management` on the translated Messages route** — hop 1 never reads the field, so it never reaches any CC wire | `MessagesTranslator.translate_request` (`kitty/bridge/messages/translator.py`) | Provider does not declare `use_native_messages` | KBR-309. Anthropic's `context_management` is a **beta** field — the documented endpoint accepts it only when the request carries `anthropic-beta: context-management-2025-06-27` (fetched 2026-09-24). The bridge builds upstream headers from scratch and forwards no inbound agent header (§4.2 C1), so a KBR-224-style restore would 400 at the upstream without beta-header carriage. The drop is the design posture, not a bug; restoring it is a separate product decision gated on beta-header support. P23 lists the same wire key at the same address, but P23's policy point is the `openai_subscription` Responses allowlist; this row names the Messages→CC translation's own policy point. Scope = `_TRANSLATED_MESSAGES_ADAPTERS` (M16's scope). Renumbered from M30 at the 2026-10-18 merge of origin/main: KBR-59's response-direction rows took M30/M31/M32 first (the KBR-55 renumber precedent). |
+| M34 | **Strip `redacted_thinking` blocks and re-send the same backend**, then omit them up front for that backend | `BridgeServer._recover_unsupported_redacted_thinking` / `_strip_redacted_thinking_blocks`, called from `_stream_messages` and `_make_upstream_request`; `_upstream_body_for` for a remembered backend | This backend answered a 4xx naming `redacted_thinking` as an unknown variant, on this request or an earlier one | Some Anthropic-compatible upstreams implement `thinking` but not `redacted_thinking` and refuse the whole request, and the history returns every turn. `thinking` stays, because these upstreams accept it and some require it back. Separate from M17 because its trigger is different and a remembered backend strips with no rejection on that request. Also an I2 exception, like M8 (§4.3 C3). Design of record: `SYSTEM_DESIGN.md` §18. |
 
 #### 3.2.2 Provider-level
 
@@ -414,7 +415,7 @@ shapes that question, and it is one of four:
   (not the provider's dispatch) decides it. The two names look symmetric; the asymmetry is
   load-bearing.
 * **`RESPONSE`** — a property of the **upstream response**, arranged by a scripted recorder
-  (``M6``, ``M8``, ``M9``, ``M12``, ``M17``). T-D8 discharges these from a named
+  (``M6``, ``M8``, ``M9``, ``M12``, ``M17``, ``M34``). T-D8 discharges these from a named
   scripted-recorder test, not from the corpus.
 * **`PROFILE`** — derived from the profile (the compaction budget from the profile's model, and
   on a balancing profile from the smallest context in the pool — ``M1`` additionally: the
@@ -1258,7 +1259,7 @@ list of headers we happened to think of. That posture is what surfaced F3 and F4
 |---|---|---|
 | **C1 — Request headers** | `build_upstream_headers()` constructs the set from scratch; no inbound agent header is forwarded. Four adapters supply a coding-agent `User-Agent` (P9a, P9c). The deviations from the base header set are registered: `x-api-key` + `anthropic-version` (+ the lowercase `content-type` re-spell, unaddressable — casing) on the Anthropic family (P9e: `anthropic`, `custom_anthropic`, `minimax_token`, and `opencode_go` on its Messages models); `anthropic-version` + the casing re-spell beside Bearer auth on `zai_coding` (P9f); `api-key` on Azure's non-Entra credential (P9g) and on Mimo (P9b); no `Authorization` at all on `ollama` (P9h); the conditional `ChatGPT-Account-Id` on `openai_subscription` (P9d). Every other adapter sends the baseline set. | **Closed (KBR-78, 2026-09-15).** Every wire route's exact header set — names, casing, value shape — is asserted over the same `wire_routes()` enumeration, and the AST-derived branch-arm meta-test proves the swept routes execute every `If` arm of every header builder. `bedrock`'s contract is observed on the botocore-prepared request (its hook never ships). The OAuth token POSTs (KBR-161's other half) assert their exact set per site; `originator: codex_cli_rs` lands on all four (probed against `auth.openai.com` 2026-09-15, indifferent). F1's policy gap remains — the identity each adapter *should* claim is Q1. |
 | **C2 — Request body** | The register's mutations (§3.2), JSON key ordering produced by kitty's serialisation, ~~the literal string `[Kitty Bridge: …]` (M13)~~ **— fixed, KBR-5** — and **`_effort` / `_thinking_adaptive`, which are kitty-internal and reach the wire**. With M13 gone the only bridge-introduced literal left in the body is `[Tool output truncated — original size: N chars]` (M3/M4): still a viable fingerprint, it simply does not name the product. | **Still breached by F4.** F3 closed. |
-| **C3 — Cross-attempt content and cadence** | Retries (`_MAX_RETRIES = 3`), failover, transport-blip re-connects, the empty-response ladder — and **five** paths that send a *different body* on a later attempt (M6, M8, M9, M17, and failover re-normalisation). | §4.3 C3. Five declared exceptions. |
+| **C3 — Cross-attempt content and cadence** | Retries (`_MAX_RETRIES = 3`), failover, transport-blip re-connects, the empty-response ladder — and **six** paths that send a *different body* on a later attempt (M6, M8, M9, M17, M34, and failover re-normalisation). | §4.3 C3. Six declared exceptions. |
 | **C4 — Transport fingerprint** | TLS/ALPN/HTTP-2 signature of aiohttp, unlike the agent's own client. `curl_cffi` is already used for the OpenAI subscription provider precisely because that provider fingerprints TLS. | **Accepted residual risk.** §4.5 — including the narrower, *provider-specific* residual KBR-161 leaves on the OpenAI login leg, which the general argument does **not** cover. |
 | **C5 — Connection lifecycle** | `_build_client_session` uses `TCPConnector(limit=…, force_close=True)` — a fresh TCP and TLS connection for **every** upstream request, no keep-alive reuse. The agent's client does not behave that way. | **Gap.** A cheap, non-TLS fingerprint — arguably more detectable than C4. §4.3 C5. |
 
@@ -1309,7 +1310,7 @@ oracle's projection makes possible and a flat scan cannot:
   projected, and it applies only where kitty claims to be forwarding rather than translating.
 
 **C3 — Cross-attempt content and cadence (L3).** The design must not overstate this: kitty sends
-a different body on a later attempt in **five** distinct situations, not one.
+a different body on a later attempt in **six** distinct situations, not one.
 
 | Path | What changes between attempts | Same backend? |
 |---|---|---|
@@ -1317,6 +1318,7 @@ a different body on a later attempt in **five** distinct situations, not one.
 | M8 — thinking-carrier repair | `messages` rewritten in place | Yes |
 | M9 — native→CC fallback | Whole body converted, then re-normalised | Yes |
 | M17 — thinking strip | Thinking at or before the rejected turn, and unsigned thinking anywhere, removed; everything on the third strip | Yes |
+| M34 — `redacted_thinking` strip | Those blocks only, removed in one pass | Yes |
 | Backend failover | `_normalize_model` and `normalize_request` re-run, so a same-host different-key sibling still gets a different body | No (different backend, possibly same host) |
 
 The assertions:
@@ -1328,8 +1330,8 @@ The assertions:
   re-normalisation exception in the table above, not a repeat. §11 Q14(b) widens this row's
   population — once the preamble hold lands, empty-response retries become reachable on the
   native-passthrough adapters too, so **T-I8** must name that path.
-- *(ii)* Each of the five paths above is a **declared exception**: assert each fires only under
-  its own trigger and never otherwise. A provider that hashes bodies can see all five; whether to
+- *(ii)* Each of the six paths above is a **declared exception**: assert each fires only under
+  its own trigger and never otherwise. A provider that hashes bodies can see all six; whether to
   close any of them is Q6.
 
 **C5 — Connection lifecycle (L3).** Count distinct TCP connections the recording upstream accepts
@@ -2456,7 +2458,7 @@ each show how easily one goes vacuous.
 | Transparency oracle over the corpus (§3.3), per adapter × model × transport | No unclaimed delta; every conditional row exercised with trigger **and** complement |
 | Bridge-introduced vendor token (§4.3 C2) | An inbound `kitty` string survives byte-identically; an injected vendor message is caught |
 | Sealed network (§5.2), all three phases, per transport (§5.5) | Positive control passes; zero connections with the proxy down; the falsification control fails the harness |
-| Cross-attempt content (§4.3 C3) | Transport-blip and empty-response retries byte-identical; each of M6, M8, M9, M17 and failover re-normalisation fires only under its own trigger |
+| Cross-attempt content (§4.3 C3) | Transport-blip and empty-response retries byte-identical; each of M6, M8, M9, M17, M34 and failover re-normalisation fires only under its own trigger |
 | Connection lifecycle (§4.3 C5) | Distinct-connection count per session, against the native baseline |
 | **Streaming recovery — content, not just grammar** (below) | Four injection points; no duplication, no replayed tool calls, no spliced arguments — and, per §11 Q14, exactly one upstream request at the recorder for the three post-emission points |
 | Client disconnect during a stream | Upstream connection released; the backend not marked unhealthy for a client-side fault |
@@ -6216,10 +6218,10 @@ upstream rejects the request otherwise — and every one means a setting the age
 does nothing. Today each logs at DEBUG. A one-line warning at launch would make it visible at
 the cost of noise.
 
-**Q6 — Which of the five body-changing retry paths are acceptable (§4.3 C3)?** M6, M8, M9, M17 and
+**Q6 — Which of the six body-changing retry paths are acceptable (§4.3 C3)?** M6, M8, M9, M17, M34 and
 failover re-normalisation each send a different payload on a later attempt, and a provider that
-hashes bodies sees all five. The alternative in each case is to fail the turn, which is worse for
-the user. Declare all five as exceptions, or close some?
+hashes bodies sees all six. The alternative in each case is to fail the turn, which is worse for
+the user. Declare all six as exceptions, or close some?
 
 **Q7 — Should `force_close=True` stay (C5, §4.5)?** It prevents port exhaustion but produces a
 connection pattern unlike the agent's own. Keep, or trade for keep-alive parity? §5.2.1 is
