@@ -140,12 +140,13 @@ _SHAPES: tuple[tuple[str, str], ...] = (
 
 
 class TestTheRowsThemselves:
-    """§3.2 publishes 87 live rows; the data must be those rows and no others."""
+    """§3.2 publishes 88 live rows; the data must be those rows and no others."""
 
     def test_the_register_holds_every_live_row(self) -> None:
-        """34 bridge-level rows less the withdrawn M13, plus 53 provider-level.
+        """35 bridge-level rows less the withdrawn M13, plus 53 provider-level.
 
-        The +8 over the pre-KBR-195 count is the eight Gemini inbound rows
+        The newest +1 is M34, the ``redacted_thinking`` strip. The +8 over the
+        pre-KBR-195 count is the eight Gemini inbound rows
         KBR-195 added (M18..M25). The +1 over the pre-KBR-44 count is P5f
         (KBR-44). The +5 over the pre-KBR-258 count is P26..P30, the five
         Chat Completions cache-breakpoint drops the Anthropic adapter family
@@ -181,7 +182,7 @@ class TestTheRowsThemselves:
         literals are the no-reflow damage test — a future change that
         drops a row or adds one without updating the guard fails loudly.
         """
-        assert len(r.REGISTER) == 87
+        assert len(r.REGISTER) == 88
 
     def test_the_register_is_a_tuple_and_not_a_list(self) -> None:
         """`mypy` does not run over `tests/`, so the annotation is not enforcement.
@@ -726,6 +727,7 @@ class TestTheTriggerArrangingBy:
             r.Trigger.NON_ENTRA_CREDENTIAL: r.ArrangingBy.PROFILE,
             r.Trigger.CHATGPT_ACCOUNT_ID_PRESENT: r.ArrangingBy.PROFILE,
             r.Trigger.THINKING_SIGNATURE_REJECTED: r.ArrangingBy.RESPONSE,
+            r.Trigger.REDACTED_THINKING_UNSUPPORTED: r.ArrangingBy.RESPONSE,
             r.Trigger.BEDROCK_FORCES_AUTO_TOOL_CHOICE: r.ArrangingBy.REQUEST,
             r.Trigger.ANTHROPIC_PARALLEL_FALSE_OMITTED: r.ArrangingBy.REQUEST,
             r.Trigger.TOOL_CHOICE_OMITTED_AS_LEGAL_BUT_UNSUPPORTED: r.ArrangingBy.REQUEST,

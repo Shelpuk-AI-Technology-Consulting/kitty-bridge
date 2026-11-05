@@ -930,6 +930,71 @@ def _recover_rejected_thinking(body: dict, error_body: object, strips_done: int)
     return _strip_thinking_blocks(body)
 
 
+# The upstream's own parser naming the block as the variant it refused. ``\W*`` spans the
+# quoting, which differs by dialect and JSON escaping; a block listed after "expected one
+# of" is one the upstream accepts, so it must not match.
+_REDACTED_THINKING_UNSUPPORTED = re.compile(r"unknown variant\W*redacted_thinking\b")
+
+
+def _is_redacted_thinking_unsupported_error(status: int, body: object) -> bool:
+    # pragma: no mutate block
+    """Return True if the upstream refused a request for carrying ``redacted_thinking``.
+
+    Some Anthropic-compatible endpoints implement ``thinking`` but not
+    ``redacted_thinking``, and their parser refuses the whole request. See
+    ``SYSTEM_DESIGN.md`` section 18. Only 4xx statuses match: the same words
+    with a 5xx are a backend fault.
+
+    Args:
+        status: The upstream HTTP status code.
+        body: The upstream error body, as text or as a parsed dict.
+
+    Returns:
+        True when the body names ``redacted_thinking`` as the rejected variant.
+    """
+    if status < 400 or status >= 500 or body is None:
+        return False
+    return _REDACTED_THINKING_UNSUPPORTED.search(str(body).lower()) is not None
+
+
+def _strip_redacted_thinking_blocks(body: dict) -> bool:
+    # pragma: no mutate block
+    """Remove every ``redacted_thinking`` block from an outgoing Anthropic Messages body.
+
+    Unlike :func:`_strip_thinking_blocks` this keeps ``thinking``: the upstreams
+    this serves accept it, and some require it back. A turn left with nothing
+    keeps ``content: []`` so message indices never shift, and the edit is
+    copy-on-write for the reason :func:`_repair_thinking_roundtrip` gives.
+
+    Args:
+        body: The outgoing body. Its ``messages`` key is rebound when anything
+            changes; the original list and messages are untouched.
+
+    Returns:
+        True if at least one block was removed. The caller retries only then.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    stripped = messages.copy()
+    changed = False
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
+            continue
+        kept = [
+            block
+            for block in msg["content"]
+            if not (isinstance(block, dict) and block.get("type") == "redacted_thinking")
+        ]
+        if len(kept) != len(msg["content"]):
+            stripped[index] = {**msg, "content": kept}
+            changed = True
+    if changed:
+        body["messages"] = stripped
+    return changed
+
+
 def _route_model(cc_request: dict) -> str:
     # pragma: no mutate block
     """Return the model every routing decision for this request must read.
@@ -2217,6 +2282,9 @@ class BridgeServer:
         # mode.  Mutated only by `set.add` with no await in between, which is
         # atomic across the concurrent request tasks sharing this loop.
         self._thinking_repair_backends: set[int] = set()
+        # Backends that refused `redacted_thinking`. Same reasoning and same
+        # concurrency note as the set above; see SYSTEM_DESIGN.md section 18.
+        self._redacted_thinking_strip_backends: set[int] = set()
 
         # Backend health tracking (parallel to _backends)
         self._backend_health: list[dict] = []
@@ -3580,7 +3648,7 @@ class BridgeServer:
 
     def _record_thinking_stripped(self) -> None:
         # pragma: no mutate block
-        """Count one M17 thinking strip against the serving backend.
+        """Count one M17 or M34 thinking strip against the serving backend.
 
         Surfaced by ``GET /stats`` and the shutdown summary next to
         ``malformed_tool_use`` (KBR-228, ticket comment 4, item 2). Diagnostics
@@ -3588,6 +3656,32 @@ class BridgeServer:
         """
         idx = self._current_backend_idx
         self._stats_thinking_stripped[idx] = self._stats_thinking_stripped.get(idx, 0) + 1
+
+    def _recover_unsupported_redacted_thinking(self, status: int, error_body: object, upstream_body: dict) -> bool:
+        # pragma: no mutate block
+        """Strip ``redacted_thinking`` after this backend refused it, and remember the backend.
+
+        Args:
+            status: The upstream HTTP status code.
+            error_body: The upstream error body, as text or as a parsed dict.
+            upstream_body: The serialized body that was rejected, edited as
+                :func:`_strip_redacted_thinking_blocks` describes.
+
+        Returns:
+            True when blocks were removed and the caller should retry the same backend.
+        """
+        if not _is_redacted_thinking_unsupported_error(status, error_body):
+            return False
+        if not _strip_redacted_thinking_blocks(upstream_body):
+            return False
+        self._redacted_thinking_strip_backends.add(self._current_backend_idx)
+        self._record_thinking_stripped()
+        logger.warning(
+            "Backend does not support redacted_thinking (status %d) — stripped those blocks and "
+            "retrying the same backend; later requests to it will omit them",
+            status,
+        )
+        return True
 
     def _backend_label(self) -> str:
         # pragma: no mutate block
@@ -7011,6 +7105,14 @@ class BridgeServer:
                                         return _make_error_response(error_data, status=upstream.status)
                                     await _write_client(sr, messages_format_error(error_data).encode())
                                     break
+
+                                # Ahead of M9: this error's "expected" list names `tool_use`, so M9
+                                # would match it, and its rebuild restores the same block (section 18).
+                                if self._recover_unsupported_redacted_thinking(
+                                    upstream.status, error_body, upstream_body
+                                ):
+                                    strip_retries = min(strip_retries + 1, _MAX_THINKING_STRIPS)
+                                    continue
 
                                 # Native-passthrough tool_use format mismatch — convert
                                 # to CC and retry the same backend.
@@ -12532,12 +12634,13 @@ class BridgeServer:
         # pragma: no mutate block
         """Serialize ``cc_request`` for the backend currently selected.
 
-        Wraps :meth:`ProviderAdapter.translate_to_upstream` with the one piece
-        of per-backend shaping the bridge owns: a backend that has already
-        rejected this session's transcript for a thinking round-trip mismatch
-        gets the carrier added before the request goes out, instead of
-        rediscovering the mismatch at the cost of one rejected round-trip per
-        turn (issue #32).
+        Wraps :meth:`ProviderAdapter.translate_to_upstream` with the per-backend
+        shaping the bridge owns: a backend that has already rejected this
+        session's transcript for a thinking round-trip mismatch gets the carrier
+        added before the request goes out, instead of rediscovering the mismatch
+        at the cost of one rejected round-trip per turn (issue #32). A backend
+        that refused ``redacted_thinking`` gets those blocks omitted for the same
+        reason (``SYSTEM_DESIGN.md`` section 18).
 
         Every re-serialization inside a handler must go through here, because
         the shaping is a property of the *selected backend*: a failover that
@@ -12561,6 +12664,9 @@ class BridgeServer:
             The dict to send as the upstream JSON body.
         """
         upstream_body = self._active_provider.translate_to_upstream(cc_request)
+        # Ahead of the repair, so a turn the strip leaves bare can still get its carrier.
+        if self._current_backend_idx in self._redacted_thinking_strip_backends:
+            _strip_redacted_thinking_blocks(upstream_body)
         if self._current_backend_idx in self._thinking_repair_backends:
             _repair_thinking_roundtrip(
                 upstream_body,
@@ -12760,6 +12866,11 @@ class BridgeServer:
                         ):
                             return last_body
                         return self._active_provider.translate_from_upstream(cast(dict, last_body))
+
+                    # This backend has no `redacted_thinking` variant: same backend, without the block.
+                    # A second strip of the same body finds nothing, so this cannot loop (section 18).
+                    if self._recover_unsupported_redacted_thinking(last_status, last_body, upstream_body):
+                        continue
 
                     # The bridge's history failed signature checks: strip the broken thinking and
                     # retry this backend, before any path can blame it (KBR-238).  The count bounds

@@ -533,7 +533,9 @@ and `grep 'tool_use audit:'` for the offending payloads.
 signatures — which, since the signed history is carried through, means the conversation history was edited (by
 compaction or truncation) and the model lost reasoning that was still valid. It is reported per backend and as a
 session total, next to `malformed_tool_use`, and is likewise a diagnostic only: it never marks a backend unhealthy.
-A compaction-heavy session whose reasoning keeps degrading shows up here.
+A compaction-heavy session whose reasoning keeps degrading shows up here. It also counts one strip when a backend
+first refuses `redacted_thinking` blocks, which points at that upstream's support rather than edited history; the
+WARNING log line tells the two apart.
 
 `recovery_holds` counts the arrival recovery holds: each time the bridge held a request because *every* member of the
 pool was cooling down but at least one would recover within 5 minutes (each held wait counts once, so a request held
