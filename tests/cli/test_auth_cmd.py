@@ -202,7 +202,7 @@ class TestAuthOpenaiProfileCreation:
         with (
             _mock_tty(),
             patch(f"{_MOD}.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch(f"{_MOD}.prompt_text", side_effect=["gpt-5.3-codex", "my-openai-profile"]),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-6-sol", "my-openai-profile"]),
             patch(f"{_MOD}.prompt_confirm", return_value=True),
             patch("kitty.validation.validate_api_key", new=AsyncMock(return_value=MagicMock(valid=True))),
         ):
@@ -212,7 +212,7 @@ class TestAuthOpenaiProfileCreation:
 
         assert profile is not None
         assert profile.provider == "openai_subscription"
-        assert profile.model == "gpt-5.3-codex"
+        assert profile.model == "gpt-6-sol"
         assert profile.name == "my-openai-profile"
 
         # Verify saved to store
@@ -229,7 +229,7 @@ class TestAuthOpenaiProfileCreation:
         with (
             _mock_tty(),
             patch(f"{_MOD}.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch(f"{_MOD}.prompt_text", side_effect=["gpt-5.3-codex", "openai-sub"]),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-6-sol", "openai-sub"]),
             patch(f"{_MOD}.prompt_confirm", return_value=True),
             patch("kitty.validation.validate_api_key", new=AsyncMock(return_value=MagicMock(valid=True))),
         ):
@@ -272,14 +272,14 @@ class TestAuthOpenaiProfileCreation:
     def test_auth_cmd_uses_default_model_and_profile_name(
         self, store: ProfileStore, cred_store: CredentialStore
     ) -> None:
-        """When user accepts defaults (presses Enter), gpt-5.3-codex and openai-sub are used."""
+        """When user accepts defaults (presses Enter), gpt-6-sol and openai-sub are used."""
         session = _make_oauth_session()
 
         # Simulate empty inputs → defaults used
         with (
             _mock_tty(),
             patch(f"{_MOD}.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch(f"{_MOD}.prompt_text", side_effect=["", ""]),
+            patch(f"{_MOD}.prompt_text", side_effect=["", ""]) as mock_text,
             patch(f"{_MOD}.prompt_confirm", return_value=False),
             patch("kitty.validation.validate_api_key", new=AsyncMock(return_value=MagicMock(valid=True))),
         ):
@@ -287,7 +287,9 @@ class TestAuthOpenaiProfileCreation:
 
             profile = asyncio.run(run_auth_openai(store, cred_store))
 
-        assert profile.model == "gpt-5.3-codex"
+        assert profile.model == "gpt-6-sol"
+        # KBR-322: the prompt advertises the value an empty answer produces.
+        assert mock_text.call_args_list[0].args[0] == "Model name (default: gpt-6-sol): "
         assert profile.name == "openai-sub"
 
     def test_auth_cmd_raises_if_oauth_flow_fails(self, store: ProfileStore, cred_store: CredentialStore) -> None:
@@ -318,7 +320,7 @@ class TestAuthOpenaiProfileCreation:
         with (
             _mock_tty(),
             patch(f"{_MOD}.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch(f"{_MOD}.prompt_text", side_effect=["gpt-5.3-codex", "test-profile"]),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-6-sol", "test-profile"]),
             patch(f"{_MOD}.prompt_confirm", return_value=True),
             patch("kitty.validation.validate_api_key", new=AsyncMock(return_value=validation_result)),
             patch(f"{_MOD}.print_warning") as mock_warn,
@@ -361,7 +363,7 @@ class TestAuthOpenaiBackupPrompt:
         with (
             _mock_tty(),
             patch(f"{_MOD}.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch(f"{_MOD}.prompt_text", side_effect=["gpt-5.3-codex", "my-openai"]),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-6-sol", "my-openai"]),
             # is_default=False proves the answers land on the intended prompts:
             # a reordering would surface as is_default=True.
             patch(f"{_MOD}.prompt_confirm", side_effect=[False, backup_answer]) as mock_confirm,

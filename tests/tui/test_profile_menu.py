@@ -815,14 +815,14 @@ class TestCreateProfileFlowOAuth:
         with (
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["openai_subscription"]),
             patch("kitty.cli.auth_cmd.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-5.3-codex", "my-oauth-profile"]),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-6-sol", "my-oauth-profile"]),
             patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
             patch("kitty.cli.profile_cmd.prompt_secret") as mock_secret,
         ):
             profile = create(store, cred_store)
 
         assert profile.provider == "openai_subscription"
-        assert profile.model == "gpt-5.3-codex"
+        assert profile.model == "gpt-6-sol"
         assert profile.name == "my-oauth-profile"
         mock_secret.assert_not_called()  # no API key prompt
 
@@ -834,12 +834,14 @@ class TestCreateProfileFlowOAuth:
         with (
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["openai_subscription"]),
             patch("kitty.cli.auth_cmd.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["", "oauth-profile"]),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["", "oauth-profile"]) as mock_text,
             patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
         ):
             profile = create(store, cred_store)
 
-        assert profile.model == "gpt-5.3-codex"
+        assert profile.model == "gpt-6-sol"
+        # KBR-322: the prompt advertises the value an empty answer produces.
+        assert mock_text.call_args_list[0].args[0] == "Model (default: gpt-6-sol): "
 
     def test_anthropic_subscription_uses_default_model(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """The subscription prompt offers a Claude default, not the OpenRouter example."""
@@ -870,7 +872,7 @@ class TestCreateProfileFlowOAuth:
         with (
             patch("kitty.cli.profile_cmd.SelectionMenu.show", return_value=PROVIDER_LABELS["openai_subscription"]),
             patch("kitty.cli.auth_cmd.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-5.3-codex", "oauth-prof"]),
+            patch("kitty.cli.profile_cmd.prompt_text", side_effect=["gpt-6-sol", "oauth-prof"]),
             patch("kitty.cli.profile_cmd.prompt_confirm", return_value=True),
         ):
             profile = create(store, cred_store)
@@ -891,7 +893,7 @@ class TestEditProfileFlowOAuth:
         edit = _import_edit_profile_flow()
         session = _make_oauth_session()
 
-        p = _make_profile("oauth-prof", provider="openai_subscription", model="gpt-5.3-codex")
+        p = _make_profile("oauth-prof", provider="openai_subscription", model="gpt-6-sol")
         store.save(p)
         cred_store.set(p.auth_ref, "/fake/path.json")
 

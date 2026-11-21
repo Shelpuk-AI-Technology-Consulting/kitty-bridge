@@ -70,6 +70,29 @@ PROVIDER_LABELS: dict[str, str] = {
     "zai_regular": "Z.AI",
 }
 
+# The model the interactive wizards (``kitty setup``, ``kitty profile`` and
+# ``kitty auth openai``) suggest for a subscription provider when the user just
+# presses Enter. One declaration on purpose: the three wizards used to carry
+# their own copies, and OpenAI's retirement of ``gpt-5.3-codex`` from the
+# ChatGPT sign-in path (KBR-322) left every copy offering a model that fails
+# the profile's first request. OpenAI rotates that list independently of Kitty
+# releases, so when the default retires again this is the only line to change;
+# ``tests/profiles/test_subscription_default_models.py`` pins the wizards to it
+# and refuses a known-retired id.
+#
+# Pinned rather than resolved from a live model list at setup time: the ChatGPT
+# backend publishes no model-list contract Kitty can rely on, the wizard runs
+# before the session is proven to work, and a lookup failure there would block
+# setup outright. The user can always type another id at the prompt.
+#
+# ``gpt-6-sol`` is OpenAI's documented replacement for the retired Codex-with-
+# ChatGPT-sign-in models (learn.chatgpt.com/docs/models, 2026-11).
+# ``claude-sonnet-4-6`` is previous-generation but still served.
+SUBSCRIPTION_DEFAULT_MODELS: dict[str, str] = {
+    "openai_subscription": "gpt-6-sol",
+    "anthropic_subscription": "claude-sonnet-4-6",
+}
+
 PROVIDER_SECTIONS: list[tuple[str, list[str]]] = [
     (
         "-- Regular API Key --",
