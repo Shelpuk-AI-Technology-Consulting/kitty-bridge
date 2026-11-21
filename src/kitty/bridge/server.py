@@ -2291,6 +2291,7 @@ _BRIDGE_DEFECT_TYPES: tuple[type[BaseException], ...] = (
 
 
 def _is_quota_probe(body: object) -> bool:
+    # pragma: no mutate block
     """Return True when a Messages body is Claude Code's startup quota probe.
 
     At session start Claude Code sends a non-streaming request with
