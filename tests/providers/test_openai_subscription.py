@@ -378,7 +378,7 @@ class TestPrepareResponsesBody:
             {"model": "client-model-ABC", "input": _USER_INPUT},
         )
         from_cc = adapter._cc_to_responses({"messages": []})
-        assert from_responses["model"] == from_cc["model"] == "gpt-5.4"
+        assert from_responses["model"] == from_cc["model"] == "gpt-6-sol"
 
     def test_the_model_is_the_only_field_the_request_can_change(self) -> None:
         """Let the request decide the model and nothing else

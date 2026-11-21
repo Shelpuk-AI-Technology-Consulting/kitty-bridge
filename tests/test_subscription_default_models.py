@@ -69,9 +69,20 @@ def test_readme_names_the_declared_defaults() -> None:
     openai_default = SUBSCRIPTION_DEFAULT_MODELS["openai_subscription"]
     assert f"Model name (default: {openai_default})" in readme, "the Astra example's prompt must show the default"
     assert f"The wizards now suggest `{openai_default}`" in readme
+    assert f"? Model: {openai_default}" in readme, "the setup example must show the declared default"
     assert f"`{SUBSCRIPTION_DEFAULT_MODELS['anthropic_subscription']}`" in readme
     for line in readme.splitlines():
         is_model_prompt = "Model" in line and "(default: " in line
         assert not is_model_prompt or any(m in line for m in SUBSCRIPTION_DEFAULT_MODELS.values()), (
             f"README shows a wizard default the code does not declare: {line.strip()!r}"
         )
+
+
+def test_subscription_adapter_falls_back_to_the_shared_default() -> None:
+    """The ChatGPT-subscription adapter's fallback model is the wizards' default, never a retired id."""
+    from kitty.providers import openai_subscription
+
+    assert SUBSCRIPTION_DEFAULT_MODELS["openai_subscription"] == openai_subscription._FALLBACK_MODEL
+    source = Path(openai_subscription.__file__).read_text(encoding="utf-8")
+    for retired in _RETIRED_FROM_CHATGPT_SIGN_IN:
+        assert f'"{retired}"' not in source, f"openai_subscription.py names the retired {retired!r}"
