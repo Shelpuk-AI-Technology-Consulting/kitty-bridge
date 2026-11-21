@@ -54,9 +54,9 @@ from harness import contract as c
 #: an unbounded ``boto3>=1.34`` floor, and ``uv.lock`` is gitignored), so
 #: a *live* model revision can also surface here without any local
 #: change — that is the intended drift detector, not a defect.
-SCHEMA_VERSION = "botocore-1.43.93"
+SCHEMA_VERSION = "botocore-1.44.8"
 
-#: The 12 wire-body keys the ``bedrock-runtime:Converse`` operation publishes.
+#: The 13 wire-body keys the ``bedrock-runtime:Converse`` operation publishes.
 #: ``modelId`` is a URI parameter on the real wire (``POST /model/{modelId}/...``)
 #: and is **not** in this set — the reader reads it from
 #: :attr:`~harness.contract.CapturedRequest.path`.  Static, per the Gemini
@@ -72,6 +72,7 @@ PUBLISHED_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "messages",
         "outputConfig",
         "performanceConfig",
+        "projectIdentifier",
         "promptVariables",
         "requestMetadata",
         "serviceTier",
@@ -172,7 +173,7 @@ _SAMPLING_KEY_MAP: Mapping[str, str] = {
     "stopSequences": "stop",
 }
 
-#: Envelope extras — the eight declared control fields Converse publishes.
+#: Envelope extras — the nine declared control fields Converse publishes.
 #: Each lands at ``envelope.extra[<wire key>]``.
 _TOP_LEVEL_EXTRA_KEYS: tuple[str, ...] = (
     "additionalModelRequestFields",
@@ -180,6 +181,7 @@ _TOP_LEVEL_EXTRA_KEYS: tuple[str, ...] = (
     "guardrailConfig",
     "outputConfig",
     "performanceConfig",
+    "projectIdentifier",
     "promptVariables",
     "requestMetadata",
     "serviceTier",

@@ -146,7 +146,7 @@ class TestProtocolConformance:
         """The revision is a pinned literal — :class:`TestSchemaAgreement`
         compares a known revision against the live model, not against itself.
         """
-        assert r.SCHEMA_VERSION == "botocore-1.43.93"
+        assert r.SCHEMA_VERSION == "botocore-1.44.8"
 
     def test_the_reader_imports_nothing_from_kitty(self) -> None:
         """R1 — §3.3.1's independent-oracle rule, the structural half.
@@ -331,6 +331,7 @@ class TestEnvelope:
             },
             "outputConfig": {"textFormat": {"type": "json"}, "effort": "low"},
             "performanceConfig": {"latency": "optimized"},
+            "projectIdentifier": "default",
             "promptVariables": {"name": "value"},
             "requestMetadata": {"requestId": "req-1"},
             "serviceTier": {"type": "default"},
@@ -343,6 +344,7 @@ class TestEnvelope:
         assert projected.envelope.extra["guardrailConfig"]["guardrailIdentifier"] == "gr-1"
         assert projected.envelope.extra["outputConfig"]["textFormat"] == {"type": "json"}
         assert projected.envelope.extra["performanceConfig"]["latency"] == "optimized"
+        assert projected.envelope.extra["projectIdentifier"] == "default"
         assert projected.envelope.extra["promptVariables"] == {"name": "value"}
         assert projected.envelope.extra["requestMetadata"] == {"requestId": "req-1"}
         assert projected.envelope.extra["serviceTier"] == {"type": "default"}
@@ -765,7 +767,7 @@ class TestExtraKeyDisjointness:
     def test_every_extra_key_this_reader_can_emit_is_addressable(self) -> None:
         """The four flattening sources are pairwise disjoint.
 
-        ``_TOP_LEVEL_EXTRA_KEYS`` (the eight declared control fields),
+        ``_TOP_LEVEL_EXTRA_KEYS`` (the nine declared control fields),
         ``tool_choice`` (the one canonical-value exception, §3.3.1b),
         and the two Tool-union toggles ``cachePoint`` and ``systemTool``
         (§7.4.2 rule 5) — no key may appear in two sources. The
@@ -1968,7 +1970,7 @@ class TestFailureShapes:
 class TestTotalityOverTheWholeSurface:
     """A maximal body with every published top-level key and one entry per ContentBlock."""
 
-    def test_consumed_equals_the_twelve_published_wire_body_keys(self) -> None:
+    def test_consumed_equals_the_thirteen_published_wire_body_keys(self) -> None:
         """The ``consumed`` set is the addressable surface — no more, no less."""
         projected = project(_build_maximal_body())
 
@@ -2470,6 +2472,7 @@ def _build_maximal_body() -> dict[str, Any]:
         "additionalModelResponseFieldPaths": ["$.usage"],
         "outputConfig": {"textFormat": {"type": "json"}},
         "performanceConfig": {"latency": "optimized"},
+        "projectIdentifier": "default",
         "promptVariables": {"name": "value"},
         "requestMetadata": {"requestId": "req-1"},
         "serviceTier": {"type": "default"},
