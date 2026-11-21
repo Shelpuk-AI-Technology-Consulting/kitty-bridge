@@ -849,10 +849,11 @@ class AnthropicAdapter(ProviderAdapter):
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Translate an Anthropic Messages response into Chat Completions format."""
-        # `or []`, not a `.get` default: an upstream can send `"content": null`
-        # (a MiniMax reply to Claude Code's 1-token quota request did), and
-        # iterating None crashed the bridge, which then parked a healthy
-        # member as `hard` (KBR-328).  Same for a null `usage`.
+        # An upstream can send `"content": null` (a MiniMax reply to Claude
+        # Code's 1-token quota request did); iterating it crashed the bridge,
+        # which then parked a healthy member as `hard` (KBR-328). Null is
+        # empty, a bare string is the model's text, and any other non-list
+        # shape is empty with a WARNING. A null `usage` reads as zero.
         raw_content = raw_response.get("content")
         if isinstance(raw_content, list):
             content_blocks = raw_content

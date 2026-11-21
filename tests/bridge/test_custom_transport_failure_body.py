@@ -114,7 +114,7 @@ class TestAllFourSitesLogTheBody:
                         # The generic arm only: custom-transport failures land
                         # here (the UpstreamError and refusal arms have their
                         # own handlers with other wordings).
-                        and "failed (%s), retrying" in str(s.value.args[0].value)
+                        and "failed (%s), %s" in str(s.value.args[0].value)
                     ]
                     if not body_texts:
                         continue

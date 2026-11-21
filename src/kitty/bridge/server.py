@@ -10030,6 +10030,9 @@ class BridgeServer:
         # one-token request reach -- and park -- every member.
         quota_probe = _quota_probe.get()
         n_attempts = 1 if quota_probe else n_backends
+        # The walk's log lines name what happens next; for the probe that is nothing.
+        next_step = "the quota probe stops here" if quota_probe else "trying next"
+        retry_step = "the quota probe stops here" if quota_probe else "retrying"
 
         # FI-8.4: warn once if the request is oversized before the first attempt.
         self._maybe_warn_oversized(cc_request)
@@ -10066,9 +10069,10 @@ class BridgeServer:
                 # Empty response — try next backend
                 last_response = cc_response
                 logger.info(
-                    "Backend attempt %d/%d returned empty response, trying next",
+                    "Backend attempt %d/%d returned empty response, %s",
                     attempt + 1,
-                    n_backends,
+                    n_attempts,
+                    next_step,
                 )
             except UpstreamError as exc:
                 last_exc = exc
@@ -10092,7 +10096,7 @@ class BridgeServer:
                         "Backend attempt %d/%d reported context-too-large; compacting tighter "
                         "(factor=0.5) and retrying same backend (no failover, no mark-unhealthy)",
                         attempt + 1,
-                        n_backends,
+                        n_attempts,
                     )
                     try:
                         self._compact_with_tighter_budget(cc_request, factor=0.5)
@@ -10114,7 +10118,7 @@ class BridgeServer:
                             "Backend attempt %d/%d: conversation cannot be compacted further; "
                             "failing over without marking the backend unhealthy",
                             attempt + 1,
-                            n_backends,
+                            n_attempts,
                         )
                         compaction_exhausted = True
                         continue
@@ -10166,10 +10170,11 @@ class BridgeServer:
                 else:
                     consecutive_400_count = 0
                 logger.info(
-                    "Backend attempt %d/%d failed (status %d), retrying",
+                    "Backend attempt %d/%d failed (status %d), %s",
                     attempt + 1,
-                    n_backends,
+                    n_attempts,
                     exc.status,
+                    retry_step,
                 )
             except UnsupportedModelError as exc:
                 # KBR-126: the adapter refused to build a body for this
@@ -10193,10 +10198,11 @@ class BridgeServer:
                     last_exc = exc
                 refusals += 1
                 logger.warning(
-                    "Backend attempt %d/%d cannot serve this model (%s), trying the next backend",
+                    "Backend attempt %d/%d cannot serve this model (%s), %s",
                     attempt + 1,
-                    n_backends,
+                    n_attempts,
                     exc,
+                    next_step,
                 )
             except Exception as exc:
                 last_exc = exc
@@ -10211,10 +10217,11 @@ class BridgeServer:
                         cooldown=self._retry_after_from_exc(exc),
                     )
                 logger.info(
-                    "Backend attempt %d/%d failed (%s), retrying",
+                    "Backend attempt %d/%d failed (%s), %s",
                     attempt + 1,
-                    n_backends,
+                    n_attempts,
                     exc,
+                    retry_step,
                 )
                 # Non-streaming twin of the four streaming sites: a
                 # custom-transport dispatch failure here is the same silent
@@ -13217,6 +13224,14 @@ class BridgeServer:
                             and isinstance(last_body, dict)
                             and last_body.get("type") == "message"
                         ):
+                            # The translator logs a non-conforming `content`; a native reply
+                            # skips it, so log here rather than let it empty silently (KBR-328).
+                            native_content = last_body.get("content")
+                            if native_content is not None and not isinstance(native_content, (list, str)):
+                                logger.warning(
+                                    "Upstream Messages reply carried a %s `content`, not a list; treating it as empty",
+                                    type(native_content).__name__,
+                                )
                             return last_body
                         return self._active_provider.translate_from_upstream(cast(dict, last_body))
 

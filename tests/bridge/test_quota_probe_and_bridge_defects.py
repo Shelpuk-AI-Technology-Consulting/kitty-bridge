@@ -37,7 +37,7 @@ from kitty.bridge.server import BridgeServer, _is_quota_probe
 from kitty.profiles.schema import Profile
 from kitty.providers.anthropic import AnthropicAdapter
 from kitty.providers.anthropic_subscription import AnthropicSubscriptionAdapter
-from kitty.providers.base import ProviderError
+from kitty.providers.base import ProviderAdapter, ProviderError
 from kitty.providers.minimax import MiniMaxAdapter, minimax_embedded_error_status
 from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
 
@@ -110,18 +110,20 @@ def fast_ladders(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
 
 
-def _minimax_member(name: str, *, backup: bool = False) -> tuple:
-    """Build a translated MiniMax Token Plan member keyed by its own name.
+def _minimax_member(name: str, *, backup: bool = False, native: bool = False) -> tuple:
+    """Build a MiniMax Token Plan member keyed by its own name.
 
     Args:
         name: Profile name; also the member's API key, so calls can be attributed.
         backup: Whether the member is in the reserve tier.
+        native: Whether the member uses the native Messages passthrough
+            instead of the default translated path.
 
     Returns:
         A ``(provider, key, profile)`` balancing tuple.
     """
     return (
-        MiniMaxTokenAnthropicAdapter(),
+        MiniMaxTokenAnthropicAdapter(native_messages=native),
         f"key-{name}",
         Profile(
             name=name,
@@ -130,6 +132,94 @@ def _minimax_member(name: str, *, backup: bool = False) -> tuple:
             auth_ref=str(uuid.uuid4()),
             backup=backup,
         ),
+    )
+
+
+class _BrokenStreamProvider(ProviderAdapter):
+    """Custom-transport provider whose stream fails inside kitty's own code (a ``TypeError``)."""
+
+    use_custom_transport = True
+
+    @property
+    def provider_type(self) -> str:
+        """Name the provider in health attribution.
+
+        Returns:
+            The provider type string.
+        """
+        return "stub_broken_stream"
+
+    @property
+    def default_base_url(self) -> str:
+        """Give the never-contacted base URL.
+
+        Returns:
+            A placeholder URL; the provider fails before any I/O.
+        """
+        return "https://broken-stream.example.test"
+
+    def build_request(self, model: str, messages: list[dict], **kwargs: object) -> dict:
+        """Reflect the request through untouched.
+
+        Args:
+            model: The model name.
+            messages: The conversation.
+            **kwargs: Remaining request fields.
+
+        Returns:
+            The request fields as given.
+        """
+        return {"model": model, "messages": messages}
+
+    def parse_response(self, response_data: dict) -> dict:
+        """Return the payload unchanged.
+
+        Args:
+            response_data: The upstream payload.
+
+        Returns:
+            The same payload.
+        """
+        return response_data
+
+    def map_error(self, status_code: int, body: dict) -> Exception:
+        """Wrap a status into a provider error.
+
+        Args:
+            status_code: The upstream status.
+            body: The upstream body.
+
+        Returns:
+            A provider error carrying both.
+        """
+        return ProviderError(f"{status_code}: {body}")
+
+    async def stream_request(self, cc_request: dict, write) -> None:
+        """Fail the stream the way a bridge bug would.
+
+        Args:
+            cc_request: The upstream request.
+            write: The chunk sink; never called.
+
+        Raises:
+            TypeError: Always -- the defect class KBR-328 must not park on.
+        """
+        raise TypeError("'NoneType' object is not iterable")
+
+
+def _broken_stream_member(name: str) -> tuple:
+    """Build a custom-transport streaming member that always raises a bridge defect.
+
+    Args:
+        name: Profile name.
+
+    Returns:
+        A ``(provider, key, profile)`` balancing tuple.
+    """
+    return (
+        _BrokenStreamProvider(),
+        "",
+        Profile(name=name, provider="openai_subscription", model="m", auth_ref=str(uuid.uuid4())),
     )
 
 
@@ -395,6 +485,20 @@ class TestTheCrashParksNobody:
         assert _parked(server) == {}
 
     @pytest.mark.asyncio
+    async def test_native_object_content_is_logged_not_silently_emptied(
+        self, fast_ladders: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A native Messages reply skips the translator's warning, so the bridge logs its own."""
+        reply = {**_OK_REPLY, "content": {"text": "Answered."}}
+        server = _pool(_minimax_member("mm-1", native=True), _minimax_member("mm-2", native=True))
+        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+            status, _body, _calls = await _send(server, _REAL_TURN, {_MINIMAX_URL: _always(200, reply)})
+
+        assert status == 502
+        assert any("not a list" in r.getMessage() for r in caplog.records)
+        assert _parked(server) == {}
+
+    @pytest.mark.asyncio
     async def test_a_bridge_defect_parks_no_member(
         self, fast_ladders: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -416,6 +520,18 @@ class TestTheCrashParksNobody:
         defect_records = [r for r in caplog.records if "bridge defect" in r.getMessage()]
         assert defect_records, "the defect must be logged"
         assert all(r.exc_info is not None for r in defect_records), "with its traceback"
+
+    @pytest.mark.asyncio
+    async def test_a_streaming_custom_transport_defect_parks_no_member(self, fast_ladders: None) -> None:
+        """The defect rule holds at a streaming custom-transport arm, not only the non-streaming walk.
+
+        That arm classifies with its own ``_provider_error_failure_kind`` call; reverting it to a
+        literal ``hard`` would park both members again.
+        """
+        server = _pool(_broken_stream_member("bs-1"), _broken_stream_member("bs-2"))
+        await _send(server, {**_REAL_TURN, "stream": True}, {})
+
+        assert _parked(server) == {}
 
     @pytest.mark.asyncio
     async def test_embedded_rate_limit_parks_as_rate_limit_and_fails_over(self, fast_ladders: None) -> None:
