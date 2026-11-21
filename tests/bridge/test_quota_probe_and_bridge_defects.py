@@ -23,10 +23,12 @@ directory.
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import logging
 import uuid
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -446,6 +448,85 @@ class TestMiniMaxEmbeddedError:
         assert AnthropicAdapter().embedded_error_status(_BASE_RESP_RATE_LIMIT) is None
 
 
+_SERVER_PY = Path(__file__).resolve().parents[2] / "src" / "kitty" / "bridge" / "server.py"
+
+#: The six ``except Exception`` arms that classify a failure before parking: the
+#: non-streaming walk, its final empty ladder, and the four custom-transport
+#: streaming arms (Messages, Responses, Chat Completions, Gemini).
+_CLASSIFYING_ARMS = 6
+
+
+def _classifying_arm_assignments() -> list[tuple[int, ast.expr]]:
+    """Return each failure-kind assignment inside an ``except Exception`` arm that parks.
+
+    Returns:
+        ``(line, value)`` for every ``kind = ...`` / ``failure_kind = ...`` assignment
+        in a handler that also calls ``_mark_backend_unhealthy``.
+    """
+    tree = ast.parse(_SERVER_PY.read_text(encoding="utf-8"))
+    found: list[tuple[int, ast.expr]] = []
+    for handler in ast.walk(tree):
+        if not (isinstance(handler, ast.ExceptHandler) and isinstance(handler.type, ast.Name)):
+            continue
+        if handler.type.id != "Exception":
+            continue
+        parks = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_mark_backend_unhealthy"
+            for node in ast.walk(handler)
+        )
+        if not parks:
+            continue
+        found.extend(_kind_assignments(handler.body))
+    return found
+
+
+def _is_retryable_guard(node: ast.stmt) -> bool:
+    """Return True for ``if _is_retryable_exception(...):``, whose body only ever sees transport errors.
+
+    Args:
+        node: A statement.
+
+    Returns:
+        Whether the statement is that guard.
+    """
+    return (
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Call)
+        and isinstance(node.test.func, ast.Name)
+        and node.test.func.id == "_is_retryable_exception"
+    )
+
+
+def _kind_assignments(body: list[ast.stmt]) -> list[tuple[int, ast.expr]]:
+    """Collect failure-kind assignments in a block, skipping retryable-only subtrees.
+
+    Args:
+        body: The statements to search.
+
+    Returns:
+        ``(line, value)`` for each ``kind``/``failure_kind`` assignment found.
+    """
+    found: list[tuple[int, ast.expr]] = []
+    for stmt in body:
+        if _is_retryable_guard(stmt):
+            found.extend(_kind_assignments(stmt.orelse))
+            continue
+        if isinstance(stmt, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id in {"kind", "failure_kind"} for t in stmt.targets
+        ):
+            found.append((stmt.lineno, stmt.value))
+        for field in ("body", "orelse", "finalbody", "handlers"):
+            children = getattr(stmt, field, None)
+            if isinstance(children, list):
+                nested = [c for c in children if isinstance(c, ast.stmt)]
+                for handler in (c for c in children if isinstance(c, ast.ExceptHandler)):
+                    nested.extend(handler.body)
+                found.extend(_kind_assignments(nested))
+    return found
+
+
 class TestDefectClassification:
     """A programming error raised inside the bridge is a ``defect``, never ``hard``."""
 
@@ -464,6 +545,23 @@ class TestDefectClassification:
 
     def test_other_exceptions_stay_hard(self) -> None:
         assert BridgeServer._provider_error_failure_kind(RuntimeError("x")) == "hard"
+
+    def test_every_parking_arm_classifies_through_the_shared_classifier(self) -> None:
+        """All six arms reach the ``defect`` rule; one reverted to a literal kind fails here.
+
+        The behavioural tests drive two of the six (the non-streaming walk and the
+        Messages streaming arm). This holds the rest: a literal ``kind = "hard"``
+        anywhere would park a healthy member on that route again.
+        """
+        assignments = _classifying_arm_assignments()
+        literal = [line for line, value in assignments if not isinstance(value, ast.Call)]
+        assert not literal, f"server.py parks with a literal failure kind at lines {literal}"
+        classified = [
+            line
+            for line, value in assignments
+            if isinstance(value.func, ast.Attribute) and value.func.attr == "_provider_error_failure_kind"
+        ]
+        assert len(classified) == _CLASSIFYING_ARMS, f"expected {_CLASSIFYING_ARMS} classifying arms: {classified}"
 
 
 # ── Bridge: done-when 1 and 2 ─────────────────────────────────────────────
@@ -559,13 +657,19 @@ class TestQuotaProbeCannotEmptyThePool:
     """The probe gets one member, no walk, and parks only on deterministic evidence."""
 
     @pytest.mark.asyncio
-    async def test_rate_limited_probe_tries_one_member_and_parks_none(self, fast_ladders: None) -> None:
+    async def test_rate_limited_probe_tries_one_member_and_parks_none(
+        self, fast_ladders: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
         server = _pool(_minimax_member("mm-1"), _minimax_member("mm-2"), _minimax_member("mm-3"))
-        status, _body, calls = await _send(server, _QUOTA_PROBE, {_MINIMAX_URL: _always(429, _RATE_LIMITED)})
+        with caplog.at_level(logging.INFO, logger="kitty.bridge.server"):
+            status, _body, calls = await _send(server, _QUOTA_PROBE, {_MINIMAX_URL: _always(429, _RATE_LIMITED)})
 
         assert status == 429
         assert len(calls) == 1, "the probe must not walk the pool"
         assert _parked(server) == {}
+        # The log says what happened: one attempt of one, and no retry.
+        attempt_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Backend attempt")]
+        assert attempt_lines == ["Backend attempt 1/1 failed (status 429), the quota probe stops here"]
 
     @pytest.mark.asyncio
     async def test_the_same_failure_on_a_real_turn_still_walks_and_parks(self, fast_ladders: None) -> None:

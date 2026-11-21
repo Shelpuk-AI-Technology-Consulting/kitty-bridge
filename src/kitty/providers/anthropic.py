@@ -13,6 +13,11 @@ __all__ = ["AnthropicAdapter"]
 
 logger = logging.getLogger(__name__)
 
+#: The WARNING for a Messages reply whose ``content`` is neither a list nor a
+#: string (KBR-328). Shared with the bridge's native-passthrough return so both
+#: sites log the same line; the argument is the offending type's name.
+NON_LIST_CONTENT_WARNING = "Upstream Messages reply carried a %s `content`, not a list; treating it as empty"
+
 _ANTHROPIC_VERSION = "2023-06-01"
 _DEFAULT_MAX_TOKENS = 4096
 
@@ -863,10 +868,7 @@ class AnthropicAdapter(ProviderAdapter):
             content_blocks = [{"type": "text", "text": raw_content}]
         else:
             if raw_content is not None:
-                logger.warning(
-                    "Upstream Messages reply carried a %s `content`, not a list; treating it as empty",
-                    type(raw_content).__name__,
-                )
+                logger.warning(NON_LIST_CONTENT_WARNING, type(raw_content).__name__)
             content_blocks = []
         text_parts: list[str] = []
         tool_uses: list[dict] = []

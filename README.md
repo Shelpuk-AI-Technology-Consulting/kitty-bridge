@@ -396,8 +396,8 @@ healthy.
 **Claude Code's startup check does not cost you the pool.** When a session starts, Claude Code sends a one-token
 `quota` request to read its rate limits. Kitty answers it from the one member it picked, without trying the others,
 and a rate limit, an upstream error or a dropped connection on that request puts no member in cooldown. Only a
-rejected credential, or a subscription member's 403 saying the plan does not cover the model, still does, since
-your first real turn would hit the same error.
+rejected credential, or a 403 the bridge recognises as a plan rejection (from a subscription member or a
+custom-transport provider such as Bedrock), still does, since your first real turn would hit the same error.
 
 Kitty's own bugs do not count against a member either. If kitty fails while handling a provider's reply, it fails over
 as before but cools nobody down, and the error is logged with its stack trace — to `~/.cache/kitty/bridge.log` when you

@@ -56,7 +56,7 @@ from kitty.bridge.responses.translator import (
 from kitty.bridge.tool_audit import AUDIT_MARKER, ToolUseAuditor, collect_tool_schemas, report_tool_use
 from kitty.cloudflare import is_cloudflare_block
 from kitty.egress import EgressConfig, should_bypass
-from kitty.providers.anthropic import AnthropicCCStreamConverter
+from kitty.providers.anthropic import NON_LIST_CONTENT_WARNING, AnthropicCCStreamConverter
 from kitty.providers.base import (
     ProviderAdapter,
     ProviderError,
@@ -13228,10 +13228,7 @@ class BridgeServer:
                             # skips it, so log here rather than let it empty silently (KBR-328).
                             native_content = last_body.get("content")
                             if native_content is not None and not isinstance(native_content, (list, str)):
-                                logger.warning(
-                                    "Upstream Messages reply carried a %s `content`, not a list; treating it as empty",
-                                    type(native_content).__name__,
-                                )
+                                logger.warning(NON_LIST_CONTENT_WARNING, type(native_content).__name__)
                             return last_body
                         return self._active_provider.translate_from_upstream(cast(dict, last_body))
 
