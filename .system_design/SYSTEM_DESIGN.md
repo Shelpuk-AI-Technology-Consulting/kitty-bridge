@@ -3003,10 +3003,15 @@ the repro pool. Two defects were behind it.
   line is the one that raises exactly that message for a null `content` on the translated MiniMax path,
   and the fix and test reproduce it. A different null field elsewhere would now log its traceback
   without parking anyone, which is what makes the next one locatable.
-- **Streaming `base_resp` errors are not mapped.** Only non-streaming 2xx bodies are checked. The probe
-  is non-streaming.
+- **Embedded errors are mapped only on the standard, non-streaming transport path.** Streaming
+  `base_resp` errors are not mapped, and a `use_custom_transport` adapter's 2xx body is never checked.
+  The probe is non-streaming and the MiniMax adapters use the standard path.
 - **The probe is recognised only on `/v1/messages`.** It is Claude Code's request, and no other client
   sends it.
+- **A probe-shape change silently reverts the rule.** `_is_quota_probe` matches the exact request
+  Claude Code sends today. A release that changes it -- a different `max_tokens`, an extra message, a
+  streaming check -- stops being recognised, and the pre-KBR-328 behaviour returns without a signal:
+  the probe walks the pool and parks rate-limited members again.
 
 ### 19.4 Verification
 

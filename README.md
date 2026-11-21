@@ -400,7 +400,8 @@ rejected credential or a plan that does not cover the model still does, since yo
 error.
 
 Kitty's own bugs do not count against a member either. If kitty fails while handling a provider's reply, it fails over
-as before but cools nobody down, and the bridge log records the error with its stack trace.
+as before but cools nobody down, and the error is logged with its stack trace — to `~/.cache/kitty/bridge.log` when you
+run with `--debug`, and to stderr otherwise.
 
 One caveat: a member that cannot handle streaming is skipped for streaming requests regardless of tier, so a streaming
 request can reach a backup member while a non-streaming primary is still healthy. This only affects providers without

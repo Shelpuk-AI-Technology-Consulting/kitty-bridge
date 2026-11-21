@@ -401,16 +401,21 @@ class TestTheCrashParksNobody:
 
     @pytest.mark.asyncio
     async def test_embedded_rate_limit_parks_as_rate_limit_and_fails_over(self, fast_ladders: None) -> None:
-        """A ``base_resp`` 1002 takes the 429 path: parked as ``rate_limit``, the sibling serves."""
+        """A ``base_resp`` 1002 takes the 429 path: parked as ``rate_limit``, the sibling serves.
+
+        mm-2 is a backup member, so healthy mm-1 is the only primary and the
+        arrival is pinned: the walk reaches mm-2 only through the 429's
+        failover, which an unmapped null-content empty reply cannot produce.
+        """
         replies = {"key-mm-1": (200, _BASE_RESP_RATE_LIMIT), "key-mm-2": (200, _OK_REPLY)}
-        server = _pool(_minimax_member("mm-1"), _minimax_member("mm-2"))
+        server = _pool(_minimax_member("mm-1"), _minimax_member("mm-2", backup=True))
         status, body, _calls = await _send(
             server, _REAL_TURN, {_MINIMAX_URL: lambda _b, headers: replies[headers.get("x-api-key")]}
         )
 
         assert status == 200, body
         assert body["content"][0]["text"] == "Answered."
-        assert _parked(server) in ({}, {"mm-1": "rate_limit"})
+        assert _parked(server) == {"mm-1": "rate_limit"}
 
 
 # ── Bridge: done-when 4 ───────────────────────────────────────────────────
