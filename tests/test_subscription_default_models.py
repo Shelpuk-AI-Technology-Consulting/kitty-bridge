@@ -50,6 +50,8 @@ def test_wizard_reads_the_shared_default(wizard: str) -> None:
     source = (_CLI / wizard).read_text(encoding="utf-8")
     assert "SUBSCRIPTION_DEFAULT_MODELS" in source
     for model in SUBSCRIPTION_DEFAULT_MODELS.values():
-        assert f'"{model}"' not in source, f"{wizard} hard-codes {model!r} instead of reading the shared default"
+        # Any appearance of the id, in either quote style or inside a longer
+        # string, means the wizard carries its own copy again.
+        assert model not in source, f"{wizard} hard-codes {model!r} instead of reading the shared default"
     for retired in _RETIRED_FROM_CHATGPT_SIGN_IN:
         assert retired not in source, f"{wizard} still names the retired {retired!r}"

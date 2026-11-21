@@ -165,7 +165,7 @@ profile gets its own independent session.
 
 The Model value is sent to OpenAI's subscription backend (Kitty strips a `vendor/` prefix if you typed one — unlike the
 Claude subscription relay below, which never rewrites the model), and OpenAI rotates that list independently of Kitty releases
-— `gpt-5.3-codex` (the wizards' suggested default before 1.23.0), `gpt-5.4` and `gpt-5.5` have all retired from it.
+— `gpt-5.3-codex` (the wizards' earlier suggested default), `gpt-5.4` and `gpt-5.5` have all retired from it.
 The wizards now suggest `gpt-6-sol`; pressing Enter at the model prompt accepts it. Current ids at
 the time of writing: `gpt-6-sol`, `gpt-6-luna` and the newer `gpt-6.1-sol` from the GPT-6 generation, plus the
 still-served GPT-5.6 generation `gpt-5.6-terra` (mid-tier — OpenAI's ["balance of capability, speed, and cost for

@@ -77,7 +77,7 @@ PROVIDER_LABELS: dict[str, str] = {
 # ChatGPT sign-in path (KBR-322) left every copy offering a model that fails
 # the profile's first request. OpenAI rotates that list independently of Kitty
 # releases, so when the default retires again this is the only line to change;
-# ``tests/profiles/test_subscription_default_models.py`` pins the wizards to it
+# ``tests/test_subscription_default_models.py`` pins the wizards to it
 # and refuses a known-retired id.
 #
 # Pinned rather than resolved from a live model list at setup time: the ChatGPT
