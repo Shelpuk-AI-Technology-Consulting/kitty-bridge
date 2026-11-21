@@ -1291,10 +1291,9 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                         )
                         if call_id and item.get("arguments"):
                             tool_args[call_id] = item["arguments"]
-                    elif call_id and item.get("arguments"):
+                    elif call_id and item.get("arguments") and not tool_args.get(call_id):
                         # Update args if not yet captured via delta events
-                        if not tool_args.get(call_id):
-                            tool_args[call_id] = item["arguments"]
+                        tool_args[call_id] = item["arguments"]
 
             elif event_type == "response.completed":
                 resp_data = event.get("response", {})
@@ -1326,9 +1325,8 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                             )
                             if call_id and item.get("arguments"):
                                 tool_args[call_id] = item["arguments"]
-                        elif call_id and item.get("arguments"):
-                            if not tool_args.get(call_id):
-                                tool_args[call_id] = item["arguments"]
+                        elif call_id and item.get("arguments") and not tool_args.get(call_id):
+                            tool_args[call_id] = item["arguments"]
 
             else:
                 # Log unknown event types for debugging
