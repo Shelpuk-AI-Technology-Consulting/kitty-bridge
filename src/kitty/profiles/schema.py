@@ -80,9 +80,11 @@ PROVIDER_LABELS: dict[str, str] = {
 # the subscription adapter's ``_FALLBACK_MODEL`` (a literal there, because the
 # bridge may not import ``kitty.profiles``), which the guard keeps equal to it.
 # The tests pin the literal id on purpose -- the guard in
-# ``tests/test_subscription_default_models.py`` and the three wizards'
-# default-acceptance tests -- so a rotation is a deliberate, reviewed edit; the
-# guard also refuses a known-retired id and a README that names another default.
+# ``tests/test_subscription_default_models.py``, the three wizards'
+# default-acceptance tests and the adapter's
+# ``test_falls_back_to_the_same_default_as_cc_to_responses`` -- so a rotation is
+# a deliberate, reviewed edit; the guard also refuses a known-retired id and a
+# README that names another default.
 #
 # Pinned rather than resolved from a live model list at setup time: the ChatGPT
 # backend publishes no model-list contract Kitty can rely on, the wizard runs
