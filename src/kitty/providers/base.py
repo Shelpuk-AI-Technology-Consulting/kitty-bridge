@@ -601,6 +601,24 @@ class ProviderAdapter(ABC):
             return any(msg.get("role") == "assistant" and msg.get("reasoning_content") for msg in messages)
         return any(msg.get("role") == "assistant" and "reasoning_content" in msg for msg in messages)
 
+    def embedded_error_status(self, response_data: object) -> int | None:
+        """Return the HTTP status an error carried inside a 2xx reply stands for.
+
+        Some providers answer an error with HTTP 200 and put the real outcome
+        in the body (MiniMax's ``base_resp``). The bridge asks this before it
+        translates a 2xx reply, so such a reply takes the error path its real
+        status implies -- a rate limit parks as ``rate_limit`` and fails over --
+        instead of being translated as a success it is not (KBR-328).
+
+        Args:
+            response_data: The parsed upstream body, any JSON type.
+
+        Returns:
+            The equivalent HTTP status, or ``None`` when the reply is not an
+            error. The default never reports one.
+        """
+        return None
+
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Translate an upstream JSON response into Chat Completions format.
 
