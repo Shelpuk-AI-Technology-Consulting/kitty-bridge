@@ -20,7 +20,9 @@ import pytest
 
 from kitty.profiles.schema import PROVIDER_LIST, SUBSCRIPTION_DEFAULT_MODELS
 
-_CLI = Path(__file__).resolve().parents[1] / "src" / "kitty" / "cli"
+_ROOT = Path(__file__).resolve().parents[1]
+_CLI = _ROOT / "src" / "kitty" / "cli"
+_README = _ROOT / "README.md"
 _WIZARDS = ("setup_cmd.py", "profile_cmd.py", "auth_cmd.py")
 
 # Ids OpenAI has retired from Codex-with-ChatGPT-sign-in (learn.chatgpt.com/docs/models).
@@ -31,22 +33,26 @@ _RETIRED_FROM_CHATGPT_SIGN_IN = frozenset(
 
 
 def test_openai_subscription_default_is_currently_served() -> None:
+    """The declared OpenAI default is not an id retired from the ChatGPT sign-in path."""
     assert SUBSCRIPTION_DEFAULT_MODELS["openai_subscription"] == "gpt-6-sol"
     assert SUBSCRIPTION_DEFAULT_MODELS["openai_subscription"] not in _RETIRED_FROM_CHATGPT_SIGN_IN
 
 
 def test_anthropic_subscription_default_is_unchanged() -> None:
+    """The Anthropic default stays ``claude-sonnet-4-6``."""
     # Out of scope for KBR-322: previous-generation but still served.
     assert SUBSCRIPTION_DEFAULT_MODELS["anthropic_subscription"] == "claude-sonnet-4-6"
 
 
 def test_defaults_are_declared_only_for_real_subscription_providers() -> None:
+    """Defaults exist for exactly the two subscription providers, both real provider ids."""
     assert set(SUBSCRIPTION_DEFAULT_MODELS) == {"openai_subscription", "anthropic_subscription"}
     assert set(SUBSCRIPTION_DEFAULT_MODELS) <= set(PROVIDER_LIST)
 
 
 @pytest.mark.parametrize("wizard", _WIZARDS)
 def test_wizard_reads_the_shared_default(wizard: str) -> None:
+    """Each wizard reads the shared declaration and names no default id of its own."""
     source = (_CLI / wizard).read_text(encoding="utf-8")
     assert "SUBSCRIPTION_DEFAULT_MODELS" in source
     for model in SUBSCRIPTION_DEFAULT_MODELS.values():
@@ -55,3 +61,17 @@ def test_wizard_reads_the_shared_default(wizard: str) -> None:
         assert model not in source, f"{wizard} hard-codes {model!r} instead of reading the shared default"
     for retired in _RETIRED_FROM_CHATGPT_SIGN_IN:
         assert retired not in source, f"{wizard} still names the retired {retired!r}"
+
+
+def test_readme_names_the_declared_defaults() -> None:
+    """README's wizard examples and model-id paragraph state the declared defaults, not stale ones."""
+    readme = _README.read_text(encoding="utf-8")
+    openai_default = SUBSCRIPTION_DEFAULT_MODELS["openai_subscription"]
+    assert f"Model name (default: {openai_default})" in readme, "the Astra example's prompt must show the default"
+    assert f"The wizards now suggest `{openai_default}`" in readme
+    assert f"`{SUBSCRIPTION_DEFAULT_MODELS['anthropic_subscription']}`" in readme
+    for line in readme.splitlines():
+        is_model_prompt = "Model" in line and "(default: " in line
+        assert not is_model_prompt or any(m in line for m in SUBSCRIPTION_DEFAULT_MODELS.values()), (
+            f"README shows a wizard default the code does not declare: {line.strip()!r}"
+        )
