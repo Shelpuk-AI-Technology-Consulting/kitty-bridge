@@ -849,13 +849,19 @@ class AnthropicAdapter(ProviderAdapter):
 
     def translate_from_upstream(self, raw_response: dict) -> dict:
         """Translate an Anthropic Messages response into Chat Completions format."""
-        content_blocks = raw_response.get("content", [])
+        # `or []`, not a `.get` default: an upstream can send `"content": null`
+        # (a MiniMax reply to Claude Code's 1-token quota request did), and
+        # iterating None crashed the bridge, which then parked a healthy
+        # member as `hard` (KBR-328).  Same for a null `usage`.
+        content_blocks = raw_response.get("content") or []
         text_parts: list[str] = []
         tool_uses: list[dict] = []
 
         for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
             if block.get("type") == "text":
-                text_parts.append(block.get("text", ""))
+                text_parts.append(block.get("text") or "")
             elif block.get("type") == "tool_use":
                 tool_uses.append(block)
 
@@ -891,7 +897,9 @@ class AnthropicAdapter(ProviderAdapter):
         stop_reason = raw_response.get("stop_reason")
         finish_reason = _STOP_REASON_MAP.get(stop_reason, "stop")
 
-        usage = raw_response.get("usage", {})
+        usage = raw_response.get("usage") or {}
+        input_tokens = usage.get("input_tokens") or 0
+        output_tokens = usage.get("output_tokens") or 0
         return {
             "id": raw_response.get("id", ""),
             "object": "chat.completion",
@@ -905,9 +913,9 @@ class AnthropicAdapter(ProviderAdapter):
                 }
             ],
             "usage": {
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
             },
         }
 

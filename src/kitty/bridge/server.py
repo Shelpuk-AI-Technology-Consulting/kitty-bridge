@@ -2261,6 +2261,66 @@ class _BackendContext(TypedDict, total=False):
 _backend_context: contextvars.ContextVar[_BackendContext] = contextvars.ContextVar("backend_context")
 _EMPTY_CTX: _BackendContext = {}  # Sentinel default for .get() — avoids per-access allocation
 
+# KBR-328: True while the current request is Claude Code's startup quota probe.
+# Set per request by `_handle_messages`; read by the walk, the relay, and the
+# parking sink. A ContextVar for the same reason as `_backend_context`.
+_quota_probe: contextvars.ContextVar[bool] = contextvars.ContextVar("quota_probe", default=False)
+
+# The failure kinds a quota probe may still park. Both are deterministic for the
+# member: the first real turn would meet the same rejected credential or the same
+# missing entitlement, so the probe's evidence is as good as any request's.
+# Every other kind (rate_limit, hard, transport, stream, cloudflare) is a moment's
+# state that a one-token probe is not worth five minutes of pool capacity for.
+_QUOTA_PROBE_PARKABLE_KINDS = frozenset({"auth", "entitlement"})
+
+# Exceptions that mean the bridge's own code broke, not the backend (KBR-328).
+# `_provider_error_failure_kind` reports them as "defect", which no site parks:
+# a `TypeError` while translating a reply is evidence against Kitty, and parking
+# the member it happened on took a healthy backend out of the pool for 300 s.
+# A `ProviderError` subclass is never a defect, whatever else it inherits from.
+_BRIDGE_DEFECT_TYPES: tuple[type[BaseException], ...] = (
+    TypeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    NameError,
+    AssertionError,
+    ZeroDivisionError,
+    RecursionError,
+)
+
+
+def _is_quota_probe(body: object) -> bool:
+    """Return True when a Messages body is Claude Code's startup quota probe.
+
+    At session start Claude Code sends a non-streaming request with
+    ``max_tokens: 1`` and a single user message whose text is ``quota``, to
+    read its rate-limit state. In a balancing pool that one request walked
+    every member and parked each one that answered 429, leaving the pool
+    all-unhealthy before the user typed anything (KBR-328). The shape is
+    matched exactly so no real turn is ever mistaken for it.
+
+    Args:
+        body: The parsed inbound Messages body.
+
+    Returns:
+        True only for the exact probe shape.
+    """
+    if not isinstance(body, dict) or body.get("stream") is True or body.get("max_tokens") != 1:
+        return False
+    messages = body.get("messages")
+    if not isinstance(messages, list) or len(messages) != 1:
+        return False
+    message = messages[0]
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict):
+        if content[0].get("type") != "text":
+            return False
+        content = content[0].get("text")
+    return isinstance(content, str) and content.strip() == "quota"
+
 
 class BridgeServer:
     """HTTP bridge that translates between agent protocols and upstream Chat Completions.
@@ -2887,10 +2947,31 @@ class BridgeServer:
         - "cloudflare" marks the backend unhealthy (403 Cloudflare block).
         - "auth" sets a session-persistent cooldown (24h) for invalid credentials.
 
+        - "defect" parks nothing: the failure is the bridge's own bug (KBR-328).
+          It is logged at WARNING with the traceback, since the message alone
+          does not locate the failing line.
+
+        While the request is Claude Code's startup quota probe, only ``auth``
+        and ``entitlement`` park (``_QUOTA_PROBE_PARKABLE_KINDS``, KBR-328).
+
         For backward compatibility, a short cooldown passed without an explicit
         failure_kind is treated as a stream error.
         """
         if not self._backends or index >= len(self._backend_health):
+            return
+        if failure_kind == "defect":
+            logger.warning(
+                "Backend %s not marked unhealthy: the failure is a bridge defect, not the backend's",
+                self._backends[index][2].name,
+                exc_info=True,
+            )
+            return
+        if _quota_probe.get() and failure_kind not in _QUOTA_PROBE_PARKABLE_KINDS:
+            logger.info(
+                "Backend %s not marked unhealthy after %s error: the request was Claude Code's quota probe",
+                self._backends[index][2].name,
+                failure_kind,
+            )
             return
         health = self._backend_health[index]
         health["healthy"] = False
@@ -3301,7 +3382,8 @@ class BridgeServer:
             True when the reply carries no content the user would render.
         """
         if cc_response.get("type") == "message":
-            content_blocks = cc_response.get("content", [])
+            # `or []`: a null `content` is an empty reply, not a crash (KBR-328).
+            content_blocks = cc_response.get("content") or []
             # D1 decides by type, mirroring PreambleHold._block_start_releases: any block
             # whose type is not text/thinking/redacted_thinking is content, however unknown
             # the type, and a text block counts when its text is non-empty (whitespace too).
@@ -5785,6 +5867,13 @@ class BridgeServer:
         logger.debug("═══ MESSAGES API REQUEST ═══")
         logger.debug("Request body: %s", json.dumps(body, indent=2, ensure_ascii=False))
 
+        # KBR-328: set on every Messages request, so a probe's flag can never
+        # outlive it. Meaningful only for a pool: a single backend never walks.
+        quota_probe = bool(self._backends) and _is_quota_probe(body)
+        _quota_probe.set(quota_probe)
+        if quota_probe:
+            logger.info("Claude Code quota probe: one attempt, no failover, no transient-failure parking")
+
         # Subscription traffic is Claude Code's own request: relay it byte for
         # byte (until Anthropic refuses its reasoning, §16) instead of translating
         # it. `request.read()` serves the cached
@@ -6196,6 +6285,9 @@ class BridgeServer:
         """
         if not self._backends or self._subscription_relay_forbidden():
             return None
+        # KBR-328: the quota probe had its one attempt; crossing would spend another member on it.
+        if _quota_probe.get():
+            return None
         # This walk may itself be the relay's fall-over; relaying again would only repeat the refusal.
         if request.get(_RELAY_REFUSED_REQUEST_KEY):
             return None
@@ -6320,6 +6412,10 @@ class BridgeServer:
         """
         url = self._build_upstream_url(body)
         headers = self._subscription_relay_headers(request)
+        # KBR-328: the quota probe gets this one member and no walk -- neither to
+        # a subscription sibling nor over to a translated member.
+        quota_probe = _quota_probe.get()
+        may_fall_over = may_fall_over and not quota_probe
         # One grace budget per request, shared across members, exactly as the
         # translated routes ride out connection trouble (README Balanced
         # Profiles promises this pool-wide).
@@ -6339,6 +6435,9 @@ class BridgeServer:
                 response = await self._relay_attempt_recovering_thinking(request, body, raw, url, headers)
             except UpstreamError as exc:
                 self._mark_subscription_unhealthy(exc)
+                # The probe's answer is the upstream's answer: no next member.
+                if quota_probe:
+                    return self._subscription_error_message_envelope(exc)
                 # Subscription siblings share one identity and would refuse the
                 # same request, and nothing was parked, so retrying could not end.
                 if exc.status in _RELAY_REQUEST_SHAPED_STATUSES:
@@ -6355,6 +6454,10 @@ class BridgeServer:
                 if await self._wait_out_transport_blip(exc, grace):
                     continue
                 if not _is_transport_error(exc):
+                    raise
+                # The probe parks nothing for a transport blip and tries no other
+                # member; the caller renders the relay's transport envelope.
+                if quota_probe:
                     raise
                 if self._current_backend_idx >= 0:
                     self._mark_backend_unhealthy(self._current_backend_idx, failure_kind="transport")
@@ -9913,11 +10016,20 @@ class BridgeServer:
         # re-selection to find.
         attempts_run = 0
         refusals = 0
+        # KBR-328: attempts that ended in the bridge's own bug. Like refusals
+        # they park nothing, so when every attempt was one the final ladder's
+        # 60 s of sleeps would only re-run the same bug.
+        defects = 0
+        # KBR-328: Claude Code's startup quota probe gets one attempt on the
+        # member the arrival picked. Walking the pool for it is what let one
+        # one-token request reach -- and park -- every member.
+        quota_probe = _quota_probe.get()
+        n_attempts = 1 if quota_probe else n_backends
 
         # FI-8.4: warn once if the request is oversized before the first attempt.
         self._maybe_warn_oversized(cc_request)
 
-        for attempt in range(n_backends):
+        for attempt in range(n_attempts):
             if attempt > 0:
                 try:
                     self._select_backend()
@@ -10084,8 +10196,10 @@ class BridgeServer:
             except Exception as exc:
                 last_exc = exc
                 idx = self._current_backend_idx
+                failure_kind = self._provider_error_failure_kind(exc)
+                if failure_kind == "defect":
+                    defects += 1
                 if idx >= 0:
-                    failure_kind = self._provider_error_failure_kind(exc)
                     self._mark_backend_unhealthy(
                         idx,
                         failure_kind=failure_kind,
@@ -10118,8 +10232,18 @@ class BridgeServer:
         # may still rescue it, and stealing it is the regression this handler
         # first shipped with. The `last_exc is not None` conjunct narrows the
         # type; it is not a reachable case, since the first refusal assigns it.
-        if refusals and refusals == attempts_run and last_exc is not None:
+        # KBR-328: bridge defects join refusals here -- neither parks, and
+        # neither is cured by re-sending the same body after a sleep.
+        if (refusals or defects) and refusals + defects == attempts_run and last_exc is not None:
             raise last_exc from None
+
+        # KBR-328: the quota probe ends with its one attempt. The final ladder
+        # would select (and could park) further members for it.
+        if quota_probe:
+            if last_exc is not None:
+                raise last_exc
+            if last_response is not None:
+                return last_response
 
         if compaction_exhausted:
             # Chained so the upstream rejection that started recovery stays in
@@ -12713,7 +12837,9 @@ class BridgeServer:
 
         Precedence: ``cloudflare`` > ``entitlement`` > ``rate_limit`` (429) >
         ``oversized`` (400/413 context-too-large) > ``auth`` (401/403) >
-        ``transport`` > ``hard``. Entitlement outranks auth because the
+        ``transport`` > ``defect`` > ``hard``. ``defect`` is a programming
+        error raised inside the bridge (``_BRIDGE_DEFECT_TYPES``);
+        :meth:`_mark_backend_unhealthy` never parks it (KBR-328). Entitlement outranks auth because the
         message is what makes the request non-retryable: a 403 with a
         "requires a subscription" body will never succeed for the same
         profile until the user upgrades, so it gets a 24 h cooldown and a
@@ -12737,6 +12863,9 @@ class BridgeServer:
                 return "auth"
         if _is_transport_error(exc):
             return "transport"
+        # KBR-328: the bridge's own bug. Not evidence against the member.
+        if isinstance(exc, _BRIDGE_DEFECT_TYPES) and not isinstance(exc, ProviderError):
+            return "defect"
         return "hard"
 
     @staticmethod
@@ -13060,6 +13189,19 @@ class BridgeServer:
                         last_body = await resp.json()
                     except Exception:
                         last_body = await resp.text()
+
+                    # KBR-328: an error the provider put inside a 2xx body (MiniMax's
+                    # `base_resp`) takes the error path its real status implies.
+                    if last_status < 400:
+                        embedded_status = self._active_provider.embedded_error_status(last_body)
+                        if embedded_status is not None:
+                            logger.warning(
+                                "Backend %s answered HTTP %d with an embedded error; treating it as HTTP %d",
+                                self._backend_label(),
+                                last_status,
+                                embedded_status,
+                            )
+                            last_status = embedded_status
 
                     if last_status < 400:
                         # Only Claude Code's native request takes a Messages body as-is: every other

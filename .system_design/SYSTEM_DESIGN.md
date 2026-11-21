@@ -1135,6 +1135,9 @@ cooling it either gambles on a near-expiry backend (soonest recovery ≤ 60 s,
 `_ALL_UNHEALTHY_FAST_FAIL_THRESHOLD`) or raises `AllBackendsUnhealthyError`, which the
 four protocol handlers answer with an immediate per-protocol 503 carrying
 `Retry-After` and the per-backend causes.
+Two failures park nobody (§19, KBR-328): a `defect` (an exception raised by the bridge's own
+code, not the backend) and, during Claude Code's startup quota probe, every kind but `auth` and
+`entitlement`.
 
 ### 6.2 KBR-243: hold the arrival while recovery fits inside the window
 
@@ -2918,3 +2921,99 @@ turn, so without recovery the session stays blocked until the user clears it.
 
 `tests/bridge/test_redacted_thinking_unsupported.py`; register row M34 (`TEST_SUITE.md` §3.2.1); step
 record `.system_design/steps/redacted_thinking_unsupported_upstream.md`.
+
+## 19. Claude Code's quota probe, and bridge defects, park no healthy member
+
+KBR-328, from the bridge log of 2026-11-04 (pool `my`, 1.21.0) and a two-member repro on the 1.22.0
+code. When a session starts, Claude Code sends a non-streaming `max_tokens: 1` request whose only
+message is the user text `quota`. In a balancing pool that one request could park several members for
+300 s before the user typed anything. It parked all six that it reached at 12:42:11, and both members of
+the repro pool. Two defects were behind it.
+
+- **A bridge crash recorded against a member.** A MiniMax Token Plan member answered with a Messages
+  body whose `content` was `null`. `AnthropicAdapter.translate_from_upstream` iterated it and raised
+  `TypeError: 'NoneType' object is not iterable`. The walk's generic `except Exception` arm classified
+  that `TypeError` through `_provider_error_failure_kind` as `hard` and parked a healthy member. The
+  native Messages arm of `_is_empty_cc_response` had the same flaw. MiniMax also reports some
+  failures as HTTP 200 with a non-zero `base_resp.status_code` beside a null `content`, and the bridge
+  translated those as if they were successes.
+- **The probe walked the pool.** `_request_with_retry_balancing` tried every member and then ran the
+  final empty ladder. Every 429 parked one more member, and the subscription relay walks its
+  siblings and falls over to a translated member in the same way.
+
+### 19.1 The rule
+
+- **Null-safe translation.** `translate_from_upstream` reads `content` and `usage` with `or []` /
+  `or {}`, skips non-dict blocks, and treats a null `text` as empty. `_is_empty_cc_response` does the
+  same, so a null-content reply is judged empty and takes the existing empty ladder.
+- **Embedded errors take the error path.** `ProviderAdapter.embedded_error_status` (default `None`) lets
+  an adapter name the HTTP status that a 2xx body stands for. Both MiniMax adapters implement it from
+  `base_resp.status_code` (`minimax_embedded_error_status`): 1002/1039 map to 429, 1004 to 401, 1008 to
+  402, 1027/2013 to 400, and any other non-zero code to 502. `_make_upstream_request` asks before it
+  translates, so a MiniMax rate limit is parked as `rate_limit` and fails over like a real 429.
+- **Defects are not evidence.** `_provider_error_failure_kind` returns `defect` for `_BRIDGE_DEFECT_TYPES`
+  (`TypeError`, `AttributeError`, `KeyError`, `IndexError`, `NameError`, `AssertionError`,
+  `ZeroDivisionError`, `RecursionError`) unless the exception is a `ProviderError`.
+  `_mark_backend_unhealthy` never parks a `defect`. It logs a WARNING with the traceback instead, since
+  the 1.21.0 log line carried only the message. The rule sits in the sink, so all six mark sites are
+  covered: the non-streaming walk, its final ladder and the four custom-transport streaming arms.
+  When every attempt of a non-streaming walk ended in a defect or a refusal, the final ladder is
+  skipped, as KBR-126 already did for refusals alone.
+- **The probe gets one member.** `_handle_messages` sets the `_quota_probe` ContextVar on every Messages
+  request, from `_is_quota_probe(body)` in a balancing pool. While it is set:
+  `_request_with_retry_balancing` makes one attempt and no final ladder; `_relay_last_resort` does not
+  cross; the relay returns the upstream's envelope on an `UpstreamError` and re-raises a spent
+  transport blip, so it neither walks to a subscription sibling nor falls over; and
+  `_mark_backend_unhealthy` parks only `auth` and `entitlement` (`_QUOTA_PROBE_PARKABLE_KINDS`).
+
+### 19.2 Decisions, and why
+
+- **The probe does not walk the pool (owner decision taken here).** It is not user work: it reads rate-limit
+  state, and the answer of the member it lands on is that state. Walking it is what let one one-token
+  request reach every member. Claude Code receives the member's own reply, including a 429.
+- **`auth` and `entitlement` still park on the probe.** Both are deterministic for the member: the first
+  real turn would meet the same rejected credential or the same uncovered model, so the probe's
+  evidence is as good as any request's. Every other kind is a moment's state, and a one-token probe is
+  not worth 300 s of pool capacity.
+- **Match the exact shape.** Non-streaming, `max_tokens == 1`, exactly one `user` message whose text is
+  `quota` (string or a single text block, surrounding whitespace allowed). A real turn cannot look like
+  this, and a request that does gets at worst one attempt without a park.
+- **Set the flag on every request, not only on a probe.** That way a value can never outlive its
+  request, even if the context is reused.
+- **Parking suppression needs the walk limits.** The relay loop advances only by parking: with parks
+  suppressed and no early return it would select the same member forever. The early returns in
+  `_relay_subscription_messages` are therefore load-bearing, and the test module carries a 60 s timeout
+  so that losing one fails rather than hangs.
+- **Defects by exception type, not by origin.** The bridge cannot tell from an exception where it was
+  raised, but these types mean a programming error wherever they come from, and a `ProviderError` is
+  never one. A `ValueError` stays `hard`, because adapters raise it for real configuration and reply
+  faults.
+- **The MiniMax code table is MiniMax's published one.** An unknown non-zero code maps to 502, an
+  upstream fault, so it parks as `hard`, as an HTTP 502 would.
+
+### 19.3 Known limits
+
+- **The 429s themselves are not explained.** The ticket's second problem asks why Anthropic and the
+  API-key members answer the probe with 429. That still needs evidence from the real client running
+  through Kitty: quota-request versus ordinary-request 429 rates on the same member in the same
+  minutes, and a direct session compared with a relayed one. Hand-written replays with the user's token
+  are ruled out. None of the hypotheses is settled. This change makes the answer harmless to the
+  pool, whatever it turns out to be.
+- **The crash's reply shape is inferred.** The 1.21.0 log carries no body and no traceback. The failing
+  line is the one that raises exactly that message for a null `content` on the translated MiniMax path,
+  and the fix and test reproduce it. A different null field elsewhere would now log its traceback
+  without parking anyone, which is what makes the next one locatable.
+- **Streaming `base_resp` errors are not mapped.** Only non-streaming 2xx bodies are checked. The probe
+  is non-streaming.
+- **The probe is recognised only on `/v1/messages`.** It is Claude Code's request, and no other client
+  sends it.
+
+### 19.4 Verification
+
+`tests/bridge/test_quota_probe_and_bridge_defects.py`. It contains unit tests for each predicate and
+mapping. Its bridge tests drive a translated `minimax_token` pool and a mixed subscription pool
+against scripted upstreams: a null-content reply parks nobody, an injected `TypeError` parks nobody and
+skips the ladder, an embedded 1002 fails over as `rate_limit`, a rate-limited probe makes one call and
+parks nobody, a 401 probe still parks `auth`, and a probe on the subscription member neither walks nor
+falls over. Regression guards check that a real turn still walks, parks and falls over. Hand-made
+breaks of each rule were confirmed to fail the module.

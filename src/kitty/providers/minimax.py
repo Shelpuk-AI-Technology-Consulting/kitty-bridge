@@ -6,12 +6,52 @@ import re
 
 from kitty.providers.base import ProviderAdapter, ProviderError
 
-__all__ = ["MiniMaxAdapter"]
+__all__ = ["MiniMaxAdapter", "minimax_embedded_error_status"]
 
 _GLOBAL_URL = "https://api.minimax.io/v1"
 _CN_URL = "https://api.minimaxi.com/v1"
 
 _MINIMAX_PREFIX = re.compile(r"^minimax/", re.IGNORECASE)
+
+
+# MiniMax reports some failures with HTTP 200 and the real outcome in
+# ``base_resp.status_code`` (0 is success), next to ``choices``/``content``
+# that is null. Codes from MiniMax's published error-code table; anything else
+# non-zero is an upstream fault. KBR-328: such a reply used to be translated as
+# a success, iterate the null ``content`` and crash the bridge.
+_BASE_RESP_STATUS: dict[int, int] = {
+    1002: 429,  # RPM rate limit
+    1039: 429,  # TPM rate limit
+    1004: 401,  # authentication failed
+    1008: 402,  # insufficient balance
+    1027: 400,  # output content flagged
+    2013: 400,  # invalid parameters
+}
+_BASE_RESP_DEFAULT_STATUS = 502
+
+
+def minimax_embedded_error_status(response_data: object) -> int | None:
+    """Map a MiniMax ``base_resp`` error inside a 2xx reply to an HTTP status.
+
+    Shared by both MiniMax adapters: the OpenAI-compatible endpoint and the
+    Anthropic-compatible Token Plan endpoint return the same envelope.
+
+    Args:
+        response_data: The parsed reply body.
+
+    Returns:
+        The equivalent HTTP status, or ``None`` when there is no ``base_resp``
+        or its ``status_code`` is 0 (success) or not an integer.
+    """
+    if not isinstance(response_data, dict):
+        return None
+    base_resp = response_data.get("base_resp")
+    if not isinstance(base_resp, dict):
+        return None
+    code = base_resp.get("status_code")
+    if not isinstance(code, int) or isinstance(code, bool) or code == 0:
+        return None
+    return _BASE_RESP_STATUS.get(code, _BASE_RESP_DEFAULT_STATUS)
 
 
 class MiniMaxAdapter(ProviderAdapter):
@@ -62,6 +102,9 @@ class MiniMaxAdapter(ProviderAdapter):
             # (ticket decision 1).
             return self._strip_endpoint_suffix(url, self.upstream_path)
         return self.default_base_url
+
+    def embedded_error_status(self, response_data: object) -> int | None:
+        return minimax_embedded_error_status(response_data)
 
     def normalize_model_name(self, model: str) -> str:
         stripped = _MINIMAX_PREFIX.sub("", model, count=1)
