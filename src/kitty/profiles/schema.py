@@ -76,8 +76,10 @@ PROVIDER_LABELS: dict[str, str] = {
 # their own copies, and OpenAI's retirement of ``gpt-5.3-codex`` from the
 # ChatGPT sign-in path (KBR-322) left every copy offering a model that fails
 # the profile's first request. OpenAI rotates that list independently of Kitty
-# releases, so when the default retires again this is the only *source* line to
-# change. The tests pin the literal id on purpose -- the guard in
+# releases, so when the default retires again this line changes together with
+# the subscription adapter's ``_FALLBACK_MODEL`` (a literal there, because the
+# bridge may not import ``kitty.profiles``), which the guard keeps equal to it.
+# The tests pin the literal id on purpose -- the guard in
 # ``tests/test_subscription_default_models.py`` and the three wizards'
 # default-acceptance tests -- so a rotation is a deliberate, reviewed edit; the
 # guard also refuses a known-retired id and a README that names another default.

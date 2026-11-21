@@ -6,10 +6,13 @@ The three interactive wizards (``kitty setup``, ``kitty profile`` and
 after OpenAI retired it from the ChatGPT sign-in path. Accepting it produced a
 profile whose first request failed with model-not-found.
 
-These tests hold the single declaration in place: no wizard may carry its own
-literal again, and the declared default may not be an id OpenAI has retired
-from that path. The behavioural pins (an empty answer yields the default, and
-the prompt names it) live with each wizard's own tests.
+These tests hold the single declaration in place: defaults are declared for
+exactly the two subscription providers; no wizard may carry its own literal
+again; the declared default may not be an id OpenAI has retired from that path;
+README must name the declared defaults; and the subscription adapter's fallback
+model must equal the wizards' default and name no retired id. The behavioural
+pins (an empty answer yields the default, and the prompt names it) live with
+each wizard's own tests.
 """
 
 from __future__ import annotations
@@ -85,4 +88,4 @@ def test_subscription_adapter_falls_back_to_the_shared_default() -> None:
     assert SUBSCRIPTION_DEFAULT_MODELS["openai_subscription"] == openai_subscription._FALLBACK_MODEL
     source = Path(openai_subscription.__file__).read_text(encoding="utf-8")
     for retired in _RETIRED_FROM_CHATGPT_SIGN_IN:
-        assert f'"{retired}"' not in source, f"openai_subscription.py names the retired {retired!r}"
+        assert retired not in source, f"openai_subscription.py names the retired {retired!r}"
