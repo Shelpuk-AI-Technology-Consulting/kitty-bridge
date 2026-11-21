@@ -9,7 +9,14 @@ import questionary
 
 from kitty.auth.claude_subscription import session_detail
 from kitty.credentials.store import CredentialError, CredentialStore
-from kitty.profiles.schema import _NAME_PATTERN, PROVIDER_LABELS, PROVIDER_SECTIONS, RESERVED_NAMES, Profile
+from kitty.profiles.schema import (
+    _NAME_PATTERN,
+    PROVIDER_LABELS,
+    PROVIDER_SECTIONS,
+    RESERVED_NAMES,
+    SUBSCRIPTION_DEFAULT_MODELS,
+    Profile,
+)
 from kitty.profiles.store import ProfileStore
 from kitty.tui.display import print_error, print_section, print_status, print_step, print_warning, status_spinner
 from kitty.tui.menu import SelectionMenu
@@ -138,8 +145,7 @@ def run_setup_wizard(store: ProfileStore, cred_store: CredentialStore) -> Profil
 
     # Step 3: Model
     print_step(3, 7, "Model selection")
-    _default_models = {"openai_subscription": "gpt-5.3-codex", "anthropic_subscription": "claude-sonnet-4-6"}
-    default_model = _default_models.get(provider)
+    default_model = SUBSCRIPTION_DEFAULT_MODELS.get(provider)
     if default_model:
         model = prompt_text(f"Model (default: {default_model}): ")
         model = default_model if not model or not model.strip() else model.strip()

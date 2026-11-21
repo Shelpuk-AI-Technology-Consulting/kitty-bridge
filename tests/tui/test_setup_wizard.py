@@ -274,14 +274,14 @@ class TestSetupWizardOAuth:
             _mock_tty(),
             patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["openai_subscription"]),
             patch("kitty.cli.auth_cmd.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch(f"{_MOD}.prompt_text", side_effect=["gpt-5.3-codex", "my-openai"]),
+            patch(f"{_MOD}.prompt_text", side_effect=["gpt-6-sol", "my-openai"]),
             patch(f"{_MOD}.prompt_confirm", side_effect=[False, False]),  # backup=False, no conn check
             patch(f"{_MOD}.prompt_secret") as mock_secret,
         ):
             profile = run_setup_wizard(store, cred_store)
 
         assert profile.provider == "openai_subscription"
-        assert profile.model == "gpt-5.3-codex"
+        assert profile.model == "gpt-6-sol"
         assert profile.name == "my-openai"
         mock_secret.assert_not_called()  # no API key prompt
 
@@ -293,12 +293,14 @@ class TestSetupWizardOAuth:
             _mock_tty(),
             patch(f"{_MOD}.SelectionMenu.show", return_value=PROVIDER_LABELS["openai_subscription"]),
             patch("kitty.cli.auth_cmd.run_oauth_for_provider", _mock_run_oauth_for_provider(session)),
-            patch(f"{_MOD}.prompt_text", side_effect=["", "openai-prof"]),
+            patch(f"{_MOD}.prompt_text", side_effect=["", "openai-prof"]) as mock_text,
             patch(f"{_MOD}.prompt_confirm", side_effect=[False, False]),  # backup=False, no conn check
         ):
             profile = run_setup_wizard(store, cred_store)
 
-        assert profile.model == "gpt-5.3-codex"
+        assert profile.model == "gpt-6-sol"
+        # KBR-322: the prompt advertises the value an empty answer produces.
+        assert mock_text.call_args_list[0].args[0] == "Model (default: gpt-6-sol): "
 
     def test_anthropic_subscription_uses_default_model(self, store: ProfileStore, cred_store: CredentialStore) -> None:
         """The subscription prompt offers a Claude default, not the OpenRouter example."""

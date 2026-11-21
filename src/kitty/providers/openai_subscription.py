@@ -57,6 +57,15 @@ __all__ = ["OpenAISubscriptionAdapter"]
 
 logger = logging.getLogger(__name__)
 
+# The model a body falls back to when ``cc_request`` carries none. Dead today
+# (``_normalize_model`` always sets it from the required ``Profile.model``), but
+# if that ever regressed it must name a model the ChatGPT sign-in path serves,
+# not a retired literal. A literal rather than an import of the wizards'
+# ``SUBSCRIPTION_DEFAULT_MODELS``: the bridge imports this module and may not
+# reach ``kitty.profiles`` (import-linter). ``tests/test_subscription_default_models.py``
+# holds the two equal (KBR-322).
+_FALLBACK_MODEL = "gpt-6-sol"
+
 
 class _CurlResponse(Protocol):
     """The part of a ``curl_cffi`` response this adapter relies on.
@@ -642,7 +651,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
 
         ``.get`` with a default, not ``or``, and the difference is deliberate:
         ``.get`` substitutes only for an **absent** key, so a present-but-falsy
-        model would pass straight through rather than become ``"gpt-5.4"``.
+        model would pass straight through rather than become ``_FALLBACK_MODEL``.
         Neither state is reachable, so the two spellings agree — but only
         because of an invariant held elsewhere:
         :meth:`~kitty.bridge.server.BridgeServer._normalize_model` overwrites
@@ -674,7 +683,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
         # Only pass parameters that the Codex backend accepts.
         # Additional parameters cause 400 "Unsupported parameter: X".
         body: dict = {
-            "model": cc_request.get("model", "gpt-5.4"),
+            "model": cc_request.get("model", _FALLBACK_MODEL),
             "stream": True,
             "store": False,
         }
@@ -1168,7 +1177,7 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                 )
 
         body: dict = {
-            "model": cc_request.get("model", "gpt-5.4"),
+            "model": cc_request.get("model", _FALLBACK_MODEL),
             "input": input_items,
             "stream": True,
             "store": False,
@@ -1291,10 +1300,9 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                         )
                         if call_id and item.get("arguments"):
                             tool_args[call_id] = item["arguments"]
-                    elif call_id and item.get("arguments"):
+                    elif call_id and item.get("arguments") and not tool_args.get(call_id):
                         # Update args if not yet captured via delta events
-                        if not tool_args.get(call_id):
-                            tool_args[call_id] = item["arguments"]
+                        tool_args[call_id] = item["arguments"]
 
             elif event_type == "response.completed":
                 resp_data = event.get("response", {})
@@ -1326,9 +1334,8 @@ class OpenAISubscriptionAdapter(OpenAIAdapter):
                             )
                             if call_id and item.get("arguments"):
                                 tool_args[call_id] = item["arguments"]
-                        elif call_id and item.get("arguments"):
-                            if not tool_args.get(call_id):
-                                tool_args[call_id] = item["arguments"]
+                        elif call_id and item.get("arguments") and not tool_args.get(call_id):
+                            tool_args[call_id] = item["arguments"]
 
             else:
                 # Log unknown event types for debugging

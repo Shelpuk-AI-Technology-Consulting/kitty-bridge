@@ -11,7 +11,7 @@ from kitty.auth.oauth_session import OAuthSession
 from kitty.auth.openai_oauth import run_oauth_flow
 from kitty.cli.profile_cmd import BACKUP_PROMPT
 from kitty.credentials.store import CredentialError, CredentialStore
-from kitty.profiles.schema import Profile
+from kitty.profiles.schema import SUBSCRIPTION_DEFAULT_MODELS, Profile
 from kitty.profiles.store import ProfileStore
 from kitty.tui.display import print_error, print_section, print_status, print_warning
 from kitty.tui.prompts import check_tty, prompt_confirm, prompt_text
@@ -115,8 +115,9 @@ async def run_auth_openai(
     )
 
     # Step 2: Prompt for model name
-    model = prompt_text("Model name (default: gpt-5.3-codex): ")
-    model = "gpt-5.3-codex" if not model or not model.strip() else model.strip()
+    default_model = SUBSCRIPTION_DEFAULT_MODELS["openai_subscription"]
+    model = prompt_text(f"Model name (default: {default_model}): ")
+    model = default_model if not model or not model.strip() else model.strip()
 
     # Step 3: Prompt for profile name
     profile_name = prompt_text("Profile name (default: openai-sub): ")
