@@ -853,7 +853,20 @@ class AnthropicAdapter(ProviderAdapter):
         # (a MiniMax reply to Claude Code's 1-token quota request did), and
         # iterating None crashed the bridge, which then parked a healthy
         # member as `hard` (KBR-328).  Same for a null `usage`.
-        content_blocks = raw_response.get("content") or []
+        raw_content = raw_response.get("content")
+        if isinstance(raw_content, list):
+            content_blocks = raw_content
+        elif isinstance(raw_content, str):
+            # Not the Messages wire, but the model's answer: keep it as text
+            # rather than iterate its characters and drop it.
+            content_blocks = [{"type": "text", "text": raw_content}]
+        else:
+            if raw_content is not None:
+                logger.warning(
+                    "Upstream Messages reply carried a %s `content`, not a list; treating it as empty",
+                    type(raw_content).__name__,
+                )
+            content_blocks = []
         text_parts: list[str] = []
         tool_uses: list[dict] = []
 

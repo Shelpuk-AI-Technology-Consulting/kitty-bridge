@@ -3382,8 +3382,12 @@ class BridgeServer:
             True when the reply carries no content the user would render.
         """
         if cc_response.get("type") == "message":
-            # `or []`: a null `content` is an empty reply, not a crash (KBR-328).
-            content_blocks = cc_response.get("content") or []
+            # A null `content` is an empty reply, not a crash (KBR-328). A bare
+            # string is the model's text; any other non-list shape is empty.
+            raw_content = cc_response.get("content")
+            if isinstance(raw_content, str):
+                return raw_content == ""
+            content_blocks = raw_content if isinstance(raw_content, list) else []
             # D1 decides by type, mirroring PreambleHold._block_start_releases: any block
             # whose type is not text/thinking/redacted_thinking is content, however unknown
             # the type, and a text block counts when its text is non-empty (whitespace too).

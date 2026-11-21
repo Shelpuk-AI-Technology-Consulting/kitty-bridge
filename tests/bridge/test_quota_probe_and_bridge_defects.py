@@ -306,6 +306,21 @@ class TestNullContentTranslation:
     def test_native_empty_judge_tolerates_null_content(self) -> None:
         assert BridgeServer._is_empty_cc_response({"type": "message", "content": None})
 
+    def test_bare_string_content_is_kept_as_text(self) -> None:
+        """A non-conforming string ``content`` is the model's answer, not characters to skip."""
+        result = AnthropicAdapter().translate_from_upstream({**_OK_REPLY, "content": "Plain answer."})
+        assert result["choices"][0]["message"]["content"] == "Plain answer."
+        assert not BridgeServer._is_empty_cc_response({"type": "message", "content": "Plain answer."})
+        assert BridgeServer._is_empty_cc_response({"type": "message", "content": ""})
+
+    def test_object_content_is_logged_and_treated_as_empty(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Any other non-list shape is a protocol violation: empty, but never silently."""
+        with caplog.at_level(logging.WARNING, logger="kitty.providers.anthropic"):
+            result = AnthropicAdapter().translate_from_upstream({**_OK_REPLY, "content": {"text": "x"}})
+        assert result["choices"][0]["message"]["content"] is None
+        assert any("not a list" in r.getMessage() for r in caplog.records)
+        assert BridgeServer._is_empty_cc_response({"type": "message", "content": {"text": "x"}})
+
 
 class TestMiniMaxEmbeddedError:
     """MiniMax's HTTP-200 ``base_resp`` errors map to the status they stand for."""
@@ -457,6 +472,24 @@ class TestQuotaProbeCannotEmptyThePool:
         assert status == 401
         assert len(calls) == 1
         assert list(_parked(server).values()) == ["auth"]
+
+    @pytest.mark.asyncio
+    async def test_probe_still_parks_an_entitlement_rejection(self, fast_ladders: None) -> None:
+        """``entitlement`` is the other deterministic kind: a 403 plan rejection still parks on a probe."""
+        rejection = {
+            "type": "error",
+            "error": {"type": "permission_error", "message": "This model requires a subscription"},
+        }
+        server = _pool(_subscription_member("sub"), _minimax_member("mm-1", backup=True), relay=True)
+        status, _body, calls = await _send(
+            server,
+            {**_QUOTA_PROBE, "model": "claude-sonnet-4-6"},
+            {_ANTHROPIC_URL: _always(403, rejection), _MINIMAX_URL: _always(200, _OK_REPLY)},
+        )
+
+        assert status == 403
+        assert [url for url, _headers in calls] == [_ANTHROPIC_URL]
+        assert _parked(server) == {"sub": "entitlement"}
 
     @pytest.mark.asyncio
     async def test_probe_on_the_subscription_member_neither_walks_nor_falls_over(self, fast_ladders: None) -> None:
