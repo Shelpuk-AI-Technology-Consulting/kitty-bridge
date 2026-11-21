@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from typing import Any
 
 import aiohttp
@@ -343,11 +344,27 @@ class TestDeviceCodeContract:
 
 
 # KBR-326: float rounding allowance for the "never overshoots the budget"
-# assertions. ``deadline - now`` on a coarse clock can exceed the budget by a
-# few ULPs (5e-14 s seen on Windows CI). 1e-9 s is five orders of magnitude
-# above that and still far below any real overshoot: without the clamp the
-# sleep is the whole poll interval (seconds), so the assertions still fail.
-_CLOCK_ROUNDING = 1e-9
+# assertions. ``deadline = now + budget`` rounds to half an ULP *of the clock
+# reading*, so ``deadline - now`` can exceed the budget by that much on a clock
+# coarse enough to return the same reading twice (5e-14 s at the Windows CI
+# tick 511.8125). The error grows with the reading, and ``loop.time()`` is
+# uptime-based, so the allowance is derived from the clock rather than fixed:
+# two ULPs of the reading, plus a 1e-9 floor for the subtraction itself. On a
+# machine up for years that is still microseconds, far below a real overshoot:
+# without the clamp the sleep is the whole poll interval (seconds).
+_ROUNDING_FLOOR = 1e-9
+
+
+def _budget_allowance(clock_reading: float) -> float:
+    """Return how far float rounding can push a clamped sleep past its budget.
+
+    Args:
+        clock_reading: A ``loop.time()`` value taken during the flow.
+
+    Returns:
+        The tolerance, in seconds, to add to the budget in an overshoot check.
+    """
+    return _ROUNDING_FLOOR + 2 * math.ulp(abs(clock_reading))
 
 
 class _ScriptedClockAsyncio:
@@ -360,24 +377,46 @@ class _ScriptedClockAsyncio:
     """
 
     def __init__(self, *, start: float, requested: list[float]) -> None:
+        """Start the scripted clock.
+
+        Args:
+            start: The clock's first reading.
+            requested: Receives every duration passed to :meth:`sleep`.
+        """
         self._now = start
-        self._reads = 0
+        self._last: float | None = None
         self._requested = requested
         self.repeated_read = False
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate everything not scripted here to the real :mod:`asyncio`."""
         return getattr(asyncio, name)
 
     def get_running_loop(self) -> _ScriptedClockAsyncio:
+        """Return this stand-in, so ``get_running_loop().time()`` reads the scripted clock."""
         return self
 
     def time(self) -> float:
-        self._reads += 1
-        if self._reads == 2:
+        """Return the current reading.
+
+        Sets :attr:`repeated_read` when a reading equals the one before it --
+        the Windows coarse-clock condition the test reproduces -- so the test's
+        precondition fails if a later change makes the two reads differ.
+
+        Returns:
+            The scripted clock reading.
+        """
+        if self._last is not None and self._now == self._last:
             self.repeated_read = True
+        self._last = self._now
         return self._now
 
     async def sleep(self, seconds: float) -> None:
+        """Record the requested sleep and advance the clock instead of waiting.
+
+        Args:
+            seconds: The requested sleep duration.
+        """
         self._requested.append(seconds)
         self._now += seconds
         await asyncio.sleep(0)
@@ -635,12 +674,21 @@ class TestRunDeviceFlowEnd2End:
                 await run_oauth_device_flow()
 
         assert requested, "the poll loop must sleep between polls"
-        assert max(requested) <= 0.2 + _CLOCK_ROUNDING, "no single sleep may overshoot the total budget"
+        allowance = _budget_allowance(asyncio.get_running_loop().time())
+        assert max(requested) <= 0.2 + allowance, "no single sleep may overshoot the total budget"
 
+    @pytest.mark.parametrize(
+        "tick",
+        # The Windows CI tick, and one ~505 days into uptime whose overshoot
+        # (3e-9 s) a fixed 1e-9 allowance would have rejected.
+        [511.8125, 43620761.6],
+        ids=["ci-tick", "long-uptime"],
+    )
     async def test_final_sleep_clamp_survives_a_clock_that_repeats(
         self,
         codex_user_code_response: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
+        tick: float,
     ) -> None:
         """KBR-326: the Windows case, reproduced on any platform.
 
@@ -652,7 +700,6 @@ class TestRunDeviceFlowEnd2End:
         overshoot is float rounding, ~5e-14 s -- so the assertion allows
         rounding and nothing more.
         """
-        tick = 511.8125
         assert (tick + 0.2) - tick > 0.2, "precondition: this tick must round above the budget"
         requested: list[float] = []
         fake = _ScriptedClockAsyncio(start=tick, requested=requested)
@@ -666,10 +713,10 @@ class TestRunDeviceFlowEnd2End:
             with pytest.raises(OAuthTimeoutError):
                 await run_oauth_device_flow()
 
-        assert fake.repeated_read, "the scripted clock must have returned the same value twice"
+        assert fake.repeated_read, "the scripted clock must have returned the same reading twice in a row"
         assert requested, "the poll loop must sleep between polls"
         # Unclamped, the first sleep would be the 5 s poll interval.
-        assert max(requested) <= 0.2 + _CLOCK_ROUNDING, "no single sleep may overshoot the total budget"
+        assert max(requested) <= 0.2 + _budget_allowance(tick), "no single sleep may overshoot the total budget"
 
     async def test_session_closed_when_created_internally(
         self,
