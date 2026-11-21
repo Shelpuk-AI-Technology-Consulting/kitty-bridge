@@ -2943,9 +2943,11 @@ the repro pool. Two defects were behind it.
 
 ### 19.1 The rule
 
-- **Null-safe translation.** `translate_from_upstream` reads `content` and `usage` with `or []` /
-  `or {}`, skips non-dict blocks, and treats a null `text` as empty. `_is_empty_cc_response` does the
-  same, so a null-content reply is judged empty and takes the existing empty ladder.
+- **Null-safe translation.** `translate_from_upstream` treats a null `content` as empty, keeps a bare string
+  `content` as the model's text, logs a WARNING for any other non-list shape, skips non-dict blocks, and treats a
+  null `text` as empty; `usage` reads through `or {}`. `_is_empty_cc_response` judges the same shapes the same
+  way, so such a reply takes the existing empty ladder. A native Messages reply bypasses the translator, so
+  `_make_upstream_request` logs the same WARNING on its native return.
 - **Embedded errors take the error path.** `ProviderAdapter.embedded_error_status` (default `None`) lets
   an adapter name the HTTP status that a 2xx body stands for. Both MiniMax adapters implement it from
   `base_resp.status_code` (`minimax_embedded_error_status`): 1002/1039 map to 429, 1004 to 401, 1008 to
@@ -3019,6 +3021,8 @@ the repro pool. Two defects were behind it.
 mapping. Its bridge tests drive a translated `minimax_token` pool and a mixed subscription pool
 against scripted upstreams: a null-content reply parks nobody, an injected `TypeError` parks nobody and
 skips the ladder, an embedded 1002 fails over as `rate_limit`, a rate-limited probe makes one call and
-parks nobody, a 401 probe still parks `auth`, and a probe on the subscription member neither walks nor
-falls over. Regression guards check that a real turn still walks, parks and falls over. Hand-made
-breaks of each rule were confirmed to fail the module.
+parks nobody, a 401 probe still parks `auth`, a subscription member's 403 plan rejection still parks
+`entitlement`, a probe on the subscription member neither walks nor falls over, and a spent transport
+blip on that relay surfaces once without a park. Unit tests cover null, string and object `content` on
+both the translated and the native path. Regression guards check that a real turn still walks, parks and
+falls over. Hand-made breaks of each rule were confirmed to fail the module.

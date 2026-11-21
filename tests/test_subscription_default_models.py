@@ -73,7 +73,9 @@ def test_readme_names_the_declared_defaults() -> None:
     assert f"Model name (default: {openai_default})" in readme, "the Astra example's prompt must show the default"
     assert f"The wizards now suggest `{openai_default}`" in readme
     assert f"? Model: {openai_default}" in readme, "the setup example must show the declared default"
-    assert f"`{SUBSCRIPTION_DEFAULT_MODELS['anthropic_subscription']}`" in readme
+    assert (
+        f"the wizard's suggested default, `{SUBSCRIPTION_DEFAULT_MODELS['anthropic_subscription']}`" in readme
+    ), "README's Claude-default sentence must name the declared default"
     for line in readme.splitlines():
         is_model_prompt = "Model" in line and "(default: " in line
         assert not is_model_prompt or any(m in line for m in SUBSCRIPTION_DEFAULT_MODELS.values()), (

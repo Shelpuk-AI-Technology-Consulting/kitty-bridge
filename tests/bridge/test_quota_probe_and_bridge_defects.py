@@ -23,10 +23,12 @@ directory.
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import logging
 import uuid
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -37,7 +39,7 @@ from kitty.bridge.server import BridgeServer, _is_quota_probe
 from kitty.profiles.schema import Profile
 from kitty.providers.anthropic import AnthropicAdapter
 from kitty.providers.anthropic_subscription import AnthropicSubscriptionAdapter
-from kitty.providers.base import ProviderError
+from kitty.providers.base import ProviderAdapter, ProviderError
 from kitty.providers.minimax import MiniMaxAdapter, minimax_embedded_error_status
 from kitty.providers.minimax_token import MiniMaxTokenAnthropicAdapter
 
@@ -110,18 +112,20 @@ def fast_ladders(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server_module, "_EMPTY_FINAL_DELAYS", [0.01, 0.01])
 
 
-def _minimax_member(name: str, *, backup: bool = False) -> tuple:
-    """Build a translated MiniMax Token Plan member keyed by its own name.
+def _minimax_member(name: str, *, backup: bool = False, native: bool = False) -> tuple:
+    """Build a MiniMax Token Plan member keyed by its own name.
 
     Args:
         name: Profile name; also the member's API key, so calls can be attributed.
         backup: Whether the member is in the reserve tier.
+        native: Whether the member uses the native Messages passthrough
+            instead of the default translated path.
 
     Returns:
         A ``(provider, key, profile)`` balancing tuple.
     """
     return (
-        MiniMaxTokenAnthropicAdapter(),
+        MiniMaxTokenAnthropicAdapter(native_messages=native),
         f"key-{name}",
         Profile(
             name=name,
@@ -130,6 +134,94 @@ def _minimax_member(name: str, *, backup: bool = False) -> tuple:
             auth_ref=str(uuid.uuid4()),
             backup=backup,
         ),
+    )
+
+
+class _BrokenStreamProvider(ProviderAdapter):
+    """Custom-transport provider whose stream fails inside kitty's own code (a ``TypeError``)."""
+
+    use_custom_transport = True
+
+    @property
+    def provider_type(self) -> str:
+        """Name the provider in health attribution.
+
+        Returns:
+            The provider type string.
+        """
+        return "stub_broken_stream"
+
+    @property
+    def default_base_url(self) -> str:
+        """Give the never-contacted base URL.
+
+        Returns:
+            A placeholder URL; the provider fails before any I/O.
+        """
+        return "https://broken-stream.example.test"
+
+    def build_request(self, model: str, messages: list[dict], **kwargs: object) -> dict:
+        """Reflect the request through untouched.
+
+        Args:
+            model: The model name.
+            messages: The conversation.
+            **kwargs: Remaining request fields.
+
+        Returns:
+            The request fields as given.
+        """
+        return {"model": model, "messages": messages}
+
+    def parse_response(self, response_data: dict) -> dict:
+        """Return the payload unchanged.
+
+        Args:
+            response_data: The upstream payload.
+
+        Returns:
+            The same payload.
+        """
+        return response_data
+
+    def map_error(self, status_code: int, body: dict) -> Exception:
+        """Wrap a status into a provider error.
+
+        Args:
+            status_code: The upstream status.
+            body: The upstream body.
+
+        Returns:
+            A provider error carrying both.
+        """
+        return ProviderError(f"{status_code}: {body}")
+
+    async def stream_request(self, cc_request: dict, write) -> None:
+        """Fail the stream the way a bridge bug would.
+
+        Args:
+            cc_request: The upstream request.
+            write: The chunk sink; never called.
+
+        Raises:
+            TypeError: Always -- the defect class KBR-328 must not park on.
+        """
+        raise TypeError("'NoneType' object is not iterable")
+
+
+def _broken_stream_member(name: str) -> tuple:
+    """Build a custom-transport streaming member that always raises a bridge defect.
+
+    Args:
+        name: Profile name.
+
+    Returns:
+        A ``(provider, key, profile)`` balancing tuple.
+    """
+    return (
+        _BrokenStreamProvider(),
+        "",
+        Profile(name=name, provider="openai_subscription", model="m", auth_ref=str(uuid.uuid4())),
     )
 
 
@@ -356,6 +448,85 @@ class TestMiniMaxEmbeddedError:
         assert AnthropicAdapter().embedded_error_status(_BASE_RESP_RATE_LIMIT) is None
 
 
+_SERVER_PY = Path(__file__).resolve().parents[2] / "src" / "kitty" / "bridge" / "server.py"
+
+#: The six ``except Exception`` arms that classify a failure before parking: the
+#: non-streaming walk, its final empty ladder, and the four custom-transport
+#: streaming arms (Messages, Responses, Chat Completions, Gemini).
+_CLASSIFYING_ARMS = 6
+
+
+def _classifying_arm_assignments() -> list[tuple[int, ast.expr]]:
+    """Return each failure-kind assignment inside an ``except Exception`` arm that parks.
+
+    Returns:
+        ``(line, value)`` for every ``kind = ...`` / ``failure_kind = ...`` assignment
+        in a handler that also calls ``_mark_backend_unhealthy``.
+    """
+    tree = ast.parse(_SERVER_PY.read_text(encoding="utf-8"))
+    found: list[tuple[int, ast.expr]] = []
+    for handler in ast.walk(tree):
+        if not (isinstance(handler, ast.ExceptHandler) and isinstance(handler.type, ast.Name)):
+            continue
+        if handler.type.id != "Exception":
+            continue
+        parks = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_mark_backend_unhealthy"
+            for node in ast.walk(handler)
+        )
+        if not parks:
+            continue
+        found.extend(_kind_assignments(handler.body))
+    return found
+
+
+def _is_retryable_guard(node: ast.stmt) -> bool:
+    """Return True for ``if _is_retryable_exception(...):``, whose body only ever sees transport errors.
+
+    Args:
+        node: A statement.
+
+    Returns:
+        Whether the statement is that guard.
+    """
+    return (
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Call)
+        and isinstance(node.test.func, ast.Name)
+        and node.test.func.id == "_is_retryable_exception"
+    )
+
+
+def _kind_assignments(body: list[ast.stmt]) -> list[tuple[int, ast.expr]]:
+    """Collect failure-kind assignments in a block, skipping retryable-only subtrees.
+
+    Args:
+        body: The statements to search.
+
+    Returns:
+        ``(line, value)`` for each ``kind``/``failure_kind`` assignment found.
+    """
+    found: list[tuple[int, ast.expr]] = []
+    for stmt in body:
+        if _is_retryable_guard(stmt):
+            found.extend(_kind_assignments(stmt.orelse))
+            continue
+        if isinstance(stmt, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id in {"kind", "failure_kind"} for t in stmt.targets
+        ):
+            found.append((stmt.lineno, stmt.value))
+        for field in ("body", "orelse", "finalbody", "handlers"):
+            children = getattr(stmt, field, None)
+            if isinstance(children, list):
+                nested = [c for c in children if isinstance(c, ast.stmt)]
+                for handler in (c for c in children if isinstance(c, ast.ExceptHandler)):
+                    nested.extend(handler.body)
+                found.extend(_kind_assignments(nested))
+    return found
+
+
 class TestDefectClassification:
     """A programming error raised inside the bridge is a ``defect``, never ``hard``."""
 
@@ -375,6 +546,23 @@ class TestDefectClassification:
     def test_other_exceptions_stay_hard(self) -> None:
         assert BridgeServer._provider_error_failure_kind(RuntimeError("x")) == "hard"
 
+    def test_every_parking_arm_classifies_through_the_shared_classifier(self) -> None:
+        """All six arms reach the ``defect`` rule; one reverted to a literal kind fails here.
+
+        The behavioural tests drive two of the six (the non-streaming walk and the
+        Messages streaming arm). This holds the rest: a literal ``kind = "hard"``
+        anywhere would park a healthy member on that route again.
+        """
+        assignments = _classifying_arm_assignments()
+        literal = [line for line, value in assignments if not isinstance(value, ast.Call)]
+        assert not literal, f"server.py parks with a literal failure kind at lines {literal}"
+        classified = [
+            line
+            for line, value in assignments
+            if isinstance(value.func, ast.Attribute) and value.func.attr == "_provider_error_failure_kind"
+        ]
+        assert len(classified) == _CLASSIFYING_ARMS, f"expected {_CLASSIFYING_ARMS} classifying arms: {classified}"
+
 
 # ── Bridge: done-when 1 and 2 ─────────────────────────────────────────────
 
@@ -392,6 +580,20 @@ class TestTheCrashParksNobody:
         assert status == 502, body
         assert body["error"].get("reason") == "empty_response"
         assert calls, "the upstream must have been asked"
+        assert _parked(server) == {}
+
+    @pytest.mark.asyncio
+    async def test_native_object_content_is_logged_not_silently_emptied(
+        self, fast_ladders: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A native Messages reply skips the translator's warning, so the bridge logs its own."""
+        reply = {**_OK_REPLY, "content": {"text": "Answered."}}
+        server = _pool(_minimax_member("mm-1", native=True), _minimax_member("mm-2", native=True))
+        with caplog.at_level(logging.WARNING, logger="kitty.bridge.server"):
+            status, _body, _calls = await _send(server, _REAL_TURN, {_MINIMAX_URL: _always(200, reply)})
+
+        assert status == 502
+        assert any("not a list" in r.getMessage() for r in caplog.records)
         assert _parked(server) == {}
 
     @pytest.mark.asyncio
@@ -416,6 +618,18 @@ class TestTheCrashParksNobody:
         defect_records = [r for r in caplog.records if "bridge defect" in r.getMessage()]
         assert defect_records, "the defect must be logged"
         assert all(r.exc_info is not None for r in defect_records), "with its traceback"
+
+    @pytest.mark.asyncio
+    async def test_a_streaming_custom_transport_defect_parks_no_member(self, fast_ladders: None) -> None:
+        """The defect rule holds at a streaming custom-transport arm, not only the non-streaming walk.
+
+        That arm classifies with its own ``_provider_error_failure_kind`` call; reverting it to a
+        literal ``hard`` would park both members again.
+        """
+        server = _pool(_broken_stream_member("bs-1"), _broken_stream_member("bs-2"))
+        await _send(server, {**_REAL_TURN, "stream": True}, {})
+
+        assert _parked(server) == {}
 
     @pytest.mark.asyncio
     async def test_embedded_rate_limit_parks_as_rate_limit_and_fails_over(self, fast_ladders: None) -> None:
@@ -443,13 +657,19 @@ class TestQuotaProbeCannotEmptyThePool:
     """The probe gets one member, no walk, and parks only on deterministic evidence."""
 
     @pytest.mark.asyncio
-    async def test_rate_limited_probe_tries_one_member_and_parks_none(self, fast_ladders: None) -> None:
+    async def test_rate_limited_probe_tries_one_member_and_parks_none(
+        self, fast_ladders: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
         server = _pool(_minimax_member("mm-1"), _minimax_member("mm-2"), _minimax_member("mm-3"))
-        status, _body, calls = await _send(server, _QUOTA_PROBE, {_MINIMAX_URL: _always(429, _RATE_LIMITED)})
+        with caplog.at_level(logging.INFO, logger="kitty.bridge.server"):
+            status, _body, calls = await _send(server, _QUOTA_PROBE, {_MINIMAX_URL: _always(429, _RATE_LIMITED)})
 
         assert status == 429
         assert len(calls) == 1, "the probe must not walk the pool"
         assert _parked(server) == {}
+        # The log says what happened: one attempt of one, and no retry.
+        attempt_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Backend attempt")]
+        assert attempt_lines == ["Backend attempt 1/1 failed (status 429), the quota probe stops here"]
 
     @pytest.mark.asyncio
     async def test_the_same_failure_on_a_real_turn_still_walks_and_parks(self, fast_ladders: None) -> None:

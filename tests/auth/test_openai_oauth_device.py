@@ -349,9 +349,11 @@ class TestDeviceCodeContract:
 # coarse enough to return the same reading twice (5e-14 s at the Windows CI
 # tick 511.8125). The error grows with the reading, and ``loop.time()`` is
 # uptime-based, so the allowance is derived from the clock rather than fixed:
-# two ULPs of the reading, plus a 1e-9 floor for the subtraction itself. On a
-# machine up for years that is still microseconds, far below a real overshoot:
-# without the clamp the sleep is the whole poll interval (seconds).
+# two ULPs of the reading, plus a 1e-9 floor. Two ULPs suffice while the
+# budget stays small next to the reading, so the deadline crosses at most one
+# binade; the floor covers readings too small for that argument. At ten years
+# of uptime the allowance is ~1.2e-7 s, far below a real overshoot: without
+# the clamp the sleep is the whole poll interval (seconds).
 _ROUNDING_FLOOR = 1e-9
 
 
