@@ -136,6 +136,19 @@ class MiniMaxTokenAnthropicAdapter(AnthropicAdapter):
         return super().translate_to_upstream(cc_request)
 
     def embedded_error_status(self, response_data: object) -> int | None:
+        """Report the HTTP status a ``base_resp`` error inside a 2xx body stands for.
+
+        MiniMax answers some failures with HTTP 200 and the real outcome in
+        ``base_resp.status_code``, which is why this adapter reports an
+        embedded error where its siblings return ``None`` (KBR-328).
+
+        Args:
+            response_data: The parsed upstream reply body, any JSON type.
+
+        Returns:
+            The equivalent HTTP status, or ``None`` when the reply is not an
+            error. Delegates to :func:`minimax_embedded_error_status`.
+        """
         return minimax_embedded_error_status(response_data)
 
     def translate_from_upstream(self, raw_response: dict) -> dict:

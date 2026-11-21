@@ -181,7 +181,8 @@ async def _send(server: BridgeServer, request: dict, routes: dict[str, object]) 
     Args:
         server: An unstarted bridge.
         request: The inbound Messages body.
-        routes: Maps an upstream URL to a responder ``(body, headers) -> (status, reply)``.
+        routes: Maps an upstream URL to a responder ``(body, headers) -> (status, reply)``,
+            or to an exception instance the upstream raises on every call.
 
     Returns:
         ``(client_status, client_body, upstream_calls)``; each call is ``(url, headers)``.
@@ -192,6 +193,8 @@ async def _send(server: BridgeServer, request: dict, routes: dict[str, object]) 
         def respond(_url, **kwargs):
             headers = dict(kwargs.get("headers") or {})
             calls.append((url, headers))
+            if isinstance(answer, BaseException):
+                raise answer
             status, reply = answer(copy.deepcopy(kwargs.get("json")), headers)
             return CallbackResult(status=status, content_type="application/json", body=json.dumps(reply))
 
@@ -467,6 +470,31 @@ class TestQuotaProbeCannotEmptyThePool:
         )
 
         assert status == 429, body
+        assert [url for url, _headers in calls] == [_ANTHROPIC_URL]
+        assert _parked(server) == {}
+
+    @pytest.mark.asyncio
+    async def test_probe_relay_transport_failure_surfaces_once_and_parks_none(
+        self, fast_ladders: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A spent transport blip on the probe re-raises: no re-selection, no park, no hang.
+
+        The relay loop advances only by parking, which the probe suppresses, so
+        without the probe's ``raise`` this would re-select the same healthy
+        member forever (the module's timeout turns that into a failure).
+        """
+        monkeypatch.setattr(server_module, "_TRANSPORT_GRACE_DELAYS", ())
+        server = _pool(_subscription_member("sub"), _minimax_member("mm-1", backup=True), relay=True)
+        status, _body, calls = await _send(
+            server,
+            {**_QUOTA_PROBE, "model": "claude-sonnet-4-6"},
+            {
+                _ANTHROPIC_URL: aiohttp.ClientConnectionError("connection reset"),
+                _MINIMAX_URL: _always(200, _OK_REPLY),
+            },
+        )
+
+        assert status >= 500
         assert [url for url, _headers in calls] == [_ANTHROPIC_URL]
         assert _parked(server) == {}
 
